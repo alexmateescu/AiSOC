@@ -109,6 +109,11 @@ async def db():
 
 async def _teardown(session) -> None:
     await session.rollback()
+    # aisoc_cases.tenant_id is uuid; legacy tables keep text tenant ids.
+    await session.execute(
+        text("DELETE FROM aisoc_cases WHERE tenant_id = ANY(:ids)"),
+        {"ids": list(_ALL_TENANTS)},
+    )
     for table in ("alerts", "cases", "connectors"):
         await session.execute(
             text(f"DELETE FROM {table} WHERE tenant_id = ANY(:ids)"),
@@ -405,10 +410,10 @@ async def test_mttr_is_null_rather_than_zero_when_nothing_closed(db) -> None:
 
     await db.execute(
         text(
-            "INSERT INTO cases (tenant_id, case_number, title, status, created_at, closed_at) "
+            "INSERT INTO aisoc_cases (tenant_id, case_number, title, status, created_at, closed_at) "
             "VALUES (:a, :num, 'closed case', 'closed', now() - interval '30 minutes', now())"
         ),
-        {"a": str(TENANT_A), "num": f"ISO-{uuid.uuid4().hex[:8]}"},
+        {"a": TENANT_A, "num": f"ISO-{uuid.uuid4().hex[:8]}"},
     )
     await db.commit()
 
