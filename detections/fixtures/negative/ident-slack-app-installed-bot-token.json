@@ -1,0 +1,4 @@
+{
+  "action": "disabled",
+  "scopes": "prefix-chat:write.public-suffix"
+}

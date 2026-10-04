@@ -1,0 +1,319 @@
+"""Live detection-evaluation engine (Phase A2).
+
+The reality audit's second SIEM gap: ~939 executable detection rules existed
+but only ran in CI fixture-replay — **nothing evaluated them against the live
+event stream**, so telemetry that wasn't a vendor-asserted finding (the
+promoter's job) never became an alert.
+
+This engine closes that. It loads the exported native ruleset
+(``app/data/detection_ruleset.json``, produced by
+``scripts/export_detection_ruleset.py``) and evaluates each ingested event's
+recovered raw fields against every relevant rule's ``match_when`` (via the
+vendored :func:`app.services.detection_matcher.matches`). A match becomes a
+:class:`DetectionHit` that the fusion consumer turns into a ``RawAlert`` and
+routes through the normal dedup/correlate/persist pipeline.
+
+Field alignment (verified against the normalizer): the ingest pipeline
+preserves the connector-normalized flat event under ``ocsf_event["raw_data"]``
+as a JSON string. The native ``match_when`` specs were authored against exactly
+those flat connector fields, so ``matches(rule.match_when, json.loads(raw_data))``
+is the correct evaluation contract.
+
+Performance: every event is evaluated against the **whole corpus**. A
+product-based pre-filter was tried and removed, because connector product
+names do not line up with spec products (``aws_cloudtrail`` against ``aws``,
+``crowdstrike_falcon`` against ``edr``) and any such filter silently drops
+real matches. See ``_candidates``, which returns ``self._rules`` unchanged
+and records that reasoning. The full pass is cheap because the matcher
+short-circuits on the first absent field, so a benign event touches almost
+no rule past its first clause. The engine is pure and synchronous; the
+consumer calls it inline.
+
+Indexing by log source is parity plan 6.9, and it has to solve the
+product-name mapping first.
+"""
+
+from __future__ import annotations
+
+import json
+import uuid
+from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
+from typing import Any
+
+import structlog
+
+from app.models.alert import AlertSeverity, RawAlert
+from app.services.derived_fields import enrich, requested_derived_fields
+from app.services.detection_matcher import matches
+from app.services.provenance import extract_provenance
+
+logger = structlog.get_logger()
+
+_DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+_RULESET_PATH = _DATA_DIR / "detection_ruleset.json"
+#: Imported rules translated into `match_when` by `scripts/compile_sigma_ruleset.py`.
+#: Held in a second file rather than merged into the one above so that the
+#: exporter's drift check keeps comparing the hand-authored specs against
+#: exactly what they generate. Both are loaded here, so "executable" still
+#: means "the engine loads it".
+_IMPORTED_RULESET_PATH = _DATA_DIR / "detection_ruleset_imported.json"
+
+_SEVERITY_MAP = {
+    "critical": AlertSeverity.CRITICAL,
+    "high": AlertSeverity.HIGH,
+    "medium": AlertSeverity.MEDIUM,
+    "low": AlertSeverity.LOW,
+    "info": AlertSeverity.INFO,
+}
+
+
+@dataclass(frozen=True)
+class DetectionHit:
+    rule_id: str
+    name: str
+    severity: str
+    category: str
+    mitre: list[str]
+    #: Upstream credit for a rule translated from an imported corpus, empty for
+    #: AiSOC's own. DRL-1.1 — which the imported Sigma corpus is licensed under
+    #: — requires not only that redistribution keep attribution, but that
+    #: *messages produced by a match* identify the rule's author. An alert is
+    #: such a message, so the attribution has to reach it.
+    attribution: str = ""
+
+
+def _get(obj: Any, *path: str) -> Any:
+    cur: Any = obj
+    for key in path:
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(key)
+    return cur
+
+
+class DetectionEngine:
+    """Evaluates the native executable corpus against live events."""
+
+    def __init__(self, rules: list[dict[str, Any]] | None = None) -> None:
+        self._rules: list[dict[str, Any]] = rules if rules is not None else _load_ruleset()
+        # Computed once at load, not per event: the set changes when rules
+        # change, not when traffic arrives. Doing it per event would mean a
+        # regex over every rule's clauses for every ingested event.
+        self._derived_wanted: set[str] = requested_derived_fields(self._rules)
+
+    @property
+    def rule_count(self) -> int:
+        return len(self._rules)
+
+    def _candidates(self, product: str) -> list[dict[str, Any]]:
+        # Correctness-first routing: evaluate the whole corpus against every
+        # event. Connector product names don't line up 1:1 with spec products
+        # (``aws_cloudtrail`` vs ``aws``, ``crowdstrike_falcon`` vs ``edr``), so
+        # any product-based pre-filter risks silently dropping a real match.
+        # The matcher short-circuits on the first absent field, so a full pass
+        # over ~800 rules is cheap in practice (a benign event touches almost
+        # none of them past the first clause).
+        return self._rules
+
+    @staticmethod
+    def _raw_fields(ocsf: dict[str, Any]) -> dict[str, Any]:
+        """Recover the flat field namespace the specs match on.
+
+        `raw_data` carries the connector's own normalized dict, and connectors
+        put the untouched vendor payload under `raw_event`. The matcher does a
+        plain `event.get(field)` with no path traversal, so a rule naming a
+        vendor field — `request_uri`, `target_image`, `call_trace` — read
+        `None` and could never fire, however correct the rule was.
+
+        The scale of that was not obvious: 663 of the 825 loaded rules
+        referenced at least one field that was not visible, and fixture replay
+        could not catch any of them because fixtures are synthesized from the
+        rule rather than from real telemetry.
+
+        The workaround in use was per-field hoisting inside individual
+        connectors, e.g. in `llm_usage.normalize()`:
+
+            # Emit the dotted event_type at the TOP LEVEL so the llm-*
+            # detection rules (which match on `event_type`) fire
+
+        which only ever fixed the one field someone noticed. Merging the nested
+        payload once, here, fixes the class.
+
+        Connector-normalized keys win on collision. The connector has already
+        made a deliberate decision about `severity` or `title`, and a vendor
+        field of the same name must not silently override it.
+        """
+        fields = DetectionEngine._decode_raw_data(ocsf)
+
+        nested = fields.get("raw_event")
+        if isinstance(nested, dict):
+            merged = {k: v for k, v in nested.items() if isinstance(k, str)}
+            merged.update(fields)
+            return merged
+        return fields
+
+    @staticmethod
+    def _decode_raw_data(ocsf: dict[str, Any]) -> dict[str, Any]:
+        """The connector's normalized dict, or the OCSF top level as fallback."""
+        raw = ocsf.get("raw_data")
+        if isinstance(raw, str) and raw.strip():
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict):
+                    return parsed
+            except (ValueError, TypeError):
+                # Malformed raw_data JSON — fall through to the OCSF top level below.
+                pass
+        # Fall back to the OCSF top level (some connectors emit flat OCSF).
+        return ocsf if isinstance(ocsf, dict) else {}
+
+    def evaluate(self, message: dict[str, Any], overlay: Any | None = None) -> list[DetectionHit]:
+        """Return every rule that fires on this normalized-event message.
+
+        `overlay` is the tenant's tuning (parity 5.4). Without it this
+        engine evaluated the shared corpus and nothing else, so a tenant
+        who disabled a noisy rule in the console kept receiving its alerts
+        while the console showed it disabled.
+
+        Applied **after** the match rather than by filtering the candidate
+        list, so a suppressed hit can be recorded with the tuning that
+        suppressed it. "No alert" with no explanation is indistinguishable
+        from a rule that simply did not match.
+        """
+        ocsf = message.get("ocsf_event")
+        if not isinstance(ocsf, dict):
+            return []
+        fields = self._raw_fields(ocsf)
+        # 17 rules match on comparisons between two fields of the same event
+        # (actor_eq_target, actor_uid_neq_owner_uid) or on time of day. Both
+        # values were already present and nothing was computing the answer,
+        # so those rules could never fire.
+        fields = enrich(fields, self._derived_wanted)
+
+        # Parity 5.5. 15 rules read an `<x>_in_allowlist` boolean that
+        # nothing computed, so they could never fire. The answer is per
+        # tenant, which is why it comes from the overlay rather than from
+        # the shared derived-field pass: a global allowlist would make one
+        # tenant's exceptions apply to everybody.
+        #
+        # An unconfigured allowlist contributes **no key**, not False. A
+        # `not_in_allowlist` clause against a missing key would be true for
+        # every event, which is the negation-flips-on-absence failure the
+        # Sigma import already recorded.
+        if overlay is not None:
+            derived = overlay.derived_allowlist_fields(fields)
+            if derived:
+                fields = {**fields, **derived}
+
+        hits: list[DetectionHit] = []
+        for rule in self._candidates(""):
+            try:
+                if matches(rule["match_when"], fields):
+                    if overlay is not None:
+                        suppressed = overlay.suppresses(rule["id"], fields)
+                        if suppressed is None:
+                            suppressed = overlay.raises_severity_floor(rule["id"], str(rule.get("severity") or ""))
+                        if suppressed:
+                            # Info, not debug. A tenant asking why they
+                            # stopped seeing a detection gets the tuning,
+                            # its author and its reason from the log.
+                            logger.info(
+                                "detection_engine.suppressed_by_tenant_tuning",
+                                rule=rule["id"],
+                                tenant=getattr(overlay, "tenant_id", ""),
+                                reason=suppressed,
+                            )
+                            continue
+                    hits.append(
+                        DetectionHit(
+                            rule_id=rule["id"],
+                            name=rule["name"],
+                            severity=rule["severity"],
+                            category=rule["category"],
+                            mitre=list(rule.get("mitre") or []),
+                            attribution=_attribution(rule),
+                        )
+                    )
+            except Exception as exc:  # noqa: BLE001 — one bad rule must not wedge detection
+                logger.debug("detection_engine.rule_error", rule=rule.get("id"), error=str(exc))
+        return hits
+
+    def build_alert(self, message: dict[str, Any], hit: DetectionHit) -> RawAlert | None:
+        """Turn a detection hit into a RawAlert for the fusion pipeline."""
+        ocsf = message.get("ocsf_event") or {}
+        tenant_raw = message.get("tenant_id") or ocsf.get("tenant_uid")
+        try:
+            tenant_id = uuid.UUID(str(tenant_raw))
+        except (ValueError, TypeError):
+            return None
+        connector_id, connector_type, class_uid = extract_provenance(message, ocsf)
+        return RawAlert(
+            tenant_id=tenant_id,
+            source=f"detection:{hit.rule_id}",
+            title=hit.name,
+            description=(
+                f"Detection rule {hit.rule_id} ({hit.category}) fired on ingested telemetry."
+                + (f" {hit.attribution}" if hit.attribution else "")
+            ),
+            severity=_SEVERITY_MAP.get(hit.severity, AlertSeverity.MEDIUM),
+            src_ip=_get(ocsf, "src_endpoint", "ip"),
+            dst_ip=_get(ocsf, "dst_endpoint", "ip"),
+            hostname=_get(ocsf, "device", "name"),
+            username=_get(ocsf, "actor", "user", "name"),
+            mitre_techniques=hit.mitre,
+            raw_event=ocsf,
+            connector_id=connector_id,
+            connector_type=connector_type,
+            ocsf_class_uid=class_uid,
+            rule_id=hit.rule_id,
+            rule_name=hit.name,
+        )
+
+
+def _attribution(rule: dict[str, Any]) -> str:
+    """One sentence crediting an imported rule's upstream, or empty.
+
+    Built from whatever the provenance block actually holds rather than from a
+    template with blanks, so a missing author reads as a shorter sentence
+    instead of as an author called "".
+    """
+    prov = rule.get("provenance")
+    if not isinstance(prov, dict) or not prov.get("source"):
+        return ""
+    parts = [f"Translated from {prov['source']}"]
+    if prov.get("author"):
+        parts.append(f"by {prov['author']}")
+    if prov.get("upstream_path"):
+        parts.append(f"({prov['upstream_path']})")
+    licence = prov.get("license")
+    tail = f", licensed under {licence}" if licence else ""
+    url = prov.get("license_url")
+    return " ".join(parts) + tail + (f" <{url}>" if url else "") + "."
+
+
+def _read_ruleset(path: Path, *, required: bool) -> list[dict[str, Any]]:
+    if not path.exists():
+        if required:
+            logger.warning("detection_engine.ruleset_missing", path=str(path))
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data.get("rules") or []
+    except (ValueError, OSError) as exc:
+        logger.error("detection_engine.ruleset_load_failed", path=str(path), error=str(exc))
+        return []
+
+
+@lru_cache(maxsize=1)
+def _load_ruleset() -> list[dict[str, Any]]:
+    native = _read_ruleset(_RULESET_PATH, required=True)
+    imported = _read_ruleset(_IMPORTED_RULESET_PATH, required=False)
+    logger.info(
+        "detection_engine.ruleset_loaded",
+        count=len(native) + len(imported),
+        native=len(native),
+        imported=len(imported),
+    )
+    return native + imported

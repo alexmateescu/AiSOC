@@ -1,0 +1,344 @@
+'use client';
+
+import { useState } from 'react';
+import useSWR from 'swr';
+import Link from 'next/link';
+import toast from 'react-hot-toast';
+import { casesApi, type Case, type CasesResponse } from '@/lib/api';
+import { CASE_STATUS_GROUPS, statusInGroup, statusMeta, type CaseStatusGroup } from '@/lib/caseStatus';
+import { clsx } from 'clsx';
+import { format } from 'date-fns';
+import { EmptyState, EmptyStateIcons } from '@/components/ui/EmptyState';
+import { SavedViewsBar } from '@/components/saved-views/SavedViewsBar';
+import { demoFallback } from '@/lib/demoFallback';
+
+// WS-F3 — the saved-views API stores an opaque filter blob per view, so we
+// flatten the three filter slices Cases tracks today into a single shape the
+// bar can snapshot and replay. Nothing else in the view consumes this — it's
+// purely the wire format between the bar and the local state setters.
+type CaseFilterSnapshot = {
+  status: FilterStatus;
+  severity: Case['severity'] | 'all';
+  search: string;
+};
+
+// ─── Mock Data ────────────────────────────────────────────────────────────────
+
+// Deterministic mock data — no Date.now() or Math.random() to avoid SSR hydration mismatches.
+const MOCK_CASE_BASE = new Date('2026-05-06T12:00:00Z').getTime();
+const MOCK_CASES: Case[] = Array.from({ length: 18 }, (_, i) => ({
+  id: `case-${1000 + i}`,
+  title: [
+    'Ransomware incident on finance workstations',
+    'Suspected APT lateral movement campaign',
+    'Credential stuffing attack against portal',
+    'Data exfiltration via cloud storage abuse',
+    'Supply chain compromise investigation',
+    'Insider threat: anomalous data access',
+    'Phishing campaign targeting executives',
+    'Cryptominer on dev server cluster',
+    'Brute-force attack on VPN endpoints',
+    'Unauthorized cloud resource provisioning',
+  ][i % 10],
+  status: (['new', 'investigating', 'resolved', 'closed'] as Case['status'][])[i % 4],
+  severity: (['critical', 'high', 'medium', 'low'] as Case['severity'][])[i % 4],
+  assignee: ['alice@company.com', 'bob@company.com', 'carol@company.com', undefined][i % 4],
+  alertCount: ((i * 13 + 7) % 30) + 1,
+  createdAt: new Date(MOCK_CASE_BASE - i * 7200000).toISOString(),
+  updatedAt: new Date(MOCK_CASE_BASE - i * 1800000).toISOString(),
+  tags: [['ransomware', 'finance'], ['apt', 'lateral'], ['credential', 'portal'], ['exfil', 'cloud']][i % 4],
+}));
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+const SEVERITY_CONFIG = {
+  critical: { label: 'Critical', className: 'text-red-400 bg-red-500/10 border-red-500/20' },
+  high: { label: 'High', className: 'text-orange-400 bg-orange-500/10 border-orange-500/20' },
+  medium: { label: 'Medium', className: 'text-yellow-400 bg-yellow-500/10 border-yellow-500/20' },
+  low: { label: 'Low', className: 'text-blue-400 bg-blue-500/10 border-blue-500/20' },
+};
+
+// Status labels/colors come exclusively from `@/lib/caseStatus` — do not
+// re-declare them here.
+
+// ─── Case Card ────────────────────────────────────────────────────────────────
+
+function CaseCard({ c }: { c: Case }) {
+  const sev = SEVERITY_CONFIG[c.severity] ?? SEVERITY_CONFIG.medium;
+  // Canonical lookup — `statusMeta` never returns undefined, so a stray
+  // legacy spelling can never blank the list.
+  const sts = statusMeta(c.status);
+  const displayId = c.caseNumber ?? `${c.id ?? ''}`.slice(-6);
+  const detailHref = `/cases/${encodeURIComponent(c.caseNumber ?? c.id)}`;
+
+  return (
+    <Link href={detailHref} className="block">
+      <div className="bg-gray-900/60 border border-gray-800/60 rounded-xl p-5 hover:border-gray-700 hover:bg-gray-900/80 transition-all group">
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2 mb-2">
+              <span className={clsx('text-xs font-medium px-2 py-0.5 rounded border', sev.className)}>
+                {sev.label}
+              </span>
+              <span className={clsx('flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded border', sts.pill)}>
+                <span className={clsx('w-1.5 h-1.5 rounded-full', sts.dot)} />
+                {sts.label}
+              </span>
+            </div>
+            <h3 className="text-sm font-medium text-gray-200 group-hover:text-white truncate">{c.title}</h3>
+            <div className="flex items-center gap-3 mt-2">
+              <span className="text-xs text-gray-500">#{displayId}</span>
+              <span className="text-xs text-gray-500">·</span>
+              <span className="text-xs text-gray-500">{c.alertCount ?? 0} alerts</span>
+              {c.assignee && (
+                <>
+                  <span className="text-xs text-gray-500">·</span>
+                  <span className="text-xs text-gray-400">{c.assignee.split('@')[0]}</span>
+                </>
+              )}
+            </div>
+          </div>
+          <div className="text-right shrink-0 flex flex-col items-end gap-2">
+            <p className="text-xs text-gray-500" suppressHydrationWarning>{format(new Date(c.createdAt), 'MMM dd, HH:mm')}</p>
+            {c.tags && c.tags.length > 0 && (
+              <div className="flex flex-wrap gap-1 justify-end">
+                {c.tags.slice(0, 2).map((tag) => (
+                  <span key={tag} className="text-xs text-gray-500 bg-gray-800 px-1.5 py-0.5 rounded">
+                    {tag}
+                  </span>
+                ))}
+              </div>
+            )}
+            <button
+              onClick={(e) => {
+                e.preventDefault();
+                toast.success('Incident report generated — downloading PDF');
+              }}
+              className="flex items-center gap-1 text-xs text-gray-500 hover:text-blue-400 transition-colors opacity-0 group-hover:opacity-100"
+            >
+              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+              </svg>
+              Export Report
+            </button>
+          </div>
+        </div>
+      </div>
+    </Link>
+  );
+}
+
+// ─── Main View ────────────────────────────────────────────────────────────────
+
+type FilterStatus = CaseStatusGroup['key'];
+
+export function CasesView() {
+  const [statusFilter, setStatusFilter] = useState<FilterStatus>('all');
+  const [severityFilter, setSeverityFilter] = useState<Case['severity'] | 'all'>('all');
+  const [search, setSearch] = useState('');
+
+  // This view took an `initialCases` prop fed by a server-side fetch in
+  // `cases/page.tsx`. That fetch sent no credential and a build-time tenant
+  // id, so it returned one fixed tenant's cases to whoever loaded the page,
+  // and it only returned anything at all because an uncredentialed request
+  // resolved to a demo administrator. A server render has no session to
+  // borrow, so it was removed rather than repaired; the list now loads
+  // through the credentialed client on mount, under the caller's own
+  // identity.
+  const sampleCases = demoFallback<CasesResponse>({
+    cases: MOCK_CASES,
+    total: MOCK_CASES.length,
+    page: 1,
+    pageSize: MOCK_CASES.length,
+  });
+
+  const { data: casesData, error, isLoading } = useSWR(
+    ['cases', 'all'],
+    () => casesApi.list(),
+    {
+      fallbackData: sampleCases,
+      revalidateOnMount: true,
+    }
+  );
+
+  // Status filtering is client-side over the canonical vocabulary: the stat
+  // cards/chips are display groups (Open = new+triaged, In Progress =
+  // investigating+contained), and the API `status` filter takes a single
+  // value — filtering here keeps groups and counts always reconciling.
+  const activeGroup = CASE_STATUS_GROUPS.find((g) => g.key === statusFilter) ?? CASE_STATUS_GROUPS[0];
+  const cases = (casesData?.cases || []).filter((c) => {
+    if (!statusInGroup(c.status, activeGroup)) return false;
+    if (search && !c.title.toLowerCase().includes(search.toLowerCase())) return false;
+    if (severityFilter !== 'all' && c.severity !== severityFilter) return false;
+    return true;
+  });
+
+  const allCases = casesData?.cases ?? [];
+  // Substituting `[]` for MOCK_CASES stopped the fabrication but moved the
+  // defect: the grid sits above the `isLoading` branch, so five confident
+  // zeros rendered on first paint and stayed there when the read failed.
+  const countsUnknown = !casesData;
+  const statCounts: Record<FilterStatus, number | null> = countsUnknown
+    ? { all: null, open: null, in_progress: null, resolved: null, closed: null }
+    : Object.fromEntries(
+        CASE_STATUS_GROUPS.map((g) => [
+          g.key,
+          allCases.filter((c) => statusInGroup(c.status, g)).length,
+        ]),
+      ) as Record<FilterStatus, number>;
+
+  return (
+    <div className="space-y-5">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-xl font-semibold text-gray-100">Cases</h1>
+          <p className="text-sm text-gray-500 mt-0.5">Manage security investigations and incidents</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            disabled
+            title="Case creation wizard is planned for v1.1"
+            className="flex items-center gap-2 bg-gray-700 text-gray-400 text-sm font-medium px-4 py-2 rounded-lg cursor-not-allowed select-none"
+          >
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+            </svg>
+            New Case
+          </button>
+          <span className="text-xs font-medium rounded-full bg-amber-500/15 text-amber-400 border border-amber-500/30 px-2 py-0.5">
+            Planned for v1.1
+          </span>
+        </div>
+      </div>
+
+      {/* Stats */}
+      <div className="grid grid-cols-5 gap-3">
+        {CASE_STATUS_GROUPS.map((g) => {
+          return (
+            <button
+              key={g.key}
+              onClick={() => setStatusFilter(g.key)}
+              className={clsx(
+                'bg-gray-900/60 border rounded-xl p-4 text-left transition-all',
+                statusFilter === g.key ? 'border-blue-500/50 bg-blue-500/5' : 'border-gray-800/60 hover:border-gray-700'
+              )}
+            >
+              <p className={clsx('text-2xl font-bold', statCounts[g.key] === null ? 'text-gray-600' : 'text-gray-100')}>
+                {statCounts[g.key] === null ? '—' : statCounts[g.key]}
+              </p>
+              {/* Label verbatim from the canonical map — never CSS-cased. */}
+              <p className="text-xs text-gray-500 mt-0.5">{g.label}</p>
+            </button>
+          );
+        })}
+      </div>
+
+      {/*
+        WS-F3 — saved views. Cases keeps three slices of filter state, so we
+        synthesize a single object for the bar and unpack it on apply. We
+        spread defaults to be defensive against older saved-view payloads
+        that might be missing newer keys.
+      */}
+      <SavedViewsBar<CaseFilterSnapshot>
+        viewType="cases"
+        filters={{
+          status: statusFilter,
+          severity: severityFilter,
+          search,
+        }}
+        onApply={(applied) => {
+          setStatusFilter(applied.status ?? 'all');
+          setSeverityFilter(applied.severity ?? 'all');
+          setSearch(applied.search ?? '');
+        }}
+      />
+
+      {/* Filters */}
+      <div className="flex items-center gap-3">
+        <div className="relative flex-1 max-w-sm">
+          <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+          </svg>
+          <input
+            type="text"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search cases…"
+            className="w-full pl-9 pr-4 py-2 bg-gray-900/60 border border-gray-800 rounded-lg text-sm text-gray-300 placeholder-gray-600 focus:outline-none focus:border-blue-500/50"
+          />
+        </div>
+
+        <select
+          value={severityFilter}
+          onChange={(e) => setSeverityFilter(e.target.value as Case['severity'] | 'all')}
+          className="bg-gray-900/60 border border-gray-800 rounded-lg text-sm text-gray-400 px-3 py-2 focus:outline-none focus:border-blue-500/50"
+        >
+          <option value="all">All Severities</option>
+          <option value="critical">Critical</option>
+          <option value="high">High</option>
+          <option value="medium">Medium</option>
+          <option value="low">Low</option>
+        </select>
+
+        {/* The same `countsUnknown` the five stat cards above already honour.
+            This one printed `0 cases` beside their five em-dashes, so the
+            page gave two different answers about the same unread list — and
+            the confident one was the wrong one, because a zero reads as
+            measured-and-none rather than not-measured. */}
+        <span
+          className="text-xs text-gray-500"
+          title={countsUnknown ? 'The case service has not answered, so there is no count to show.' : undefined}
+        >
+          {countsUnknown ? '— cases' : `${cases.length} cases`}
+        </span>
+      </div>
+
+      {/* Cases List */}
+      {isLoading ? (
+        <div className="flex items-center justify-center h-48">
+          <div className="w-6 h-6 border-2 border-blue-500/30 border-t-blue-500 rounded-full animate-spin" />
+        </div>
+      ) : error && !casesData ? (
+        <EmptyState
+          icon={EmptyStateIcons.case}
+          title="Could not load cases"
+          description="The case service did not answer. This is not a report that no cases exist — retry, or check the API is reachable."
+        />
+      ) : cases.length === 0 ? (
+        // WS-F5 — distinguish "filter miss" from "no cases ever". The former
+        // gets a "clear filters" CTA; the latter explains what cases are and
+        // where they come from so a brand-new tenant doesn't think it's broken.
+        statusFilter !== 'all' || severityFilter !== 'all' || search ? (
+          <EmptyState
+            icon={EmptyStateIcons.search}
+            title="No cases match these filters"
+            description="Try clearing the status, severity, or search filter to widen the view."
+            action={
+              <button
+                onClick={() => {
+                  setStatusFilter('all');
+                  setSeverityFilter('all');
+                  setSearch('');
+                }}
+                className="text-xs px-3 py-1.5 rounded-md border border-blue-500/40 bg-blue-500/10 text-blue-300 hover:bg-blue-500/20 transition-colors"
+              >
+                Clear filters
+              </button>
+            }
+          />
+        ) : (
+          <EmptyState
+            icon={EmptyStateIcons.case}
+            title="No cases yet"
+            description="Cases bundle related alerts, evidence, and analyst notes into a single investigation. Promote alerts to a case from the Alerts tab, or click ‘New Case’ to start a manual investigation."
+          />
+        )
+      ) : (
+        <div className="grid grid-cols-1 gap-3">
+          {cases.map((c) => <CaseCard key={c.id} c={c} />)}
+        </div>
+      )}
+    </div>
+  );
+}

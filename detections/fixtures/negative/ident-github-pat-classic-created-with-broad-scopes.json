@@ -1,0 +1,4 @@
+{
+  "action": "disabled",
+  "scopes": "repo workflow admin:org"
+}

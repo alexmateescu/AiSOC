@@ -1,0 +1,23 @@
+{
+  "executable": 2603,
+  "onDisk": 6991,
+  "quarantined": 4388,
+  "plugins": 77,
+  "playbookPacks": 62,
+  "playbooks": 87,
+  "marketplaceItems": 7155,
+  "categories": {
+    "application": 86,
+    "cloud": 257,
+    "data-exfil": 20,
+    "endpoint": 1983,
+    "identity": 176,
+    "network": 81
+  },
+  "generatedFrom": [
+    "services/fusion/app/data/detection_ruleset.json",
+    "marketplace/index.json",
+    "docs/detections/truth-table.md"
+  ],
+  "regenerateWith": "python3 scripts/generate_corpus_stats.py"
+}
