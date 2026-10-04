@@ -115,6 +115,9 @@ class SourceThreat(BaseModel):
 
 
 class DashboardMetrics(BaseModel):
+    # Echo of the window volume metrics were scoped to, so the console can
+    # label panels from the payload instead of its own guess.
+    period: str = "24h"
     alerts: AlertMetrics
     cases: CaseMetrics
     sources: list[SourceStat]
@@ -267,22 +270,46 @@ class PipelineHealth(BaseModel):
 async def get_dashboard_metrics(
     user: AuthUser,
     db: DBSession,
+    period: str = Query(
+        "24h",
+        description="Window for volume-style metrics: 1h | 24h | 7d | 30d.",
+    ),
 ) -> DashboardMetrics:
-    """Return aggregated KPI metrics for the dashboard overview tiles."""
+    """Return aggregated KPI metrics for the dashboard overview tiles.
+
+    ``period`` scopes the *volume* metrics (alert totals, severity pie,
+    MITRE ranking, alerts-by-source, the volume trend, and case
+    opened/closed) to the selected window so the console can switch
+    1h/24h/7d/30d honestly. It deliberately does NOT scope ``active`` /
+    ``criticalActive``: unresolved risk is visible regardless of how old
+    it is — a 24h window must never hide yesterday's open critical.
+    """
     tenant_id = user.tenant_id
     now = datetime.now(UTC)
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     week_start = now - timedelta(days=7)
 
+    _period_map: dict[str, tuple[timedelta, str]] = {
+        "1h": (timedelta(hours=1), "minute"),
+        "24h": (timedelta(hours=24), "hour"),
+        "7d": (timedelta(days=7), "day"),
+        "30d": (timedelta(days=30), "day"),
+    }
+    if period not in _period_map:
+        period = "24h"
+    window_delta, trend_trunc = _period_map[period]
+    window_start = now - window_delta
+
     # ── Alert counts ──────────────────────────────────────────────────────────
     # Severity counts stay total-over-window (the pie chart needs them), but
     # the "Active Alerts"/"Critical" tiles get true unresolved counts.
-    total_q = await db.scalar(select(func.count()).where(Alert.tenant_id == tenant_id))
-    new_q = await db.scalar(select(func.count()).where(and_(Alert.tenant_id == tenant_id, Alert.status == "new")))
-    critical_q = await db.scalar(select(func.count()).where(and_(Alert.tenant_id == tenant_id, Alert.severity == "critical")))
-    high_q = await db.scalar(select(func.count()).where(and_(Alert.tenant_id == tenant_id, Alert.severity == "high")))
-    medium_q = await db.scalar(select(func.count()).where(and_(Alert.tenant_id == tenant_id, Alert.severity == "medium")))
-    low_q = await db.scalar(select(func.count()).where(and_(Alert.tenant_id == tenant_id, Alert.severity == "low")))
+    _in_window = Alert.created_at >= window_start
+    total_q = await db.scalar(select(func.count()).where(and_(Alert.tenant_id == tenant_id, _in_window)))
+    new_q = await db.scalar(select(func.count()).where(and_(Alert.tenant_id == tenant_id, Alert.status == "new", _in_window)))
+    critical_q = await db.scalar(select(func.count()).where(and_(Alert.tenant_id == tenant_id, Alert.severity == "critical", _in_window)))
+    high_q = await db.scalar(select(func.count()).where(and_(Alert.tenant_id == tenant_id, Alert.severity == "high", _in_window)))
+    medium_q = await db.scalar(select(func.count()).where(and_(Alert.tenant_id == tenant_id, Alert.severity == "medium", _in_window)))
+    low_q = await db.scalar(select(func.count()).where(and_(Alert.tenant_id == tenant_id, Alert.severity == "low", _in_window)))
     # Active = explicit unresolved statuses. `resolved`/`closed` are excluded
     # by construction; anything unrecognised counts as active (fail-open on
     # risk visibility, never fail-hidden).
@@ -305,7 +332,7 @@ async def get_dashboard_metrics(
         )
     )
     resolved_q = await db.scalar(
-        select(func.count()).where(and_(Alert.tenant_id == tenant_id, Alert.status == "resolved"))
+        select(func.count()).where(and_(Alert.tenant_id == tenant_id, Alert.status == "resolved", _in_window))
     )
     resolved_today_q = await db.scalar(
         select(func.count()).where(
@@ -353,14 +380,14 @@ async def get_dashboard_metrics(
                 SELECT
                   count(*) FILTER (WHERE status = ANY(:open_statuses))                          AS open,
                   count(*) FILTER (WHERE status IN ('investigating', 'contained', 'in_progress')) AS in_progress,
-                  count(*) FILTER (WHERE COALESCE(resolved_at, closed_at) >= :week_start)      AS resolved_week,
-                  count(*) FILTER (WHERE created_at >= :week_start)                             AS opened_week,
-                  count(*) FILTER (WHERE closed_at IS NOT NULL AND closed_at >= :week_start)   AS closed_week
+                  count(*) FILTER (WHERE COALESCE(resolved_at, closed_at) >= :week_start)      AS resolved_window,
+                  count(*) FILTER (WHERE created_at >= :week_start)                             AS opened_window,
+                  count(*) FILTER (WHERE closed_at IS NOT NULL AND closed_at >= :week_start)   AS closed_window
                 FROM aisoc_cases
                 WHERE tenant_id = :tenant_id
                 """
             ),
-            {"tenant_id": _tid(tenant_id), "open_statuses": list(_OPEN_STATUSES), "week_start": week_start},
+            {"tenant_id": _tid(tenant_id), "open_statuses": list(_OPEN_STATUSES), "week_start": window_start},
         )
     ).first()
 
@@ -380,7 +407,7 @@ async def get_dashboard_metrics(
     # Count alerts per connector_type
     source_counts_rows = (
         await db.execute(
-            select(Alert.connector_type, func.count().label("cnt")).where(Alert.tenant_id == tenant_id).group_by(Alert.connector_type)
+            select(Alert.connector_type, func.count().label("cnt")).where(and_(Alert.tenant_id == tenant_id, _in_window)).group_by(Alert.connector_type)
         )
     ).all()
     source_count_map: dict[str, int] = {row.connector_type: row.cnt for row in source_counts_rows if row.connector_type}
@@ -419,7 +446,7 @@ async def get_dashboard_metrics(
     # jsonb_array_elements_text + GROUP BY in the same SELECT 500s on some
     # Postgres builds.
     tactic_rows = (
-        await db.execute(select(Alert.mitre_tactics).where(and_(Alert.tenant_id == tenant_id, Alert.mitre_tactics.isnot(None))))
+        await db.execute(select(Alert.mitre_tactics).where(and_(Alert.tenant_id == tenant_id, Alert.mitre_tactics.isnot(None), _in_window)))
     ).all()
 
     tactic_counts: dict[str, int] = {}
@@ -434,12 +461,12 @@ async def get_dashboard_metrics(
         MitreTactic(tactic=tactic, count=count) for tactic, count in sorted(tactic_counts.items(), key=lambda x: x[1], reverse=True)[:10]
     ]
 
-    # ── 24-hour trend (hourly buckets) ────────────────────────────────────────
-    trend_start = now - timedelta(hours=24)
+    # ── Volume trend over the selected period ────────────────────────────────
+    trend_start = window_start
     trend_rows = (
         await db.execute(
             select(
-                func.date_trunc("hour", Alert.created_at).label("bucket"),
+                func.date_trunc(trend_trunc, Alert.created_at).label("bucket"),
                 Alert.severity,
                 func.count().label("cnt"),
             )
@@ -467,6 +494,7 @@ async def get_dashboard_metrics(
     threats_by_source = [SourceThreat(source=k, count=v) for k, v in source_count_map.items()]
 
     return DashboardMetrics(
+        period=period,
         alerts=alert_metrics,
         cases=case_metrics,
         sources=sources,
