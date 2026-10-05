@@ -26,7 +26,7 @@ import uuid
 from typing import Annotated, Any
 
 import structlog
-from fastapi import APIRouter, Depends, Header, HTTPException, Security, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Security, status
 from fastapi.security import HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -80,6 +80,7 @@ def service_token_valid(presented: str | None) -> bool:
 
 
 async def optional_user(
+    request: Request,
     credentials: Annotated[HTTPAuthorizationCredentials | None, Security(bearer_scheme)],
     db: AsyncSession = Depends(get_db),
 ) -> CurrentUser | None:
@@ -91,7 +92,11 @@ async def optional_user(
     :func:`_resolve_caller`; it never admits anybody on its own.
     """
     try:
-        return await get_current_user(credentials, db)
+        # `request` is get_current_user's first positional parameter (peer
+        # header reads); omitting it shifted credentials into the request
+        # slot and raised AttributeError on the session, an unhandled 500
+        # on every authenticated dashboard poll of this router.
+        return await get_current_user(request, credentials, db)
     except HTTPException:
         return None
 
