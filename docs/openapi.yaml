@@ -6690,7 +6690,14 @@ paths:
       tags:
       - rbac
       summary: List Roles
-      description: List all roles for the current tenant.
+      description: 'List all roles for the current tenant, with permissions and headcount.
+
+
+        `user_count` counts this tenant''s users holding each role — the Roles
+
+        screen shows it so an operator can see who would move when a role''s
+
+        grants change, not just what the grants are.'
       operationId: list_roles_api_v1_rbac_roles_get
       responses:
         '200':
@@ -6708,7 +6715,14 @@ paths:
       tags:
       - rbac
       summary: Create Role
-      description: Create a custom role for the current tenant.
+      description: 'Create a custom role for the current tenant.
+
+
+        `permission_names` (validated against the platform vocabulary, unknown
+
+        keys → 400 naming them) is the console-facing shape; `permission_ids`
+
+        stays for API clients. Both may be sent; they merge.'
       operationId: create_role_api_v1_rbac_roles_post
       requestBody:
         content:
@@ -6729,6 +6743,35 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+      security:
+      - HTTPBearer: []
+  /api/v1/rbac/roles/seed:
+    post:
+      tags:
+      - rbac
+      summary: Seed Roles
+      description: 'Seed this tenant''s catalog from `app.core.rbac_catalog`.
+
+
+        Idempotent — safe to call from the Roles screen''s empty state ("Seed
+
+        roles") as often as you like. Catalog rows and the membership backfill
+
+        land in one transaction, so a half-seeded tenant (roles with no
+
+        members, every member resolving to zero permissions) is not a state this
+
+        endpoint can leave behind.'
+      operationId: seed_roles_api_v1_rbac_roles_seed_post
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+                title: Response Seed Roles Api V1 Rbac Roles Seed Post
       security:
       - HTTPBearer: []
   /api/v1/rbac/roles/{role_id}:
@@ -6764,6 +6807,15 @@ paths:
       tags:
       - rbac
       summary: Update Role
+      description: 'Edit label/description (and, optionally, replace the permission
+        set).
+
+
+        System roles are refused with an explanatory 403 body that names the
+
+        role: the lock is a server rule, not a hidden button. `name` cannot be
+
+        edited — see RoleUpdate.'
       operationId: update_role_api_v1_rbac_roles__role_id__patch
       security:
       - HTTPBearer: []
@@ -6812,6 +6864,119 @@ paths:
       responses:
         '204':
           description: Successful Response
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/rbac/roles/{role_id}/permissions:
+    put:
+      tags:
+      - rbac
+      summary: Replace Role Permissions
+      description: 'Replace the role''s full permission set (atomic, audited, before/after).
+
+
+        Accepts `{"permissions": ["alerts:read", ...]}` or a bare list
+
+        `["alerts:read", ...]` — both shapes validate every key against the
+
+        vocabulary first, so an unknown key is a 400 that names it, never a
+
+        silently dropped grant.'
+      operationId: replace_role_permissions_api_v1_rbac_roles__role_id__permissions_put
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: role_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Role Id
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Body_replace_role_permissions_api_v1_rbac_roles__role_id__permissions_put'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RoleOut'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+    post:
+      tags:
+      - rbac
+      summary: Add Role Permission
+      operationId: add_role_permission_api_v1_rbac_roles__role_id__permissions_post
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: role_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Role Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PermissionNameIn'
+      responses:
+        '201':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RoleOut'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/rbac/roles/{role_id}/permissions/{permission_name}:
+    delete:
+      tags:
+      - rbac
+      summary: Remove Role Permission
+      operationId: remove_role_permission_api_v1_rbac_roles__role_id__permissions__permission_name__delete
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: role_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Role Id
+      - name: permission_name
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Permission Name
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RoleOut'
         '422':
           description: Validation Error
           content:
@@ -6886,12 +7051,68 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/rbac/users/{user_id}/role:
+    put:
+      tags:
+      - rbac
+      summary: Set Primary Role
+      description: "Replace the user's primary role — the console's `Assign role`\
+        \ action.\n\nMulti-role storage, single-role product: the assignment set becomes\
+        \ the\none chosen role, and `users.role` — the string the JWT/static path\n\
+        reads — is mirrored to match, so the two authorization paths cannot\ndisagree\
+        \ after this call. Takes effect on the target's next request:\nthe permission\
+        \ cache version bumps, and the verifier re-reads\n`users.role` from the database.\
+        \ No re-login required.\n\nRefusals, all before any write:\n  * 404 target\
+        \ not in tenant; 400 unknown role name (naming the valid\n    set) or disabled\
+        \ target; 403 this caller may not confer the role's\n    permissions; 409\
+        \ this would empty the tenant of active admins."
+      operationId: set_primary_role_api_v1_rbac_users__user_id__role_put
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: user_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: User Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PrimaryRoleAssignment'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserRoleOut'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /api/v1/rbac/users/{user_id}/roles/{role_id}:
     delete:
       tags:
       - rbac
       summary: Revoke Role
-      description: Revoke a role from a user.
+      description: 'Revoke a role from a user.
+
+
+        Last-admin lockout guard: revoking the role that IS the tenant''s admin
+
+        role from the last active holder is refused with 409, same rule as
+
+        `PUT /users/{id}/role` and `PATCH /tenants/me/users/{id}` — every door
+
+        that removes management authority checks it, because "one of the doors
+
+        remembers" is no control at all.'
       operationId: revoke_role_api_v1_rbac_users__user_id__roles__role_id__delete
       security:
       - HTTPBearer: []
@@ -6913,6 +7134,301 @@ paths:
       responses:
         '204':
           description: Successful Response
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/admin/users:
+    get:
+      tags:
+      - admin-users
+      summary: List Users
+      description: Paginated member list with live roles, provider, and headcounts.
+      operationId: list_users_api_v1_admin_users_get
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: search
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+            maxLength: 200
+          - type: 'null'
+          title: Search
+      - name: role
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+            maxLength: 100
+          - type: 'null'
+          title: Role
+      - name: status
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+            pattern: ^(active|disabled)$
+          - type: 'null'
+          title: Status
+      - name: sort
+        in: query
+        required: false
+        schema:
+          type: string
+          pattern: ^(name|email|status|created|last_login)$
+          default: created
+          title: Sort
+      - name: order
+        in: query
+        required: false
+        schema:
+          type: string
+          pattern: ^(asc|desc)$
+          default: desc
+          title: Order
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          maximum: 200
+          minimum: 1
+          default: 50
+          title: Limit
+      - name: offset
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 0
+          default: 0
+          title: Offset
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserPage'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/admin/users/{user_id}:
+    get:
+      tags:
+      - admin-users
+      summary: Get User
+      operationId: get_user_api_v1_admin_users__user_id__get
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: user_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: User Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminUserOut'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+    patch:
+      tags:
+      - admin-users
+      summary: Patch Status
+      description: 'Enable / disable a member. Disabling ends their sessions immediately;
+
+        the role assignment is preserved untouched.'
+      operationId: patch_status_api_v1_admin_users__user_id__patch
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: user_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: User Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserPatch'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminUserOut'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/admin/users/{user_id}/effective-permissions:
+    get:
+      tags:
+      - admin-users
+      summary: Effective Permissions
+      description: 'Merged permission set for one user — the modal''s read-only preview.
+
+
+        Answers from `user_roles` only (the catalog), not the static map: what
+
+        the modal shows is what the enforcement layer will check once the
+
+        tenant is catalog-backed.'
+      operationId: effective_permissions_api_v1_admin_users__user_id__effective_permissions_get
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: user_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: User Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: string
+                title: Response Effective Permissions Api V1 Admin Users  User Id  Effective
+                  Permissions Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/admin/users/{user_id}/roles:
+    put:
+      tags:
+      - admin-users
+      summary: Set Roles
+      description: Replace the user's full role set (multi-role replace semantics).
+      operationId: set_roles_api_v1_admin_users__user_id__roles_put
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: user_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: User Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RoleSetIn'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminUserOut'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+    post:
+      tags:
+      - admin-users
+      summary: Add Role
+      operationId: add_role_api_v1_admin_users__user_id__roles_post
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: user_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: User Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RoleAddIn'
+      responses:
+        '201':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminUserOut'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/admin/users/{user_id}/roles/{role_name}:
+    delete:
+      tags:
+      - admin-users
+      summary: Remove Role
+      operationId: remove_role_api_v1_admin_users__user_id__roles__role_name__delete
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: user_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: User Id
+      - name: role_name
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Role Name
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminUserOut'
         '422':
           description: Validation Error
           content:
@@ -17865,6 +18381,60 @@ components:
       - expires_at
       - url
       title: AdminInviteWire
+    AdminUserOut:
+      properties:
+        id:
+          type: string
+          format: uuid
+          title: Id
+        email:
+          type: string
+          title: Email
+        username:
+          type: string
+          title: Username
+        is_active:
+          type: boolean
+          title: Is Active
+        role:
+          type: string
+          title: Role
+        roles:
+          items:
+            type: string
+          type: array
+          title: Roles
+          default: []
+        provider:
+          type: string
+          title: Provider
+          default: local
+        last_login:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Last Login
+        created_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Created At
+        effective_permissions:
+          items:
+            type: string
+          type: array
+          title: Effective Permissions
+          default: []
+      type: object
+      required:
+      - id
+      - email
+      - username
+      - is_active
+      - role
+      title: AdminUserOut
     AgentHuntRequest:
       properties:
         hypothesis:
@@ -20073,6 +20643,16 @@ components:
       - type_breakdown
       - blast_radius_score
       title: BlastRadiusResponse
+    Body_replace_role_permissions_api_v1_rbac_roles__role_id__permissions_put:
+      properties:
+        body:
+          anyOf:
+          - $ref: '#/components/schemas/PermissionNamesIn'
+          - type: 'null'
+        raw:
+          title: Raw
+      type: object
+      title: Body_replace_role_permissions_api_v1_rbac_roles__role_id__permissions_put
     Body_upload_asset_api_v1_branding_assets__kind__post:
       properties:
         file:
@@ -28578,6 +29158,41 @@ components:
       - tenant_id
       - created_at
       title: PeerGroupOut
+    PermissionNameIn:
+      properties:
+        permission:
+          type: string
+          maxLength: 200
+          minLength: 1
+          title: Permission
+      type: object
+      required:
+      - permission
+      title: PermissionNameIn
+    PermissionNamesIn:
+      properties:
+        permissions:
+          items:
+            type: string
+          type: array
+          minItems: 0
+          title: Permissions
+      type: object
+      required:
+      - permissions
+      title: PermissionNamesIn
+      description: 'Body for `PUT /roles/{id}/permissions`.
+
+
+        The console sends `{"permissions": ["alerts:read", ...]}` and the
+
+        route additionally accepts the bare list shape (see the endpoint);
+
+        either way every key is validated against the platform vocabulary
+
+        before anything is deleted, so an unknown key is a 400 that names the
+
+        valid set instead of a silent partial update.'
     PermissionOut:
       properties:
         id:
@@ -29131,6 +29746,35 @@ components:
       - suppressed
       - changed
       title: PreviewRow
+    PrimaryRoleAssignment:
+      properties:
+        role_name:
+          type: string
+          maxLength: 100
+          minLength: 1
+          title: Role Name
+        reason:
+          anyOf:
+          - type: string
+            maxLength: 500
+          - type: 'null'
+          title: Reason
+      type: object
+      required:
+      - role_name
+      title: PrimaryRoleAssignment
+      description: 'Body for `PUT /rbac/users/{id}/role` — replaces the primary role.
+
+
+        `role_name` names a seeded catalog role (`viewer` | `infosec` | `admin`
+
+        or a tenant custom role); the server resolves it against this tenant''s
+
+        catalog and refuses anything it does not recognize with a 400 naming the
+
+        valid set — a 500 would leak the schema, and a silent 404 would make a
+
+        typo look like an outage.'
     PromotionRequest:
       properties:
         scope_kind:
@@ -30390,11 +31034,36 @@ components:
       - last_evaluated_at
       - updated_at
       title: RiskProfileOut
+    RoleAddIn:
+      properties:
+        role_name:
+          type: string
+          maxLength: 100
+          minLength: 1
+          title: Role Name
+        reason:
+          type: string
+          maxLength: 500
+          minLength: 1
+          title: Reason
+      type: object
+      required:
+      - role_name
+      - reason
+      title: RoleAddIn
     RoleIn:
       properties:
         name:
           type: string
+          maxLength: 100
+          minLength: 2
           title: Name
+        label:
+          anyOf:
+          - type: string
+            maxLength: 200
+          - type: 'null'
+          title: Label
         description:
           anyOf:
           - type: string
@@ -30406,6 +31075,12 @@ components:
             format: uuid
           type: array
           title: Permission Ids
+          default: []
+        permission_names:
+          items:
+            type: string
+          type: array
+          title: Permission Names
           default: []
       type: object
       required:
@@ -30424,6 +31099,11 @@ components:
         name:
           type: string
           title: Name
+        label:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Label
         description:
           anyOf:
           - type: string
@@ -30438,6 +31118,14 @@ components:
           type: array
           title: Permissions
           default: []
+        user_count:
+          type: integer
+          title: User Count
+          default: 0
+        is_sso_default:
+          type: boolean
+          title: Is Sso Default
+          default: false
       type: object
       required:
       - id
@@ -30446,13 +31134,32 @@ components:
       - description
       - is_system
       title: RoleOut
+    RoleSetIn:
+      properties:
+        role_names:
+          items:
+            type: string
+          type: array
+          minItems: 1
+          title: Role Names
+        reason:
+          type: string
+          maxLength: 500
+          minLength: 1
+          title: Reason
+      type: object
+      required:
+      - role_names
+      - reason
+      title: RoleSetIn
     RoleUpdate:
       properties:
-        name:
+        label:
           anyOf:
           - type: string
+            maxLength: 200
           - type: 'null'
-          title: Name
+          title: Label
         description:
           anyOf:
           - type: string
@@ -30466,8 +31173,24 @@ components:
             type: array
           - type: 'null'
           title: Permission Ids
+        permission_names:
+          anyOf:
+          - items:
+              type: string
+            type: array
+          - type: 'null'
+          title: Permission Names
       type: object
       title: RoleUpdate
+      description: '`name` is deliberately absent: the machine name is immutable after
+
+        create. It is mirrored into users.role, resolved against the JWT static
+
+        map, and written into audit resource strings; renaming a live role would
+
+        strand all three. Edit `label` and `description` for the human-facing
+
+        text.'
     RotateScimTokenRequest:
       properties:
         grace_hours:
@@ -34882,6 +35605,52 @@ components:
       - role
       - is_active
       title: UserMeResponse
+    UserPage:
+      properties:
+        items:
+          items:
+            $ref: '#/components/schemas/AdminUserOut'
+          type: array
+          title: Items
+        total:
+          type: integer
+          title: Total
+        limit:
+          type: integer
+          title: Limit
+        offset:
+          type: integer
+          title: Offset
+      type: object
+      required:
+      - items
+      - total
+      - limit
+      - offset
+      title: UserPage
+    UserPatch:
+      properties:
+        is_active:
+          type: boolean
+          title: Is Active
+        reason:
+          anyOf:
+          - type: string
+            maxLength: 500
+          - type: 'null'
+          title: Reason
+      type: object
+      required:
+      - is_active
+      title: UserPatch
+      description: 'Body for PATCH /admin/users/{id} — status changes only.
+
+
+        Roles deliberately do not live on this body: a status patch that can
+
+        also carry roles turns every future "toggle" feature into a privilege
+
+        escalation vector. Roles move through the explicit role routes.'
     UserResponse:
       properties:
         id:
@@ -34935,6 +35704,12 @@ components:
           type: string
           format: uuid
           title: Role Id
+        reason:
+          anyOf:
+          - type: string
+            maxLength: 500
+          - type: 'null'
+          title: Reason
       type: object
       required:
       - user_id
