@@ -7289,6 +7289,50 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+    delete:
+      tags:
+      - admin-users
+      summary: Delete User
+      description: "Permanently delete a member.\n\nHard delete, deliberately: `audit_log.actor_id`\
+        \ and every other\nattribution column SET NULL on delete, so the audit trail\
+        \ keeps each\naction with the name attributed in the audit payload below —\
+        \ the\nhistory survives, the identity row does not. Ownership rows\n(`user_roles`,\
+        \ `aisoc_sso_identities`, `saved_views`, …) cascade.\n\nGuards, in order:\n\
+        * a member cannot delete their own account (disable yourself instead);\n*\
+        \ the last active admin cannot be deleted (`_guard_last_admin`);\n* sessions\
+        \ are ended before the row goes, so any in-flight token dies\n  at the next\
+        \ request even if a race briefly revives the row.\n\nAn SSO-provisioned account\
+        \ that is deleted will be re-created as a\n`viewer` by JIT on the next successful\
+        \ login — deletion removes the\naccount, not the IdP's right to provision\
+        \ it. Say so in the reason if\nthat matters for the case."
+      operationId: delete_user_api_v1_admin_users__user_id__delete
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: user_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: User Id
+      - name: reason
+        in: query
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 500
+          title: Reason
+      responses:
+        '204':
+          description: Successful Response
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /api/v1/admin/users/{user_id}/effective-permissions:
     get:
       tags:
