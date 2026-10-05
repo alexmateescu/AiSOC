@@ -221,7 +221,27 @@ def _dict_literal(tree: ast.Module, function: str) -> dict | None:
 
 
 def _assigned_names(tree: ast.Module, variable: str) -> set[str] | None:
-    """Keys of a module-level dict, or members of a tuple/set/frozenset."""
+    """Keys of a module-level dict, or members of a tuple/set/frozenset.
+
+    Also collects keys added by post-hoc subscript assignment —
+    ``ROLE_PERMISSIONS["infosec"] = sorted(...)`` — because the security
+    module declares exactly one role that way (as a set expression over the
+    analyst and hunter rows, deliberately not a literal copy so it cannot
+    drift). A checker that reads only the dict literal sees a vocabulary
+    with a hole in it and reports the hole as a bug in the code.
+    """
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for t in node.targets:
+                if (
+                    isinstance(t, ast.Subscript)
+                    and isinstance(t.value, ast.Name)
+                    and t.value.id == variable
+                    and isinstance(t.slice, ast.Constant)
+                    and isinstance(t.slice.value, str)
+                ):
+                    names.add(t.slice.value)
     for node in ast.walk(tree):
         if not isinstance(node, ast.Assign):
             continue
@@ -233,9 +253,9 @@ def _assigned_names(tree: ast.Module, variable: str) -> set[str] | None:
         except (ValueError, TypeError, SyntaxError):
             return None
         if isinstance(value, dict):
-            return set(value)
+            return set(value) | names
         if isinstance(value, list | tuple | set | frozenset):
-            return set(value)
+            return set(value) | names
     for node in ast.walk(tree):
         if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.target.id == variable:
             if node.value is None:
@@ -245,9 +265,9 @@ def _assigned_names(tree: ast.Module, variable: str) -> set[str] | None:
             except (ValueError, TypeError, SyntaxError):
                 return None
             if isinstance(value, dict):
-                return set(value)
+                return set(value) | names
             if isinstance(value, list | tuple | set | frozenset):
-                return set(value)
+                return set(value) | names
     return None
 
 
