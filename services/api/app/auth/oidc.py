@@ -30,7 +30,7 @@ import secrets
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from typing import Any
-from urllib.parse import urlencode, urlparse, quote
+from urllib.parse import quote, urlencode, urlparse
 
 import httpx
 import jwt as _jwt
