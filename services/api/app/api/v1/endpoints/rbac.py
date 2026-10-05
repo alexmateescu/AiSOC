@@ -20,8 +20,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.api.v1.deps import AuthUser, require_permission
-from app.core.permission_cache import bump_version
 from app.core import role_grants
+from app.core.permission_cache import bump_version
 from app.core.rbac_catalog import SSO_DEFAULT_ROLE, seed_tenant_catalog
 from app.core.role_grants import RoleGrantDenied, authorize_permission_grant
 from app.db.rls import TenantDBSession
@@ -387,7 +387,10 @@ async def update_role(
     if role.is_system:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Role '{role.name}' is a system role: its name and permission set are protected. Duplicate it to create an editable custom role.",
+            detail=(
+                f"Role '{role.name}' is a system role: its name and permission set are protected. "
+                "Duplicate it to create an editable custom role."
+            ),
         )
 
     perms: list[Permission] | None = None
@@ -699,7 +702,10 @@ async def set_primary_role(
         )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Unknown role {body.role_name!r}. Valid roles for this tenant: {', '.join(valid) or '(none seeded — seed the catalog first)'}",
+            detail=(
+                f"Unknown role {body.role_name!r}. Valid roles for this tenant: "
+                f"{', '.join(valid) or '(none seeded — seed the catalog first)'}"
+            ),
         )
 
     # The granter may only confer what they hold (GHSA lineage: a scoped

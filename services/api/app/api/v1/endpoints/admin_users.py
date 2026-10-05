@@ -265,7 +265,9 @@ async def set_roles(
 
     old_roles = await _roles_of(db, target.id, current_user.tenant_id)
     now = datetime.now(UTC)
-    await db.execute(text("DELETE FROM user_roles WHERE user_id = CAST(:u AS uuid)").bindparams(u=str(target.id)))
+    await db.execute(
+            text("DELETE FROM user_roles WHERE user_id = CAST(:u AS uuid)").bindparams(u=str(target.id))
+        )
     for role in roles:
         db.add(UserRole(user_id=target.id, role_id=role.id, assigned_by=current_user.user_id))
     mirrored = _mirror_role(roles)
@@ -314,7 +316,8 @@ async def add_role(
     if existing.scalar_one_or_none() is None:
         old_roles = await _roles_of(db, target.id, current_user.tenant_id)
         db.add(UserRole(user_id=target.id, role_id=role.id, assigned_by=current_user.user_id))
-        mirrored = _mirror_role([r for r in await _role_rows(db, target.id, current_user.tenant_id)] + [role])
+        rows = await _role_rows(db, target.id, current_user.tenant_id)
+        mirrored = _mirror_role(list(rows) + [role])
         now = datetime.now(UTC)
         await db.execute(update(User).where(User.id == target.id).values(role=mirrored, updated_at=now))
         await _end_sessions(db, target.id, now)
@@ -353,7 +356,10 @@ async def remove_role(
     await _guard_last_admin(db, current_user.tenant_id, target, held)
 
     now = datetime.now(UTC)
-    await db.execute(text("DELETE FROM user_roles WHERE user_id = CAST(:u AS uuid) AND role_id = CAST(:r AS uuid)").bindparams(u=str(target.id), r=str(role.id)))
+    await db.execute(
+            text("DELETE FROM user_roles WHERE user_id = CAST(:u AS uuid) AND role_id = CAST(:r AS uuid)")
+            .bindparams(u=str(target.id), r=str(role.id))
+        )
     mirrored = _mirror_role(held)
     await db.execute(update(User).where(User.id == target.id).values(role=mirrored, updated_at=now))
     await _end_sessions(db, target.id, now)
@@ -463,7 +469,9 @@ async def delete_user(
     # End sessions first: a token mid-flight must fail closed the moment
     # the row disappears, not at expiry.
     await _end_sessions(db, target.id, now)
-    await db.execute(text("DELETE FROM user_roles WHERE user_id = CAST(:u AS uuid)").bindparams(u=str(target.id)))
+    await db.execute(
+            text("DELETE FROM user_roles WHERE user_id = CAST(:u AS uuid)").bindparams(u=str(target.id))
+        )
     await db.delete(target)
     await emit_audit(
         db=db,
@@ -524,9 +532,9 @@ async def _authorize_roles(db: AsyncSession, roles: list[Role], granter: AuthUse
     """The granter may only confer what they hold (privilege-escalation gate)."""
     from app.core.role_grants import RoleGrantDenied, authorize_permission_grant
 
-    names = sorted({p for p in [
+    names = sorted({
         p.name for r in roles for p in (await _role_perm_models(db, r.id))
-    ]})
+    })
     if "*" in names:
         names = sorted(await _all_perm_names(db))
     try:
@@ -613,7 +621,8 @@ async def _effective_perms(db: AsyncSession, user_id: uuid.UUID, tenant_id: uuid
     rows = await db.execute(
         text("SELECT DISTINCT p.name FROM user_roles ur JOIN roles r ON r.id = ur.role_id "
              "JOIN role_permissions rp ON rp.role_id = r.id JOIN permissions p ON p.id = rp.permission_id "
-             "WHERE ur.user_id = CAST(:u AS uuid) AND r.tenant_id = CAST(:t AS uuid) ORDER BY 1").bindparams(u=str(user_id), t=str(tenant_id))
+             "WHERE ur.user_id = CAST(:u AS uuid) AND r.tenant_id = CAST(:t AS uuid) ORDER BY 1")
+        .bindparams(u=str(user_id), t=str(tenant_id))
     )
     return [p for (p,) in rows.all()]
 
