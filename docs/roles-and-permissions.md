@@ -61,11 +61,46 @@ seeded catalog (unknown → 400 naming the valid set) → granter may only
 confer permissions they hold → last-admin guard → `user_roles` replaced,
 `users.role` mirrored, audit row written, permission-cache version bumped.
 
-Multi-role: storage supports it (`user_roles` is a join table, and
-`POST /api/v1/rbac/users/{id}/roles` /
-`DELETE /api/v1/rbac/users/{id}/roles/{role_id}` work), but the product is
-single-primary-role: the console assigns exactly one, and `PUT …/role`
-replaces the set. Half-supporting both is how two sources of truth appear.
+Multi-role: assignment is multi-role end to end. `PUT …/role` replaces the
+set, `POST …/roles` adds, `DELETE …/roles/{role_id}` removes one, and the
+Users console assigns via checkboxes against the live catalog with a
+server-computed effective-permissions preview in the same modal. The legacy
+`users.role` column mirrors the highest-precedence assigned role so the
+JWT/static-map path never disagrees with `user_roles`.
+
+## Users administration (Settings → Users)
+
+Admin-only screen adjacent to Roles & Permissions (hidden entirely from
+viewer/infosec in the nav, enforced server-side by `require_permission`).
+Server-side pagination, sort, free-text search, and role/status filters —
+the list is never client-filtered, so a large tenant cannot leak past the
+page window. Columns: name, email, status, role(s), SSO/provider, last
+login, created, actions.
+
+Lifecycle actions, all `roles:write`-gated, all audited with a mandatory
+`reason`, all revoking the target's active sessions before responding:
+
+| Action | Endpoint | Guards |
+|---|---|---|
+| List / search | `GET /api/v1/admin/users?q=&role=&status=&sort=&dir=&page=&size=` | admin only; tenant-scoped |
+| Detail | `GET /api/v1/admin/users/{id}` | admin only; 404 cross-tenant |
+| Replace roles | `PUT /api/v1/admin/users/{id}/roles` | catalog-validated ids; last-admin guard; sessions revoked; cache bumped |
+| Add one role | `POST /api/v1/admin/users/{id}/roles` | same |
+| Remove one role | `DELETE /api/v1/admin/users/{id}/roles/{role}` | last-admin guard |
+| Enable / disable | `PATCH /api/v1/admin/users/{id}` `{"is_active": bool}` | last active admin cannot be disabled; disable revokes sessions |
+| Delete (permanent) | `DELETE /api/v1/admin/users/{id}?reason=…` | see below |
+
+Delete semantics: hard delete of the `users` row, audit-safe.
+Migration `094_user_delete_fk.sql` rewrites the one RESTRICT edge
+(`compliance_evidence.collected_by`) to `ON DELETE SET NULL`; every other
+FK already cascades or SET NULLs. The audit row (`admin.users.deleted`)
+snapshots the full identity — email, username, roles, provider, reason —
+inside its payload, so attribution survives the actor FK going NULL.
+Self-deletion → `409`; deleting the last active admin → `409`; missing
+reason → `422`. The console gates it three times: reason prompt → typed
+email confirmation → final confirm, and the button is disabled on your own
+row. A deleted user whose identity still exists at the IdP can be
+re-provisioned by JIT on next sign-in — as `viewer`, never higher.
 
 ## How default SSO provisioning works
 
@@ -101,7 +136,10 @@ replaces the set. Half-supporting both is how two sources of truth appear.
 
 Every door that removes management authority — `PUT /rbac/users/{id}/role`
 (demote), `DELETE /rbac/users/{id}/roles/{role_id}` (revoke the admin role
-from its last holder), `PATCH /tenants/me/users/{id}` (role or deactive) —
+from its last holder), `PATCH /tenants/me/users/{id}` (role or deactive),
+`PUT|DELETE /api/v1/admin/users/{id}/roles…` (replace/remove),
+`PATCH /api/v1/admin/users/{id}` (disable) and
+`DELETE /api/v1/admin/users/{id}` (delete) —
 counts active wildcard-role admins in the tenant before writing and answers
 `409` with `this is the last active administrator in the tenant; promote
 another admin before demoting this one`. The UI disables the control for
@@ -145,3 +183,7 @@ rollback → 0/0/0, re-apply → 3 roles / 38 grants / correct memberships.
 - `infosec` calling `PUT /rbac/users/{id}/role` → 403.
 - Unknown role name → 400 naming the valid set (not 500).
 - Last-admin demotion → 409.
+- Delete matrix: create 200 · self-delete 409 · missing reason 422 ·
+  viewer token 401 (fail-closed) · delete 204 · re-GET 404 · row and
+  `user_roles` rows gone · audit row `admin.users.deleted` with full
+  identity snapshot. Console chunk contains the triple-confirm Delete flow.

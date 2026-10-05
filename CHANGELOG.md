@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Admin Users administration: a console-only **Settings → Users** screen
+  (admin nav, hidden entirely for viewer/infosec) with server-side
+  pagination/search/filter/sort over `GET /api/v1/admin/users`, multi-role
+  assignment via checkbox modal with a live effective-permissions preview,
+  enable/disable with session revocation, and permanent delete
+  (`DELETE /api/v1/admin/users/{id}?reason=…`) guarded against
+  self-deletion and last-admin lockout. Delete is audit-safe: migration
+  `094` rewrites the one RESTRICT FK to `ON DELETE SET NULL` and the
+  audit row snapshots the full identity, so attribution survives the row.
 - Enterprise SSO wave: a feature-flagged (`SSO_ENABLED=false` by default)
   single-sign-on surface with a login-screen button served by
   `GET /api/v1/auth/sso/status`, `infosec` as a first-class assignable role
