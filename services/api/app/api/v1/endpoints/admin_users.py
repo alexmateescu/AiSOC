@@ -414,6 +414,71 @@ async def patch_status(
     return await _read_out(db, target, current_user.tenant_id)
 
 
+@router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_user(
+    user_id: uuid.UUID,
+    request: Request,
+    current_user: Annotated[AuthUser, Depends(require_permission("roles:write"))],
+    reason: Annotated[str, Query(min_length=1, max_length=500)],
+    db: TenantDBSession,
+) -> None:
+    """Permanently delete a member.
+
+    Hard delete, deliberately: `audit_log.actor_id` and every other
+    attribution column SET NULL on delete, so the audit trail keeps each
+    action with the name attributed in the audit payload below — the
+    history survives, the identity row does not. Ownership rows
+    (`user_roles`, `aisoc_sso_identities`, `saved_views`, …) cascade.
+
+    Guards, in order:
+    * a member cannot delete their own account (disable yourself instead);
+    * the last active admin cannot be deleted (`_guard_last_admin`);
+    * sessions are ended before the row goes, so any in-flight token dies
+      at the next request even if a race briefly revives the row.
+
+    An SSO-provisioned account that is deleted will be re-created as a
+    `viewer` by JIT on the next successful login — deletion removes the
+    account, not the IdP's right to provision it. Say so in the reason if
+    that matters for the case.
+    """
+    target = await _get_target(db, user_id, current_user.tenant_id)
+    if str(target.id) == str(current_user.user_id):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="you cannot delete your own account; disable it instead",
+        )
+    await _guard_last_admin(db, current_user.tenant_id, target,
+                            await _role_rows(db, target.id, current_user.tenant_id),
+                            deactivating=True)
+
+    now = datetime.now(UTC)
+    snapshot = {
+        "email": target.email,
+        "username": target.username,
+        "role": target.role,
+        "roles": await _roles_of(db, target.id, current_user.tenant_id),
+        "provider": "local" if (target.hashed_password or "").startswith("$2") else "sso",
+        "reason": reason[:500],
+    }
+    # End sessions first: a token mid-flight must fail closed the moment
+    # the row disappears, not at expiry.
+    await _end_sessions(db, target.id, now)
+    await db.execute(text("DELETE FROM user_roles WHERE user_id = CAST(:u AS uuid)").bindparams(u=str(target.id)))
+    await db.delete(target)
+    await emit_audit(
+        db=db,
+        tenant_id=current_user.tenant_id,
+        actor_id=current_user.user_id,
+        actor_email=current_user.email,
+        action="admin.users.deleted",
+        resource="user",
+        resource_id=str(user_id),
+        changes=snapshot,
+        request=request,
+    )
+    await db.commit()
+
+
 # ──────────────────────────────────────────────
 # Helpers
 # ──────────────────────────────────────────────

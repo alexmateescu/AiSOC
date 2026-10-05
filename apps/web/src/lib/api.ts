@@ -847,6 +847,13 @@ export const adminUsersApi = {
       body: JSON.stringify({ is_active: isActive, reason }),
     });
   },
+
+  async deleteUser(userId: string, reason: string): Promise<void> {
+    await request<void>(
+      `/api/v1/admin/users/${userId}?reason=${encodeURIComponent(reason)}`,
+      { method: 'DELETE' },
+    );
+  },
 };
 
 export const tenantsApi = {

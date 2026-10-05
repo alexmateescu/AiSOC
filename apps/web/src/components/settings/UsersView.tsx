@@ -293,6 +293,39 @@ export function UsersView() {
     }
   };
 
+  // Triple gate on a destructive, irreversible action: reason + typed
+  // email confirmation + explicit final confirm. The server refuses
+  // self-deletion and last-admin deletion regardless; the UI just makes
+  // an accidental click hard.
+  const deleteUser = async (u: AdminUserRow) => {
+    if (meId && u.id === meId) {
+      toast.error('You cannot delete your own account. Disable it instead.');
+      return;
+    }
+    const reason = window.prompt(`Reason to PERMANENTLY DELETE ${u.email} (audited):`);
+    if (reason === null || !reason.trim()) {
+      if (reason !== null) toast.error('A reason is required.');
+      return;
+    }
+    const typed = window.prompt(`This removes the account for good (audit history is kept). Type the email to confirm:`);
+    if (typed === null) return;
+    if (typed.trim().toLowerCase() !== u.email.toLowerCase()) {
+      toast.error('Confirmation email did not match. Nothing was deleted.');
+      return;
+    }
+    if (!window.confirm(`Delete ${u.email}? SSO users will be re-provisioned as viewer at next login.`)) return;
+    setBusyId(u.id);
+    try {
+      await adminUsersApi.deleteUser(u.id, reason.trim());
+      toast.success(`${u.email} deleted — sessions revoked, audit written.`);
+      await mutate();
+    } catch (e) {
+      toast.error((e as Error).message || 'Could not delete this member.');
+    } finally {
+      setBusyId(null);
+    }
+  };
+
   const rows = data?.items ?? [];
   const total = data?.total ?? 0;
   const failed = Boolean(error) && !data;
@@ -441,6 +474,15 @@ export function UsersView() {
                           Enable
                         </button>
                       )}
+                      <button
+                        type="button"
+                        disabled={busyId === u.id || (meId !== null && u.id === meId)}
+                        onClick={() => deleteUser(u)}
+                        title={meId !== null && u.id === meId ? 'You cannot delete your own account' : 'Permanently delete this member'}
+                        className="rounded-lg border border-red-800/70 px-2.5 py-1 text-xs text-red-300 hover:bg-red-950/50 disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        Delete
+                      </button>
                     </div>
                   </td>
                 </tr>
