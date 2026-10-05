@@ -402,8 +402,33 @@ tenant) with ZSET-backed top-N sorted queues for O(log N) reads.
 ## 11. Authentication
 
 * JWT issued by `POST /api/v1/auth/login`.
-* API keys via `Authorization: ApiKey <key>` header.
+* API keys via `Authorization: ApiKey *** header.
 * All requests must specify a tenant context — either implicit (from JWT) or explicit (`X-Tenant-Id` header for service-to-service calls).
+* SSO (feature-flagged `SSO_ENABLED`): `GET /api/v1/auth/sso/status` advertises
+  enabled connections; the OIDC callback lands the session on `/login?next=…`
+  with tokens in the URL fragment (never in query strings or server logs).
+  JIT provisioning defaults to `viewer`; `admin` is unreachable from SSO by
+  construction unless an explicit allowlisted admin group mapping exists.
+
+## 11a. Users Administration — `/api/v1/admin/users`
+
+Admin only (`roles:write`); every mutation requires a `reason`, writes an
+audit row, and revokes the target's active sessions. See
+[Roles & Permissions](roles-and-permissions.md) for the full model.
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET` | `/api/v1/admin/users` | Paginated list (`q`, `role`, `status`, `sort`, `dir`, `page`, `size`) — server-side only |
+| `GET` | `/api/v1/admin/users/{id}` | Detail incl. roles, provider, last login |
+| `PUT` | `/api/v1/admin/users/{id}/roles` | Replace role set (catalog-validated, last-admin guard) |
+| `POST` | `/api/v1/admin/users/{id}/roles` | Add one role |
+| `DELETE` | `/api/v1/admin/users/{id}/roles/{role}` | Remove one role |
+| `PATCH` | `/api/v1/admin/users/{id}` | Enable/disable (`{"is_active": bool}`) |
+| `DELETE` | `/api/v1/admin/users/{id}?reason=…` | Permanent delete; audit retains identity snapshot |
+
+Errors: `401` unauthenticated · `403`/`401` insufficient role (fail-closed)
+· `404` unknown or cross-tenant id · `409` self-delete or last-admin
+violation · `422` missing/oversized reason.
 
 ---
 
