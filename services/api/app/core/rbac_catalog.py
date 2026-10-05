@@ -192,7 +192,7 @@ async def seed_tenant_catalog(db: AsyncSession, tenant_id: Any) -> dict[str, int
         text(
             """
             INSERT INTO roles (tenant_id, name, label, description, is_system)
-            VALUES (:t::uuid, :name, :label, :description, TRUE)
+            VALUES (CAST(:t AS uuid), :name, :label, :description, TRUE)
             ON CONFLICT (tenant_id, name) DO UPDATE
                SET description = EXCLUDED.description
             """
@@ -219,7 +219,7 @@ async def seed_tenant_catalog(db: AsyncSession, tenant_id: Any) -> dict[str, int
             SELECT r.id, p.id
               FROM roles r
               JOIN permissions p ON p.name = :perm
-             WHERE r.tenant_id = :t::uuid AND r.name = :role
+             WHERE r.tenant_id = CAST(:t AS uuid) AND r.name = :role
             ON CONFLICT DO NOTHING
             """
         ),
@@ -236,7 +236,7 @@ async def seed_tenant_catalog(db: AsyncSession, tenant_id: Any) -> dict[str, int
             SELECT u.id, r.id
               FROM users u
               JOIN roles r ON r.tenant_id = u.tenant_id AND r.name = u.role
-             WHERE r.tenant_id = :t::uuid AND r.is_system = TRUE
+             WHERE r.tenant_id = CAST(:t AS uuid) AND r.is_system = TRUE
             ON CONFLICT DO NOTHING
             """
         ),
@@ -249,7 +249,7 @@ async def seed_tenant_catalog(db: AsyncSession, tenant_id: Any) -> dict[str, int
             SELECT u.id, vr.id
               FROM users u
               JOIN roles vr ON vr.tenant_id = u.tenant_id AND vr.name = :viewer AND vr.is_system = TRUE
-             WHERE u.tenant_id = :t::uuid
+             WHERE u.tenant_id = CAST(:t AS uuid)
                AND NOT EXISTS (SELECT 1 FROM user_roles ur WHERE ur.user_id = u.id)
             ON CONFLICT DO NOTHING
             """
@@ -260,14 +260,14 @@ async def seed_tenant_catalog(db: AsyncSession, tenant_id: Any) -> dict[str, int
     counts: dict[str, int] = {}
     for key, stmt in {
         "permissions": "SELECT count(*) FROM permissions",
-        "roles": "SELECT count(*) FROM roles WHERE tenant_id = :t::uuid",
+        "roles": "SELECT count(*) FROM roles WHERE tenant_id = CAST(:t AS uuid)",
         "role_permissions": (
             "SELECT count(*) FROM role_permissions rp JOIN roles r ON r.id = rp.role_id "
-            "WHERE r.tenant_id = :t::uuid"
+            "WHERE r.tenant_id = CAST(:t AS uuid)"
         ),
         "user_roles": (
             "SELECT count(*) FROM user_roles ur JOIN roles r ON r.id = ur.role_id "
-            "WHERE r.tenant_id = :t::uuid"
+            "WHERE r.tenant_id = CAST(:t AS uuid)"
         ),
     }.items():
         counts[key] = int((await db.execute(text(stmt), {"t": tid})).scalar() or 0)
@@ -287,7 +287,7 @@ async def sync_user_catalog_role(db: AsyncSession, *, tenant_id: Any, user_id: A
     tid, uid = str(tenant_id), str(user_id)
     row = (
         await db.execute(
-            text("SELECT id FROM roles WHERE tenant_id = :t::uuid AND name = :r"),
+            text("SELECT id FROM roles WHERE tenant_id = CAST(:t AS uuid) AND name = :r"),
             {"t": tid, "r": role_name},
         )
     ).first()
@@ -299,12 +299,12 @@ async def sync_user_catalog_role(db: AsyncSession, *, tenant_id: Any, user_id: A
         )
         return
     await db.execute(
-        text("DELETE FROM user_roles WHERE user_id = :u::uuid AND role_id <> :r::uuid"),
+        text("DELETE FROM user_roles WHERE user_id = CAST(:u AS uuid) AND role_id <> CAST(:r AS uuid)"),
         {"u": uid, "r": str(row[0])},
     )
     await db.execute(
         text(
-            "INSERT INTO user_roles (user_id, role_id) VALUES (:u::uuid, :r::uuid) "
+            "INSERT INTO user_roles (user_id, role_id) VALUES (CAST(:u AS uuid), CAST(:r AS uuid)) "
             "ON CONFLICT DO NOTHING"
         ),
         {"u": uid, "r": str(row[0])},
