@@ -16,14 +16,11 @@ ALTER TABLE aisoc_sso_connections ADD COLUMN IF NOT EXISTS group_role_mode TEXT 
 ALTER TABLE aisoc_sso_connections ADD COLUMN IF NOT EXISTS groups_claim TEXT NOT NULL DEFAULT '';
 ALTER TABLE aisoc_sso_connections ADD COLUMN IF NOT EXISTS login_label TEXT NOT NULL DEFAULT '';
 
--- The `infosec` role: security analyst / incident handler. It is seeded per
--- tenant in the application layer (the tenant set is dynamic), but the
--- canonical definition lives in `app.core.security.ROLE_PERMISSIONS`; this
--- seed covers tenants that predate the role so their admins can assign it
--- through the RBAC endpoints immediately.
-INSERT INTO roles (tenant_id, name, description, is_system)
-SELECT t.id, 'infosec',
-       'Security analyst / incident handler: triage, case handling, detections, threat intel, sanitized exports. No user/role/SSO/system management.',
-       TRUE
-  FROM tenants t
-ON CONFLICT (tenant_id, name) DO NOTHING;
+-- The `infosec` role is NOT seeded into `roles` here. `roles` is the
+-- per-tenant RBAC override table: its very existence for a tenant flips
+-- resolve_permissions from the static map to the database, and a seeded row
+-- without matching role_permissions grants every user of that tenant ZERO
+-- permissions — including break-glass admin. The canonical definition of
+-- `infosec` lives in app.core.security.ROLE_PERMISSIONS and
+-- app.core.role_grants.GRANTABLE_ROLES, which is what assignment validates
+-- against; nothing in `roles` is needed for it to be assignable.
