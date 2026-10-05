@@ -30,7 +30,7 @@ import secrets
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from typing import Any
-from urllib.parse import urlencode, urlparse
+from urllib.parse import urlencode, urlparse, quote
 
 import httpx
 import jwt as _jwt
@@ -448,13 +448,17 @@ async def oidc_callback(
         # "login failed" is a support ticket.
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
 
-    redirect_url = _safe_redirect(state_data.get("redirect", "/"))
-    # The token travels in the fragment, which browsers do not send to the
-    # server and which does not land in an access log or a Referer header,
-    # and the console moves it into the storage its API client reads.
-    separator = "&" if "#" in redirect_url else "#"
+    # Land on the login page with the session in the fragment, NOT directly
+    # on the requested page: the fragment consumer lives on /login, and any
+    # auth guard on the destination would bounce to /login?next=... — a
+    # query-string redirect that silently drops the fragment and loses the
+    # token. /login consumes it, persists the session, then routes to
+    # ?next=. The fragment never reaches the server or an access log.
+    target = state_data.get("redirect", "/")
+    safe_target = _safe_redirect(target)
+    redirect_url = f"/login?next={quote(safe_target, safe='')}"
     response = RedirectResponse(
-            url=f"{redirect_url}{separator}access_token={session['access_token']}"
+            url=f"{redirect_url}#access_token={session['access_token']}"
             f"&refresh_token={session['refresh_token']}",
             status_code=302,
         )
