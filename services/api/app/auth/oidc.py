@@ -457,11 +457,11 @@ async def oidc_callback(
     target = state_data.get("redirect", "/")
     safe_target = _safe_redirect(target)
     redirect_url = f"/login?next={quote(safe_target, safe='')}"
+    separator = "&" if "#" in redirect_url else "#"
     response = RedirectResponse(
-            url=f"{redirect_url}#access_token={session['access_token']}"
-            f"&refresh_token={session['refresh_token']}",
-            status_code=302,
-        )
+        url=f"{redirect_url}{separator}access_token={session['access_token']}&refresh_token={session['refresh_token']}",
+        status_code=302,
+    )
     response.delete_cookie("oidc_state")
     return response
 

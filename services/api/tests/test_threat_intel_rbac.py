@@ -45,7 +45,10 @@ from fastapi import HTTPException
 # ─── Static role-permission map (the source of truth) ────────────────────
 
 
-WRITE_ROLES = ("admin", "platform_admin", "tenant_admin", "soc_lead", "threat_hunter")
+# `infosec` is the union of `soc_analyst` and `threat_hunter`, so it inherits
+# `threat_intel:write` from the latter. Classified by what it actually holds
+# rather than by where the name sounds like it belongs.
+WRITE_ROLES = ("admin", "platform_admin", "tenant_admin", "soc_lead", "threat_hunter", "infosec")
 READ_ONLY_ROLES = ("soc_analyst", "viewer", "api_service")
 
 
