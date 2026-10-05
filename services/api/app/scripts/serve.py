@@ -49,6 +49,9 @@ def main() -> None:
             "app.main:app",
             "--fd",
             str(sock.fileno()),
+            # Access logs are opt-in here; without them a post-login bounce
+            # is undiagnosable (no per-request trace reaches docker logs).
+            "--access-log",
         ],
     )
 
