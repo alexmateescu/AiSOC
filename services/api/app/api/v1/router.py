@@ -69,6 +69,7 @@ from app.api.v1.endpoints import (
     plugins,
     posture,
     push,
+    admin_users,
     rbac,
     realtime,
     remediation,
@@ -158,6 +159,7 @@ api_router.include_router(mcp_servers.router)
 # on the path of an investigation.
 api_router.include_router(tenant_skills.router)
 api_router.include_router(rbac.router)
+api_router.include_router(admin_users.router)
 api_router.include_router(audit.router)
 api_router.include_router(branding.router)
 api_router.include_router(compliance.router)
