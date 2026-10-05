@@ -144,6 +144,13 @@ def _status_transition_ok(current: str, target: str) -> bool:
 _LADDER = list(case_status.ALL_STATUSES)
 
 
+# Alert states from which launching an investigation may forward-advance an
+# alert to 'investigating'. Terminal states (resolved/false_positive/closed)
+# and an already-running alert are deliberately excluded: a re-run must never
+# drag history backwards.
+_ALERT_OPEN_STATUSES: tuple[str, ...] = ("new", "triaged", "triaging")
+
+
 def _forward_to_investigating_ok(current: str) -> bool:
     """Can an agent-investigation launch move this case to investigating?
 
@@ -1618,6 +1625,37 @@ async def case_investigate(
     except Exception:  # noqa: BLE001 — never block the launch on the status bump
         await db.rollback()
         logger.warning("investigate.launch.status_advance_failed", case_id=str(cid), exc_info=True)
+
+    # The same honesty applies to the alerts themselves: an alert under
+    # agent investigation is not "new" anymore. Advance the case's linked
+    # alerts to 'investigating' in the same request — forward-only, so
+    # resolved/false-positive/closed alerts are never dragged backwards,
+    # and alerts already further along (in_progress) are left alone.
+    if case_alert_ids:
+        try:
+            bump = await db.execute(
+                text(
+                    "UPDATE alerts SET status = 'investigating', updated_at = :now "
+                    "WHERE id::text = ANY(:ids) AND tenant_id = :tenant_id "
+                    "AND status IN ({})".format(
+                        ", ".join(f"'{st}'" for st in _ALERT_OPEN_STATUSES)
+                    )
+                ).bindparams(
+                    ids=[str(a) for a in case_alert_ids],
+                    tenant_id=user.tenant_id,
+                    now=datetime.now(UTC),
+                )
+            )
+            await db.commit()
+            if bump.rowcount:
+                logger.info(
+                    "investigate.launch.alerts_advance",
+                    case_id=str(cid),
+                    alert_count=bump.rowcount,
+                )
+        except Exception:  # noqa: BLE001 — never block the launch on the alert bump
+            await db.rollback()
+            logger.warning("investigate.launch.alerts_advance_failed", case_id=str(cid), exc_info=True)
 
     resp = await _agents_proxy(
         "POST",
