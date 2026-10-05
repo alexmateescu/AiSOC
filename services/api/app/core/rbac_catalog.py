@@ -101,6 +101,14 @@ SYSTEM_ROLES: Final[tuple[tuple[str, str], ...]] = (
     ("admin", "Platform administrator. Full control of this tenant, including users, roles, SSO configuration and the audit log."),
 )
 
+#: Human display names for the system roles (the `label` column; `name`
+#: stays the machine slug). Custom roles set their own label at create.
+SYSTEM_ROLE_LABELS: Final[dict[str, str]] = {
+    "viewer": "Regular User",
+    "infosec": "Infosec Analyst",
+    "admin": "Platform Administrator",
+}
+
 #: The SSO just-in-time default, kept as a name here so the Roles screen can
 #: badge it without querying the connection table.
 SSO_DEFAULT_ROLE: Final[str] = "viewer"
@@ -183,13 +191,21 @@ async def seed_tenant_catalog(db: AsyncSession, tenant_id: Any) -> dict[str, int
     await db.execute(
         text(
             """
-            INSERT INTO roles (tenant_id, name, description, is_system)
-            VALUES (:t::uuid, :name, :description, TRUE)
+            INSERT INTO roles (tenant_id, name, label, description, is_system)
+            VALUES (:t::uuid, :name, :label, :description, TRUE)
             ON CONFLICT (tenant_id, name) DO UPDATE
                SET description = EXCLUDED.description
             """
         ),
-        [{"t": tid, "name": name, "description": desc} for name, desc in SYSTEM_ROLES],
+        [
+            {
+                "t": tid,
+                "name": name,
+                "label": SYSTEM_ROLE_LABELS.get(name, name),
+                "description": desc,
+            }
+            for name, desc in SYSTEM_ROLES
+        ],
     )
 
     grant_rows: list[dict[str, str]] = []

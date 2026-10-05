@@ -1,12 +1,13 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { clsx } from 'clsx';
 import packageJson from '../../../package.json';
 import { LiveQueueBadge } from './LiveQueueBadge';
 import { useBranding } from '@/hooks/useBranding';
+import { authApi } from '@/lib/api';
 
 const APP_VERSION = packageJson.version;
 
@@ -14,6 +15,8 @@ interface NavItem {
   label: string;
   href: string;
   icon: React.ReactNode;
+  /** Hidden entirely for non-admin operators (server gates the API anyway). */
+  adminOnly?: boolean;
   badge?: number;
   badgeColor?: string;
   /**
@@ -140,6 +143,12 @@ const DocumentReportIcon = () => (
 const CurrencyIcon = () => (
   <svg className="w-5 h-5" aria-hidden="true" fill="none" viewBox="0 0 24 24" stroke="currentColor">
     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 6v12m-3-2.818l.879.659c1.171.879 3.07.879 4.242 0 1.172-.879 1.172-2.303 0-3.182C13.536 12.219 12.768 12 12 12c-.725 0-1.45-.22-2.003-.659-1.106-.879-1.106-2.303 0-3.182s2.9-.879 4.006 0l.415.33M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+  </svg>
+);
+
+const UsersIcon = () => (
+  <svg className="w-5 h-5" aria-hidden="true" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a4 4 0 00-3-3.87M9 20H4v-2a4 4 0 013-3.87m6-1.13a4 4 0 10-4-4 4 4 0 004 4zm6-4a3 3 0 11-3-3" />
   </svg>
 );
 
@@ -305,6 +314,12 @@ const navSections: NavSection[] = [
         icon: <PuzzleIcon />,
       },
       {
+        label: 'Users',
+        href: '/settings/users',
+        icon: <UsersIcon />,
+        adminOnly: true,
+      },
+      {
         label: 'Roles & Permissions',
         href: '/settings/rbac',
         icon: <ShieldIcon />,
@@ -360,6 +375,16 @@ export function Sidebar() {
   const { branding } = useBranding();
   const pathname = usePathname();
   const [mobileOpen, setMobileOpen] = useState(false);
+
+  // Users management is admin-only. The nav item is hidden entirely for
+  // viewer/infosec — the server refuses the page's API calls anyway, but
+  // showing a door that only opens for someone else is a lie in chrome.
+  // Client-side gate is a courtesy; `/api/v1/admin/users` is the real gate.
+  const [meRole, setMeRole] = useState<string | null>(null);
+  useEffect(() => {
+    setMeRole(authApi.currentUser()?.role ?? null);
+  }, []);
+  const isAdmin = meRole === 'admin';
 
   const isActive = (href: string) => {
     if (href === '/dashboard') return pathname === '/dashboard';
@@ -438,7 +463,7 @@ export function Sidebar() {
               </p>
             )}
             <ul className="space-y-0.5">
-              {section.items.map((item) => {
+              {section.items.filter((item) => !item.adminOnly || isAdmin).map((item) => {
                 const active = isActive(item.href);
                 return (
                   <li key={item.href}>

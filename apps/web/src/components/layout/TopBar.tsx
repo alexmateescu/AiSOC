@@ -15,6 +15,7 @@ import { useTenant } from './TenantProvider';
 const routeLabels: Record<string, { title: string; description: string }> = {
   '/detection/catalog': { title: 'Detection Catalog', description: 'Curated rule packs and templates' },
   '/settings/rbac': { title: 'Roles & Permissions', description: 'Access control and team management' },
+  '/settings/users': { title: 'Users', description: 'Member and role management' },
   '/dashboard': { title: 'Dashboard', description: 'SOC overview and metrics' },
   '/alerts': { title: 'Alerts', description: 'Security alerts and incidents' },
   '/cases': { title: 'Cases', description: 'Incident case management' },
