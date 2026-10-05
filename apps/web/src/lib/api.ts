@@ -702,6 +702,54 @@ export const retroHuntsApi = {
   },
 };
 
+export interface RbacPermission {
+  id: string;
+  name: string;
+  description: string | null;
+  category: string | null;
+}
+
+export interface RbacRole {
+  id: string;
+  tenant_id: string;
+  name: string;
+  description: string | null;
+  is_system: boolean;
+  permissions: RbacPermission[];
+  user_count: number;
+  is_sso_default: boolean;
+}
+
+export interface UserRoleOut {
+  user_id: string;
+  role_id: string;
+  role_name: string;
+}
+
+/**
+ * RBAC console surface. All endpoints are admin-gated server-side
+ * (`roles:read` / `roles:write`); a 403 here means the signed-in operator
+ * is not a platform admin, and the screens must render read-only or hide
+ * management controls accordingly — never pretend success.
+ */
+export const rbacApi = {
+  async listRoles(): Promise<RbacRole[]> {
+    return request<RbacRole[]>('/api/v1/rbac/roles');
+  },
+
+  async seedRoles(): Promise<{ seeded: boolean; permissions: number; roles: number; role_permissions: number; user_roles: number }> {
+    return request('/api/v1/rbac/roles/seed', { method: 'POST' });
+  },
+
+  /** Replace a user's primary role. Takes effect on their next request. */
+  async setPrimaryRole(userId: string, roleName: string, reason: string): Promise<UserRoleOut> {
+    return request<UserRoleOut>(`/api/v1/rbac/users/${userId}/role`, {
+      method: 'PUT',
+      body: JSON.stringify({ role_name: roleName, reason }),
+    });
+  },
+};
+
 export const tenantsApi = {
   /**
    * Lightweight tenant identity for the SOC console TopBar.

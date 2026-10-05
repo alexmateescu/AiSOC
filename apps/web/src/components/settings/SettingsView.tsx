@@ -46,9 +46,11 @@ import { Skeleton } from '@/components/ui/Skeleton';
 import { ErrorState } from '@/components/ui/ErrorState';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { AutonomyPolicyPanel } from '@/components/settings/AutonomyPolicy';
+import { AssignRoleModal } from '@/components/settings/AssignRoleModal';
 import { RetroHuntSettingsPanel } from './RetroHuntSettings';
 import { useTheme, type ThemePreference } from '@/components/theme/ThemeProvider';
 import { canUseDemoData } from '@/lib/demoFallback';
+import { rbacApi, authApi } from '@/lib/api';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -655,6 +657,19 @@ function WorkspacePanel() {
 
   const activeCount = users?.filter((u) => u.is_active).length ?? 0;
 
+  // Assignment is admin-only server-side (`roles:write`). The probe is the
+  // same call the Roles screen makes: if it 403s, this operator is not a
+  // platform admin and the per-member controls simply do not render. The
+  // server remains the gate; this only stops offering a doomed button.
+  const { data: rolesList, mutate: reprobeRoles } = useSWR('settings:rbac-roles-probe', () => rbacApi.listRoles(), {
+    revalidateOnFocus: false,
+    shouldRetryOnError: false,
+  });
+  const canAssign = Array.isArray(rolesList);
+  const [assignTarget, setAssignTarget] = useState<TenantUser | null>(null);
+  const me = authApi.currentUser();
+  const adminCount = users?.filter((u) => u.role === 'admin' && u.is_active).length ?? 0;
+
   return (
     <div>
       <PanelHeader
@@ -728,12 +743,43 @@ function WorkspacePanel() {
                   </p>
                   <p className="truncate text-xs text-gray-500">{u.email}</p>
                 </div>
-                <span className="rounded-full bg-gray-800 px-2.5 py-1 text-xs text-gray-300 ring-1 ring-gray-700">
-                  {u.role}
-                </span>
+                <div className="flex shrink-0 items-center gap-2">
+                  <span className="rounded-full bg-gray-800 px-2.5 py-1 text-xs text-gray-300 ring-1 ring-gray-700">
+                    {u.role}
+                  </span>
+                  {canAssign && (
+                    <button
+                      type="button"
+                      onClick={() => setAssignTarget(u)}
+                      disabled={u.id === me?.id && adminCount <= 1}
+                      title={
+                        u.id === me?.id && adminCount <= 1
+                          ? 'You are the only active admin — promote another admin before changing your own role'
+                          : `Change ${u.email}'s role`
+                      }
+                      className="rounded-md border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      Assign role
+                    </button>
+                  )}
+                </div>
               </li>
             ))}
           </ul>
+        )}
+        {assignTarget && (
+          <AssignRoleModal
+            user={assignTarget}
+            roles={rolesList ?? []}
+            isSelf={assignTarget.id === me?.id}
+            adminCount={adminCount}
+            onClose={() => setAssignTarget(null)}
+            onAssigned={() => {
+              setAssignTarget(null);
+              retryUsers();
+              reprobeRoles();
+            }}
+          />
         )}
       </div>
     </div>

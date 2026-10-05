@@ -6,7 +6,7 @@ import { EmptyState, EmptyStateIcons } from '@/components/ui/EmptyState';
 import { demoFallback } from '@/lib/demoFallback';
 import { FailureBanner } from '@/components/ui/FailureBanner';
 import { describeApiFailure } from '@/lib/failure';
-import { apiFetch, authedFetcher } from '@/lib/api';
+import { apiFetch, authedFetcher, rbacApi, type RbacRole } from '@/lib/api';
 
 interface Permission {
   id: string;
@@ -15,14 +15,8 @@ interface Permission {
   category: string | null;
 }
 
-interface Role {
-  id: string;
-  tenant_id: string;
-  name: string;
-  description: string | null;
-  is_system: boolean;
-  permissions: Permission[];
-}
+type Role = RbacRole;
+
 
 // Throws `ApiError`, so the banner below can tell a 403 (this operator cannot
 // read roles) from a 500 (the API is broken) from a 422 (the console is).
@@ -80,13 +74,42 @@ function RoleCard({ role, onEdit, onDelete }: { role: Role; onEdit: (r: Role) =>
           </div>
         )}
       </div>
-      <div className="mt-3 flex flex-wrap gap-1.5">
-        {role.permissions.length === 0 ? (
-          <span className="text-xs text-gray-600 italic">No permissions assigned</span>
-        ) : (
-          role.permissions.map((p) => <PermissionBadge key={p.id} perm={p} />)
+      <div className="mt-3 flex items-center gap-3 text-xs text-gray-400">
+        <span title="Users holding this role in this workspace">
+          {role.user_count} user{role.user_count === 1 ? '' : 's'}
+        </span>
+        {role.is_sso_default && (
+          <span className="rounded bg-sky-500/20 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-sky-300" title="New SSO sign-ins are provisioned with this role">
+            SSO default · protected
+          </span>
+        )}
+        {role.is_system && !role.is_sso_default && (
+          <span className="rounded bg-gray-700/60 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-gray-300">
+            protected · non-deletable
+          </span>
         )}
       </div>
+      {(() => {
+        const byCat = new Map<string, Permission[]>();
+        for (const p of role.permissions) {
+          const cat = p.category ?? 'other';
+          (byCat.get(cat) ?? byCat.set(cat, []).get(cat)!).push(p);
+        }
+        return role.permissions.length === 0 ? (
+          <p className="mt-3 text-xs italic text-gray-600">No permissions assigned</p>
+        ) : (
+          <div className="mt-3 space-y-2">
+            {[...byCat.entries()].sort().map(([cat, perms]) => (
+              <div key={cat}>
+                <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-gray-500">{cat}</p>
+                <div className="flex flex-wrap gap-1.5">
+                  {perms.map((p) => <PermissionBadge key={p.id} perm={p} />)}
+                </div>
+              </div>
+            ))}
+          </div>
+        );
+      })()}
     </div>
   );
 }
@@ -233,21 +256,29 @@ const MOCK_ROLES: Role[] = [
   {
     id: 'role-1', tenant_id: 'default', name: 'SOC Analyst', description: 'Front-line analyst with read access to alerts, cases, and playbooks',
     is_system: true,
+    user_count: 0,
+    is_sso_default: false,
     permissions: MOCK_PERMISSIONS.filter((p) => ['p1', 'p3', 'p5', 'p7', 'p9', 'p12'].includes(p.id)),
   },
   {
     id: 'role-2', tenant_id: 'default', name: 'SOC Lead', description: 'Senior analyst with write access and playbook execution',
     is_system: true,
+    user_count: 0,
+    is_sso_default: false,
     permissions: MOCK_PERMISSIONS.filter((p) => ['p1', 'p2', 'p3', 'p4', 'p5', 'p6', 'p7', 'p9', 'p12'].includes(p.id)),
   },
   {
     id: 'role-3', tenant_id: 'default', name: 'Admin', description: 'Full access to all features and settings',
     is_system: true,
+    user_count: 0,
+    is_sso_default: false,
     permissions: MOCK_PERMISSIONS,
   },
   {
     id: 'role-4', tenant_id: 'default', name: 'Detection Engineer', description: 'Manages detection rules and connector integrations',
     is_system: false,
+    user_count: 0,
+    is_sso_default: false,
     permissions: MOCK_PERMISSIONS.filter((p) => ['p1', 'p7', 'p8', 'p9', 'p10'].includes(p.id)),
   },
 ];
@@ -266,6 +297,29 @@ export function RBACView() {
 
   const [showCreate, setShowCreate] = useState(false);
   const [editingRole, setEditingRole] = useState<Role | null>(null);
+  const [seeding, setSeeding] = useState(false);
+  const [seedMsg, setSeedMsg] = useState<string | null>(null);
+
+  // `roles:read` owns this screen server-side; a 403 means the operator is
+  // not a platform admin. The management controls hide themselves rather
+  // than rendering and failing — the server is the gate, the UI is just
+  // honest about what the gate already answered.
+  const rolesStatus = (rolesError as { status?: number } | undefined)?.status;
+  const isAdmin = rolesStatus !== 403 && rolesStatus !== 401;
+
+  const handleSeed = async () => {
+    setSeeding(true);
+    setSeedMsg(null);
+    try {
+      const res = await rbacApi.seedRoles();
+      setSeedMsg(`Catalog seeded: ${res.roles} roles, ${res.permissions} permissions, ${res.user_roles} memberships.`);
+      await reloadRoles();
+    } catch (e) {
+      setSeedMsg(`Seeding failed: ${(e as Error).message}`);
+    } finally {
+      setSeeding(false);
+    }
+  };
 
   const handleDelete = async (role: Role) => {
     if (!confirm(`Delete role "${role.name}"?`)) return;
@@ -280,12 +334,14 @@ export function RBACView() {
           <h2 className="text-xl font-bold text-gray-100">Roles & Permissions</h2>
           <p className="mt-0.5 text-sm text-gray-500">Manage access control for your organization.</p>
         </div>
-        <button
-          onClick={() => setShowCreate(true)}
-          className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700"
-        >
-          + New Role
-        </button>
+        {isAdmin && (
+          <button
+            onClick={() => setShowCreate(true)}
+            className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700"
+          >
+            + New Role
+          </button>
+        )}
       </div>
 
       {/* `roles` is `undefined` on failure outside the hosted demo, which
@@ -319,17 +375,33 @@ export function RBACView() {
         <EmptyState
           icon={EmptyStateIcons.shield}
           title="No roles defined yet"
-          description="Create your first role to start managing access control for your organization."
+          description="Seed the standard catalog (viewer, infosec, admin) with its permissions, or create a custom role. Seeding is idempotent and backfills existing members' memberships so nobody loses access."
           action={
-            <button
-              type="button"
-              onClick={() => setShowCreate(true)}
-              className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 transition-colors"
-            >
-              + New Role
-            </button>
+            isAdmin ? (
+              <div className="flex gap-3">
+                <button
+                  type="button"
+                  onClick={handleSeed}
+                  disabled={seeding}
+                  className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 transition-colors disabled:opacity-50"
+                >
+                  {seeding ? 'Seeding…' : 'Seed roles'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowCreate(true)}
+                  className="rounded-lg border border-gray-700 px-4 py-2 text-sm font-medium text-gray-200 hover:bg-gray-800 transition-colors"
+                >
+                  + New Role
+                </button>
+              </div>
+            ) : undefined
           }
         />
+      )}
+
+      {seedMsg && (
+        <p className="rounded-lg border border-indigo-800/60 bg-indigo-950/40 px-4 py-2 text-sm text-indigo-200">{seedMsg}</p>
       )}
 
       {roles && roles.length > 0 && (
@@ -338,14 +410,14 @@ export function RBACView() {
             <RoleCard
               key={role.id}
               role={role}
-              onEdit={(r) => setEditingRole(r)}
-              onDelete={handleDelete}
+              onEdit={isAdmin ? (r) => setEditingRole(r) : () => undefined}
+              onDelete={isAdmin ? handleDelete : () => undefined}
             />
           ))}
         </div>
       )}
 
-      {(showCreate || editingRole) && permissions && (
+      {isAdmin && (showCreate || editingRole) && permissions && (
         <RoleForm
           allPermissions={permissions}
           initial={editingRole ?? undefined}

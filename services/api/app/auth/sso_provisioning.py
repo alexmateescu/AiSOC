@@ -45,6 +45,7 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.rbac_catalog import sync_user_catalog_role
 from app.core.security import create_access_token, create_refresh_token
 from app.db.rls import set_rls_context
 from app.services.audit import emit_audit
@@ -270,6 +271,14 @@ async def provision_user(
                 _sanitize(previous_role, 40),
                 _sanitize(role, 40),
             )
+        # Catalog parity: the `users.role` string this path decides is also
+        # written to `user_roles`, so a tenant running on database-backed
+        # RBAC grants exactly what it just decided rather than whatever the
+        # last backfill happened to attach. On `first_login_only` the role
+        # above IS the admin's manually assigned role, so this is a no-op
+        # re-affirmation — group sync cannot move it, in the tables or on
+        # the column.
+        await sync_user_catalog_role(db, tenant_id=tenant_id, user_id=bound["user_id"], role_name=role)
         return {"id": bound["user_id"], "email": bound["email"], "role": role, "created": False, "previous_role": previous_role}
 
     # ── 2. Claim by verified email ────────────────────────────────────────
@@ -360,6 +369,7 @@ async def provision_user(
                 _sanitize(existing["role"], 40),
                 _sanitize(role, 40),
             )
+        await sync_user_catalog_role(db, tenant_id=tenant_id, user_id=existing["id"], role_name=role)
         return {"id": existing["id"], "email": existing["email"], "role": role, "created": False}
 
     if not jit_provisioning:
@@ -408,6 +418,13 @@ async def provision_user(
         email=email,
         provider=provider,
     )
+
+    # Same parity rule as the two paths above: a JIT user in a
+    # database-backed tenant without a `user_roles` row resolves to zero
+    # permissions. Provisioning decided `viewer` (or a mapped role that
+    # already passed the assignable allow-list); the catalog row of the
+    # same name is attached here, in this transaction.
+    await sync_user_catalog_role(db, tenant_id=tenant_id, user_id=user_id, role_name=role)
 
     logger.info(
         "sso.user_provisioned email=%s role=%s provider=%s",
