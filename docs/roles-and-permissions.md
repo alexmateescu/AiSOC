@@ -126,7 +126,10 @@ scope deliberately skips.
 Rollback: the commented block at the bottom of the migration deletes exactly
 what was seeded (`roles`, their `role_permissions`, and `assigned_by IS NULL`
 memberships), returning the tenant to static-map bootstrap. Run it inside
-one transaction. Operator assignments carry `assigned_by` and survive.
+one transaction. Manual assignments re-attach on re-apply through the
+`users.role` mirror (every console assignment mirrors the column), and FK
+CASCADE means removing a role removes its memberships — verified round trip:
+rollback → 0/0/0, re-apply → 3 roles / 38 grants / correct memberships.
 
 ## Verification performed on the live stack (2026-10-05)
 
