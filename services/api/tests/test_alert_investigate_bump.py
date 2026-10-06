@@ -30,7 +30,14 @@ def _bump_sql() -> str:
 def _open_statuses() -> set[str]:
     m = re.search(r"AND status IN \(([^)]*)\)", _bump_sql())
     assert m, "status IN clause missing from bump SQL"
-    return {s.strip().strip("'\"") for s in m.group(1).split(",")}
+    raw = m.group(1)
+    if "{" in raw:
+        # The guard expands from the pinned tuple via .format() — resolve it
+        # from the source rather than parsing the placeholder text.
+        t = re.search(r"_ALERT_OPEN_STATUSES[^=]*=\s*\(([^)]*)\)", SOURCE)
+        assert t, "_ALERT_OPEN_STATUSES tuple missing from cases.py"
+        raw = t.group(1)
+    return {s.strip().strip("'\"") for s in raw.split(",") if s.strip()}
 
 
 def test_alert_bump_is_tenant_scoped() -> None:
