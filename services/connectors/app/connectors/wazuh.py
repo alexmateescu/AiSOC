@@ -429,7 +429,6 @@ class WazuhConnector(BaseConnector):
         for hit in hits:
             if not isinstance(hit, dict):
                 continue
-            source = hit.get("_source") or {}
             finding = self.normalize_vulnerability(hit)
             if finding is not None:
                 findings.append(finding)
