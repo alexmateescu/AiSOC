@@ -29,6 +29,7 @@ def _bump_sql() -> str:
 
 def _open_statuses() -> set[str]:
     m = re.search(r"AND status IN \(([^)]*)\)", _bump_sql())
+    assert m, "status IN clause missing from bump SQL"
     return {s.strip().strip("'\"") for s in m.group(1).split(",")}
 
 

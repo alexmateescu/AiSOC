@@ -31198,6 +31198,12 @@ components:
       title: RoleSetIn
     RoleUpdate:
       properties:
+        name:
+          anyOf:
+          - type: string
+            maxLength: 100
+          - type: 'null'
+          title: Name
         label:
           anyOf:
           - type: string
@@ -31226,15 +31232,19 @@ components:
           title: Permission Names
       type: object
       title: RoleUpdate
-      description: '`name` is deliberately absent: the machine name is immutable after
+      description: 'The machine `name` is immutable after create: it is mirrored into
 
-        create. It is mirrored into users.role, resolved against the JWT static
+        users.role, resolved against the JWT static map, and written into audit
 
-        map, and written into audit resource strings; renaming a live role would
+        resource strings; renaming a live role would strand all three. The field
 
-        strand all three. Edit `label` and `description` for the human-facing
+        stays on the wire (SDK clients generated against earlier releases send
 
-        text.'
+        it) and is validated as a no-op: omit it, or send the role''s current
+
+        name — an actual rename is a 400 that says why. Edit `label` and
+
+        `description` for the human-facing text.'
     RotateScimTokenRequest:
       properties:
         grace_hours:
