@@ -1669,13 +1669,13 @@ async def case_investigate(
             await db.commit()
             if bump.rowcount:
                 logger.info(
-                    "investigate.launch.alerts_advance",
-                    case_id=str(cid),
-                    alert_count=bump.rowcount,
+                    "investigate.launch.alerts_advance case_id=%s alert_count=%s",
+                    cid,
+                    bump.rowcount,
                 )
         except Exception:  # noqa: BLE001 — never block the launch on the alert bump
             await db.rollback()
-            logger.warning("investigate.launch.alerts_advance_failed", case_id=str(cid), exc_info=True)
+            logger.warning("investigate.launch.alerts_advance_failed case_id=%s", cid, exc_info=True)
 
     resp = await _agents_proxy(
         "POST",

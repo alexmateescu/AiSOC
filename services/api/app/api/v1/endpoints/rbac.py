@@ -97,12 +97,15 @@ class RoleIn(BaseModel):
 
 
 class RoleUpdate(BaseModel):
-    """`name` is deliberately absent: the machine name is immutable after
-    create. It is mirrored into users.role, resolved against the JWT static
-    map, and written into audit resource strings; renaming a live role would
-    strand all three. Edit `label` and `description` for the human-facing
-    text."""
+    """The machine `name` is immutable after create: it is mirrored into
+    users.role, resolved against the JWT static map, and written into audit
+    resource strings; renaming a live role would strand all three. The field
+    stays on the wire (SDK clients generated against earlier releases send
+    it) and is validated as a no-op: omit it, or send the role's current
+    name — an actual rename is a 400 that says why. Edit `label` and
+    `description` for the human-facing text."""
 
+    name: str | None = Field(default=None, max_length=100)
     label: str | None = Field(default=None, max_length=200)
     description: str | None = None
     permission_ids: list[uuid.UUID] | None = None
@@ -381,6 +384,16 @@ async def update_role(
     role: the lock is a server rule, not a hidden button. `name` cannot be
     edited — see RoleUpdate."""
     role = await _get_role_or_404(db, role_id, current_user.tenant_id)
+
+    if body.name is not None and body.name != role.name:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Role name is immutable after create (current name '{role.name}'): "
+                "it is mirrored into users.role, the JWT role map, and audit "
+                "resource strings. Edit label/description, or create a new role."
+            ),
+        )
 
     if role.is_system:
         raise HTTPException(
