@@ -353,9 +353,7 @@ async def get_role(
 ) -> RoleOut:
     role = await _get_role_or_404(db, role_id, current_user.tenant_id)
     perms = await _load_role_permissions(db, role.id)
-    count = await db.scalar(
-        select(func.count()).select_from(UserRole).where(UserRole.role_id == role.id)
-    )
+    count = await db.scalar(select(func.count()).select_from(UserRole).where(UserRole.role_id == role.id))
     return RoleOut(
         id=role.id,
         tenant_id=role.tenant_id,
@@ -510,8 +508,12 @@ async def replace_role_permissions(
     await db.commit()
     await bump_version(str(current_user.tenant_id))
     return RoleOut(
-        id=role.id, tenant_id=role.tenant_id, name=role.name, label=role.label,
-        description=role.description, is_system=role.is_system,
+        id=role.id,
+        tenant_id=role.tenant_id,
+        name=role.name,
+        label=role.label,
+        description=role.description,
+        is_system=role.is_system,
         permissions=[PermissionOut.model_validate(p) for p in perms],
         user_count=await _permission_affected_users(db, role.id),
         is_sso_default=role.name == SSO_DEFAULT_ROLE,
@@ -535,15 +537,17 @@ async def add_role_permission(
     [perm] = await _resolve_permission_names(db, [body.permission])
     _authorize_permission_grant([perm], current_user, subject=f"permission {perm.name!r}")
 
-    existing = await db.execute(
-        select(RolePermission).where(RolePermission.role_id == role.id, RolePermission.permission_id == perm.id)
-    )
+    existing = await db.execute(select(RolePermission).where(RolePermission.role_id == role.id, RolePermission.permission_id == perm.id))
     if existing.scalar_one_or_none() is None:
         db.add(RolePermission(role_id=role.id, permission_id=perm.id))
         await emit_audit(
-            db=db, tenant_id=current_user.tenant_id, actor_id=current_user.user_id,
-            actor_email=current_user.email, action="rbac.role_permission_added",
-            resource="role", resource_id=str(role.id),
+            db=db,
+            tenant_id=current_user.tenant_id,
+            actor_id=current_user.user_id,
+            actor_email=current_user.email,
+            action="rbac.role_permission_added",
+            resource="role",
+            resource_id=str(role.id),
             changes={"added": perm.name, "affected_users": await _permission_affected_users(db, role.id)},
             request=request,
         )
@@ -551,8 +555,13 @@ async def add_role_permission(
         await bump_version(str(current_user.tenant_id))
     perms_out = await _load_role_permissions(db, role.id)
     return RoleOut(
-        id=role.id, tenant_id=role.tenant_id, name=role.name, label=role.label,
-        description=role.description, is_system=role.is_system, permissions=perms_out,
+        id=role.id,
+        tenant_id=role.tenant_id,
+        name=role.name,
+        label=role.label,
+        description=role.description,
+        is_system=role.is_system,
+        permissions=perms_out,
         user_count=await _permission_affected_users(db, role.id),
         is_sso_default=role.name == SSO_DEFAULT_ROLE,
     )
@@ -574,17 +583,17 @@ async def remove_role_permission(
         )
     [perm] = await _resolve_permission_names(db, [permission_name])
 
-    existing = await db.execute(
-        select(RolePermission).where(RolePermission.role_id == role.id, RolePermission.permission_id == perm.id)
-    )
+    existing = await db.execute(select(RolePermission).where(RolePermission.role_id == role.id, RolePermission.permission_id == perm.id))
     if existing.scalar_one_or_none() is not None:
-        await db.execute(
-            delete(RolePermission).where(RolePermission.role_id == role.id, RolePermission.permission_id == perm.id)
-        )
+        await db.execute(delete(RolePermission).where(RolePermission.role_id == role.id, RolePermission.permission_id == perm.id))
         await emit_audit(
-            db=db, tenant_id=current_user.tenant_id, actor_id=current_user.user_id,
-            actor_email=current_user.email, action="rbac.role_permission_removed",
-            resource="role", resource_id=str(role.id),
+            db=db,
+            tenant_id=current_user.tenant_id,
+            actor_id=current_user.user_id,
+            actor_email=current_user.email,
+            action="rbac.role_permission_removed",
+            resource="role",
+            resource_id=str(role.id),
             changes={"removed": perm.name, "affected_users": await _permission_affected_users(db, role.id)},
             request=request,
         )
@@ -592,8 +601,13 @@ async def remove_role_permission(
         await bump_version(str(current_user.tenant_id))
     perms_out = await _load_role_permissions(db, role.id)
     return RoleOut(
-        id=role.id, tenant_id=role.tenant_id, name=role.name, label=role.label,
-        description=role.description, is_system=role.is_system, permissions=perms_out,
+        id=role.id,
+        tenant_id=role.tenant_id,
+        name=role.name,
+        label=role.label,
+        description=role.description,
+        is_system=role.is_system,
+        permissions=perms_out,
         user_count=await _permission_affected_users(db, role.id),
         is_sso_default=role.name == SSO_DEFAULT_ROLE,
     )
@@ -624,9 +638,13 @@ async def delete_role(
     role_name = role.name
     await db.delete(role)
     await emit_audit(
-        db=db, tenant_id=current_user.tenant_id, actor_id=current_user.user_id,
-        actor_email=current_user.email, action="rbac.role_deleted",
-        resource="role", resource_id=str(role_id),
+        db=db,
+        tenant_id=current_user.tenant_id,
+        actor_id=current_user.user_id,
+        actor_email=current_user.email,
+        action="rbac.role_deleted",
+        resource="role",
+        resource_id=str(role_id),
         changes={"name": role_name, "permissions_before": perms_before},
         request=request,
     )
@@ -679,27 +697,17 @@ async def set_primary_role(
         set) or disabled target; 403 this caller may not confer the role's
         permissions; 409 this would empty the tenant of active admins.
     """
-    target = (
-        await db.execute(select(User).where(User.id == user_id, User.tenant_id == current_user.tenant_id))
-    ).scalar_one_or_none()
+    target = (await db.execute(select(User).where(User.id == user_id, User.tenant_id == current_user.tenant_id))).scalar_one_or_none()
     if target is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found in tenant")
     if not target.is_active:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Cannot assign roles to a disabled user")
 
     role = (
-        await db.execute(
-            select(Role).where(Role.tenant_id == current_user.tenant_id, Role.name == body.role_name)
-        )
+        await db.execute(select(Role).where(Role.tenant_id == current_user.tenant_id, Role.name == body.role_name))
     ).scalar_one_or_none()
     if role is None:
-        valid = sorted(
-            (
-                await db.execute(
-                    select(Role.name).where(Role.tenant_id == current_user.tenant_id)
-                )
-            ).scalars().all()
-        )
+        valid = sorted((await db.execute(select(Role.name).where(Role.tenant_id == current_user.tenant_id))).scalars().all())
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=(
@@ -721,10 +729,9 @@ async def set_primary_role(
     demoting_admin = old_role in wildcard and role.name not in wildcard
     if demoting_admin or (current_user.user_id == user_id and demoting_admin):
         remaining = await db.scalar(
-            text(
-                "SELECT count(*) FROM users "
-                "WHERE tenant_id = :t AND is_active = TRUE AND role = ANY(:wild) AND id <> :keep"
-            ).bindparams(t=str(current_user.tenant_id), wild=wildcard, keep=str(user_id))
+            text("SELECT count(*) FROM users WHERE tenant_id = :t AND is_active = TRUE AND role = ANY(:wild) AND id <> :keep").bindparams(
+                t=str(current_user.tenant_id), wild=wildcard, keep=str(user_id)
+            )
         )
         if not remaining:
             raise HTTPException(
@@ -824,10 +831,9 @@ async def revoke_role(
     wildcard = sorted(role_grants.wildcard_roles())
     if role.name in wildcard:
         remaining = await db.scalar(
-            text(
-                "SELECT count(*) FROM users "
-                "WHERE tenant_id = :t AND is_active = TRUE AND role = ANY(:wild) AND id <> :keep"
-            ).bindparams(t=str(current_user.tenant_id), wild=wildcard, keep=str(user_id))
+            text("SELECT count(*) FROM users WHERE tenant_id = :t AND is_active = TRUE AND role = ANY(:wild) AND id <> :keep").bindparams(
+                t=str(current_user.tenant_id), wild=wildcard, keep=str(user_id)
+            )
         )
         if not remaining:
             raise HTTPException(
@@ -889,9 +895,7 @@ async def _resolve_permission_names(db: AsyncSession, names: list[str]) -> list[
 
 
 async def _permission_affected_users(db: AsyncSession, role_id: uuid.UUID) -> int:
-    return int(await db.scalar(
-        text("SELECT count(*) FROM user_roles WHERE role_id = CAST(:r AS uuid)").bindparams(r=str(role_id))
-    ) or 0)
+    return int(await db.scalar(text("SELECT count(*) FROM user_roles WHERE role_id = CAST(:r AS uuid)").bindparams(r=str(role_id))) or 0)
 
 
 async def _resolve_permissions(db: AsyncSession, permission_ids: list[uuid.UUID]) -> list[Permission]:

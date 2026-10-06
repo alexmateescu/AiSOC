@@ -1659,9 +1659,7 @@ async def case_investigate(
                 text(
                     "UPDATE alerts SET status = 'investigating', updated_at = :now "
                     "WHERE id::text = ANY(:ids) AND tenant_id = :tenant_id "
-                    "AND status IN ({})".format(
-                        ", ".join(f"'{st}'" for st in _ALERT_OPEN_STATUSES)
-                    )
+                    "AND status IN ({})".format(", ".join(f"'{st}'" for st in _ALERT_OPEN_STATUSES))
                 ).bindparams(
                     ids=[str(a) for a in case_alert_ids],
                     tenant_id=user.tenant_id,
