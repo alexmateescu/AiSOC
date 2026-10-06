@@ -182,10 +182,7 @@ async def seed_tenant_catalog(db: AsyncSession, tenant_id: Any) -> dict[str, int
                    category    = EXCLUDED.category
             """
         ),
-        [
-            {"name": name, "description": desc, "category": cat}
-            for name, desc, cat in PERMISSIONS
-        ],
+        [{"name": name, "description": desc, "category": cat} for name, desc, cat in PERMISSIONS],
     )
 
     await db.execute(
@@ -262,13 +259,9 @@ async def seed_tenant_catalog(db: AsyncSession, tenant_id: Any) -> dict[str, int
         "permissions": "SELECT count(*) FROM permissions",
         "roles": "SELECT count(*) FROM roles WHERE tenant_id = CAST(:t AS uuid)",
         "role_permissions": (
-            "SELECT count(*) FROM role_permissions rp JOIN roles r ON r.id = rp.role_id "
-            "WHERE r.tenant_id = CAST(:t AS uuid)"
+            "SELECT count(*) FROM role_permissions rp JOIN roles r ON r.id = rp.role_id WHERE r.tenant_id = CAST(:t AS uuid)"
         ),
-        "user_roles": (
-            "SELECT count(*) FROM user_roles ur JOIN roles r ON r.id = ur.role_id "
-            "WHERE r.tenant_id = CAST(:t AS uuid)"
-        ),
+        "user_roles": ("SELECT count(*) FROM user_roles ur JOIN roles r ON r.id = ur.role_id WHERE r.tenant_id = CAST(:t AS uuid)"),
     }.items():
         counts[key] = int((await db.execute(text(stmt), {"t": tid})).scalar() or 0)
     return counts
@@ -303,9 +296,6 @@ async def sync_user_catalog_role(db: AsyncSession, *, tenant_id: Any, user_id: A
         {"u": uid, "r": str(row[0])},
     )
     await db.execute(
-        text(
-            "INSERT INTO user_roles (user_id, role_id) VALUES (CAST(:u AS uuid), CAST(:r AS uuid)) "
-            "ON CONFLICT DO NOTHING"
-        ),
+        text("INSERT INTO user_roles (user_id, role_id) VALUES (CAST(:u AS uuid), CAST(:r AS uuid)) ON CONFLICT DO NOTHING"),
         {"u": uid, "r": str(row[0])},
     )

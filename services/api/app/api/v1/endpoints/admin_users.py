@@ -128,13 +128,18 @@ async def list_users(
     elif status_filter == "disabled":
         conds.append(User.is_active.is_(False))
 
-    params: dict[str, Any] = {"search": f"%{search.strip()}%" if search else None,
-                              "active": True if status_filter == "active" else (False if status_filter == "disabled" else None)}
+    params: dict[str, Any] = {
+        "search": f"%{search.strip()}%" if search else None,
+        "active": True if status_filter == "active" else (False if status_filter == "disabled" else None),
+    }
 
     if role:
         conds.append(
-            text("EXISTS (SELECT 1 FROM user_roles ur JOIN roles r ON r.id = ur.role_id "
-                 "WHERE ur.user_id = users.id AND r.name = :role_name)").bindparams(role_name=role).bindparams(role_name=role)
+            text(
+                "EXISTS (SELECT 1 FROM user_roles ur JOIN roles r ON r.id = ur.role_id WHERE ur.user_id = users.id AND r.name = :role_name)"
+            )
+            .bindparams(role_name=role)
+            .bindparams(role_name=role)
         )
         params["role_name"] = role
 
@@ -143,14 +148,8 @@ async def list_users(
     order_col = _SORTABLE[sort]
     order_by = order_col.asc().nulls_last() if order == "asc" else order_col.desc().nulls_last()
 
-    total = await db.scalar(
-        select(func.count()).select_from(User).where(*conds)
-    )
-    rows = (
-        await db.execute(
-            select(User).where(*conds).order_by(order_by, User.id).limit(limit).offset(offset)
-        )
-    ).scalars().all()
+    total = await db.scalar(select(func.count()).select_from(User).where(*conds))
+    rows = (await db.execute(select(User).where(*conds).order_by(order_by, User.id).limit(limit).offset(offset))).scalars().all()
 
     # One join for every listed user's roles; provider from the password
     # hash prefix (`!sso-no-pass` marks SSO-JIT accounts with no local
@@ -256,8 +255,10 @@ async def set_roles(
     """Replace the user's full role set (multi-role replace semantics)."""
     target = await _get_target(db, user_id, current_user.tenant_id)
     if not target.is_active:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
-                            detail="This member is disabled — enable them before changing roles (the role is preserved either way)")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This member is disabled — enable them before changing roles (the role is preserved either way)",
+        )
 
     roles = await _resolve_roles(db, current_user.tenant_id, body.role_names)
     await _authorize_roles(db, roles, current_user)
@@ -265,9 +266,7 @@ async def set_roles(
 
     old_roles = await _roles_of(db, target.id, current_user.tenant_id)
     now = datetime.now(UTC)
-    await db.execute(
-            text("DELETE FROM user_roles WHERE user_id = CAST(:u AS uuid)").bindparams(u=str(target.id))
-        )
+    await db.execute(text("DELETE FROM user_roles WHERE user_id = CAST(:u AS uuid)").bindparams(u=str(target.id)))
     for role in roles:
         db.add(UserRole(user_id=target.id, role_id=role.id, assigned_by=current_user.user_id))
     mirrored = _mirror_role(roles)
@@ -305,14 +304,11 @@ async def add_role(
 ) -> AdminUserOut:
     target = await _get_target(db, user_id, current_user.tenant_id)
     if not target.is_active:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
-                            detail="This member is disabled — enable them before changing roles")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="This member is disabled — enable them before changing roles")
     role = await _resolve_role_or_400(db, current_user.tenant_id, body.role_name)
     await _authorize_roles(db, [role], current_user)
 
-    existing = await db.execute(
-        select(UserRole).where(UserRole.user_id == target.id, UserRole.role_id == role.id)
-    )
+    existing = await db.execute(select(UserRole).where(UserRole.user_id == target.id, UserRole.role_id == role.id))
     if existing.scalar_one_or_none() is None:
         old_roles = await _roles_of(db, target.id, current_user.tenant_id)
         db.add(UserRole(user_id=target.id, role_id=role.id, assigned_by=current_user.user_id))
@@ -329,8 +325,7 @@ async def add_role(
             action="admin.users.role_added",
             resource="user",
             resource_id=str(target.id),
-            changes={"old_roles": sorted(set(old_roles)), "added_role": role.name,
-                    "reason": (body.reason or "")[:500]},
+            changes={"old_roles": sorted(set(old_roles)), "added_role": role.name, "reason": (body.reason or "")[:500]},
             request=request,
         )
         await db.commit()
@@ -351,15 +346,18 @@ async def remove_role(
 
     held = [r for r in await _role_rows(db, target.id, current_user.tenant_id) if r.id != role.id]
     if not held:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
-                            detail="Cannot remove the member's only role — assign another role first (spec: no NULL-role users)")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot remove the member's only role — assign another role first (spec: no NULL-role users)",
+        )
     await _guard_last_admin(db, current_user.tenant_id, target, held)
 
     now = datetime.now(UTC)
     await db.execute(
-            text("DELETE FROM user_roles WHERE user_id = CAST(:u AS uuid) AND role_id = CAST(:r AS uuid)")
-            .bindparams(u=str(target.id), r=str(role.id))
+        text("DELETE FROM user_roles WHERE user_id = CAST(:u AS uuid) AND role_id = CAST(:r AS uuid)").bindparams(
+            u=str(target.id), r=str(role.id)
         )
+    )
     mirrored = _mirror_role(held)
     await db.execute(update(User).where(User.id == target.id).values(role=mirrored, updated_at=now))
     await _end_sessions(db, target.id, now)
@@ -371,8 +369,11 @@ async def remove_role(
         action="admin.users.role_removed",
         resource="user",
         resource_id=str(target.id),
-        changes={"removed_role": role.name, "new_roles": sorted(r.name for r in held),
-                 "reason": (request.query_params.get("reason") or "")[:500]},
+        changes={
+            "removed_role": role.name,
+            "new_roles": sorted(r.name for r in held),
+            "reason": (request.query_params.get("reason") or "")[:500],
+        },
         request=request,
     )
     await db.commit()
@@ -397,9 +398,9 @@ async def patch_status(
     the role assignment is preserved untouched."""
     target = await _get_target(db, user_id, current_user.tenant_id)
     if not body.is_active:
-        await _guard_last_admin(db, current_user.tenant_id, target,
-                                await _role_rows(db, target.id, current_user.tenant_id),
-                                deactivating=True)
+        await _guard_last_admin(
+            db, current_user.tenant_id, target, await _role_rows(db, target.id, current_user.tenant_id), deactivating=True
+        )
 
     now = datetime.now(UTC)
     await db.execute(update(User).where(User.id == target.id).values(is_active=body.is_active, updated_at=now))
@@ -453,9 +454,7 @@ async def delete_user(
             status_code=status.HTTP_409_CONFLICT,
             detail="you cannot delete your own account; disable it instead",
         )
-    await _guard_last_admin(db, current_user.tenant_id, target,
-                            await _role_rows(db, target.id, current_user.tenant_id),
-                            deactivating=True)
+    await _guard_last_admin(db, current_user.tenant_id, target, await _role_rows(db, target.id, current_user.tenant_id), deactivating=True)
 
     now = datetime.now(UTC)
     snapshot = {
@@ -469,9 +468,7 @@ async def delete_user(
     # End sessions first: a token mid-flight must fail closed the moment
     # the row disappears, not at expiry.
     await _end_sessions(db, target.id, now)
-    await db.execute(
-            text("DELETE FROM user_roles WHERE user_id = CAST(:u AS uuid)").bindparams(u=str(target.id))
-        )
+    await db.execute(text("DELETE FROM user_roles WHERE user_id = CAST(:u AS uuid)").bindparams(u=str(target.id)))
     await db.delete(target)
     await emit_audit(
         db=db,
@@ -493,18 +490,14 @@ async def delete_user(
 
 
 async def _get_target(db: AsyncSession, user_id: uuid.UUID, tenant_id: uuid.UUID) -> User:
-    target = (
-        await db.execute(select(User).where(User.id == user_id, User.tenant_id == tenant_id))
-    ).scalar_one_or_none()
+    target = (await db.execute(select(User).where(User.id == user_id, User.tenant_id == tenant_id))).scalar_one_or_none()
     if target is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found in tenant")
     return target
 
 
 async def _resolve_role_or_400(db: AsyncSession, tenant_id: uuid.UUID, name: str) -> Role:
-    role = (
-        await db.execute(select(Role).where(Role.tenant_id == tenant_id, Role.name == name))
-    ).scalar_one_or_none()
+    role = (await db.execute(select(Role).where(Role.tenant_id == tenant_id, Role.name == name))).scalar_one_or_none()
     if role is None:
         valid = sorted((await db.execute(select(Role.name).where(Role.tenant_id == tenant_id))).scalars().all())
         raise HTTPException(
@@ -523,8 +516,7 @@ async def _resolve_roles(db: AsyncSession, tenant_id: uuid.UUID, names: list[str
         seen.add(n)
         uniq.append(await _resolve_role_or_400(db, tenant_id, n))
     if not uniq:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
-                            detail="A user must hold at least one role")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="A user must hold at least one role")
     return uniq
 
 
@@ -532,9 +524,7 @@ async def _authorize_roles(db: AsyncSession, roles: list[Role], granter: AuthUse
     """The granter may only confer what they hold (privilege-escalation gate)."""
     from app.core.role_grants import RoleGrantDenied, authorize_permission_grant
 
-    names = sorted({
-        p.name for r in roles for p in (await _role_perm_models(db, r.id))
-    })
+    names = sorted({p.name for r in roles for p in (await _role_perm_models(db, r.id))})
     if "*" in names:
         names = sorted(await _all_perm_names(db))
     try:
@@ -551,8 +541,7 @@ async def _authorize_roles(db: AsyncSession, roles: list[Role], granter: AuthUse
 
 async def _role_perm_models(db: AsyncSession, role_id: uuid.UUID) -> list[Permission]:
     result = await db.execute(
-        select(Permission).join(RolePermission, RolePermission.permission_id == Permission.id)
-        .where(RolePermission.role_id == role_id)
+        select(Permission).join(RolePermission, RolePermission.permission_id == Permission.id).where(RolePermission.role_id == role_id)
     )
     return list(result.scalars().all())
 
@@ -572,26 +561,26 @@ async def _guard_last_admin(
 ) -> None:
     """Refuse any write that would empty the tenant of active admins."""
     wildcard = sorted(role_grants.wildcard_roles())
-    keeps_admin = (
-        any(r.name in wildcard for r in resulting_roles)
-        and not deactivating
-    )
+    keeps_admin = any(r.name in wildcard for r in resulting_roles) and not deactivating
     if keeps_admin:
         return  # target keeps admin and stays active — nothing lost
     losing = target.role in wildcard or deactivating
     if not losing:
         # admin may be held only through a role row being replaced/stripped
         held_admin = await db.scalar(
-            text("SELECT count(*) FROM user_roles ur JOIN roles r ON r.id = ur.role_id "
-                 "WHERE ur.user_id = CAST(:u AS uuid) AND r.name = ANY(:w)").bindparams(u=str(target.id), w=wildcard)
+            text(
+                "SELECT count(*) FROM user_roles ur JOIN roles r ON r.id = ur.role_id "
+                "WHERE ur.user_id = CAST(:u AS uuid) AND r.name = ANY(:w)"
+            ).bindparams(u=str(target.id), w=wildcard)
         )
         losing = bool(held_admin)
     if not losing:
         return
     remaining = await db.scalar(
-        text("SELECT count(*) FROM users WHERE tenant_id = CAST(:t AS uuid) AND is_active = TRUE "
-             "AND (role = ANY(:w) OR EXISTS (SELECT 1 FROM user_roles ur JOIN roles r ON r.id = ur.role_id "
-             "WHERE ur.user_id = users.id AND r.name = ANY(:w))) AND id <> CAST(:keep AS uuid)"
+        text(
+            "SELECT count(*) FROM users WHERE tenant_id = CAST(:t AS uuid) AND is_active = TRUE "
+            "AND (role = ANY(:w) OR EXISTS (SELECT 1 FROM user_roles ur JOIN roles r ON r.id = ur.role_id "
+            "WHERE ur.user_id = users.id AND r.name = ANY(:w))) AND id <> CAST(:keep AS uuid)"
         ).bindparams(t=str(tenant_id), w=wildcard, keep=str(target.id))
     )
     if not remaining:
@@ -603,26 +592,28 @@ async def _guard_last_admin(
 
 async def _roles_of(db: AsyncSession, user_id: uuid.UUID, tenant_id: uuid.UUID) -> list[str]:
     rows = await db.execute(
-        text("SELECT r.name FROM user_roles ur JOIN roles r ON r.id = ur.role_id "
-             "WHERE ur.user_id = CAST(:u AS uuid) AND r.tenant_id = CAST(:t AS uuid)").bindparams(u=str(user_id), t=str(tenant_id))
+        text(
+            "SELECT r.name FROM user_roles ur JOIN roles r ON r.id = ur.role_id "
+            "WHERE ur.user_id = CAST(:u AS uuid) AND r.tenant_id = CAST(:t AS uuid)"
+        ).bindparams(u=str(user_id), t=str(tenant_id))
     )
     return [r for (r,) in rows.all()]
 
 
 async def _role_rows(db: AsyncSession, user_id: uuid.UUID, tenant_id: uuid.UUID) -> list[Role]:
     result = await db.execute(
-        select(Role).join(UserRole, UserRole.role_id == Role.id)
-        .where(UserRole.user_id == user_id, Role.tenant_id == tenant_id)
+        select(Role).join(UserRole, UserRole.role_id == Role.id).where(UserRole.user_id == user_id, Role.tenant_id == tenant_id)
     )
     return list(result.scalars().all())
 
 
 async def _effective_perms(db: AsyncSession, user_id: uuid.UUID, tenant_id: uuid.UUID) -> list[str]:
     rows = await db.execute(
-        text("SELECT DISTINCT p.name FROM user_roles ur JOIN roles r ON r.id = ur.role_id "
-             "JOIN role_permissions rp ON rp.role_id = r.id JOIN permissions p ON p.id = rp.permission_id "
-             "WHERE ur.user_id = CAST(:u AS uuid) AND r.tenant_id = CAST(:t AS uuid) ORDER BY 1")
-        .bindparams(u=str(user_id), t=str(tenant_id))
+        text(
+            "SELECT DISTINCT p.name FROM user_roles ur JOIN roles r ON r.id = ur.role_id "
+            "JOIN role_permissions rp ON rp.role_id = r.id JOIN permissions p ON p.id = rp.permission_id "
+            "WHERE ur.user_id = CAST(:u AS uuid) AND r.tenant_id = CAST(:t AS uuid) ORDER BY 1"
+        ).bindparams(u=str(user_id), t=str(tenant_id))
     )
     return [p for (p,) in rows.all()]
 
