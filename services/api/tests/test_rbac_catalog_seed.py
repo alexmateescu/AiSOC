@@ -56,9 +56,7 @@ def test_system_role_names_pinned() -> None:
     module_roles = {name for name, _desc in SYSTEM_ROLES}
     assert {"viewer", "infosec", "admin"} == module_roles
     for role in module_roles:
-        assert re.search(rf"r\.name\s*=\s*'{role}'", sql) or f"'{role}'" in sql, (
-            f"role '{role}' not referenced in migration 092"
-        )
+        assert re.search(rf"r\.name\s*=\s*'{role}'", sql) or f"'{role}'" in sql, f"role '{role}' not referenced in migration 092"
 
 
 def test_role_grants_pinned() -> None:
