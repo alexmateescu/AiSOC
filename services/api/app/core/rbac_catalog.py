@@ -9,7 +9,7 @@ because a tenant that has roles but no memberships resolves every user to
 zero permissions. Two copies of that vocabulary — one in the migration, one
 in the endpoint that seeds other tenants — drift. So the vocabulary lives
 here, the migration embeds the same lists, and the two are pinned equal by
-``tests/test_rbac_catalog_seed.py``.
+``services/api/tests/test_rbac_catalog_seed.py``.
 
 Deny-by-default lives in ``permission_cache.resolve_permissions``: once a
 tenant has any role row, only ``role_permissions``/``user_roles`` answer.
