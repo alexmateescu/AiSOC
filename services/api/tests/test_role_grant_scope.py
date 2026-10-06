@@ -34,6 +34,14 @@ refused **and no write is issued**, and a legitimate grant still lands.
 
 from __future__ import annotations
 
+
+def _http_request(method: str = "POST", path: str = "/api/v1/rbac/roles") -> Request:
+    """Minimal starlette Request for direct handler calls in tests."""
+    from starlette.requests import Request
+
+    return Request({"type": "http", "method": method, "path": path, "headers": [], "query_string": b""})
+
+
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -438,6 +446,7 @@ class TestRbacRoleAssignment:
 
         with pytest.raises(HTTPException) as exc:
             await rbac_mod.create_role(
+                request=_http_request(),
                 body=rbac_mod.RoleIn(name="plugin-ops", permission_ids=[perm.id]),
                 current_user=_principal("tenant_admin"),
                 db=db,
