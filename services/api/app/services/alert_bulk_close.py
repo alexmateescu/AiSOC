@@ -50,7 +50,10 @@ DEFAULT_MAX_COUNT = 500
 
 #: Backup-table names are generated (never user-supplied) but are still
 #: interpolated into DDL, so they go through the same identifier gate.
-_BACKUP_TABLE_RE = re.compile(r"^bulk_close_backup_[0-9a-f]{32}$")
+# Backup tables live in aisoc_bulk_close_backup (migration 095): aisoc_app
+# deliberately lacks CREATE in public — least privilege, live-caught 500.
+_BACKUP_SCHEMA = "aisoc_bulk_close_backup"
+_BACKUP_TABLE_RE = re.compile(r"^aisoc_bulk_close_backup\.bulk_close_backup_[0-9a-f]{32}$")
 
 #: Statuses an alert may be bulk-closed *to*. ``new``/``investigating`` are
 #: excluded: those are queue states, and bulk-moving work into the queue is
@@ -139,12 +142,16 @@ def _snapshot_select(preds: list[Any]) -> Select[tuple[Any, ...]]:
 def _snapshot_sql(select_stmt: Select[tuple[Any, ...]], backup_table: str) -> str:
     """Render the snapshot SELECT into CREATE TABLE ... AS form.
 
-    The ORM select is compiled by SQLAlchemy itself (named ``%(param)s``
-    binds, quoted identifiers) — the only edit is prefixing the DDL verb,
-    so the snapshot's WHERE stays literal-bug-for-literal identical to the
-    statement the endpoint counted and the UPDATE later reuses.
+    Compiled with ``literal_binds`` on purpose: the raw DDL string goes to
+    asyncpg through ``text()``, and asyncpg has no pyformat binds — a
+    leftover ``%(name)s`` placeholder from a psycopg2-style compile is a
+    syntax error at the driver (live-caught 2026-10-06: HTTP 500,
+    "syntax error at or near %").  literal_binds keeps the WHERE structure
+    identical to the statement the endpoint counted and the UPDATE reuses,
+    with SQLAlchemy handling all quoting/escaping of the values (which are
+    tenant UUIDs and validated filter strings).
     """
-    compiled = str(select_stmt.compile(dialect=postgresql.dialect()))
+    compiled = str(select_stmt.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
     # Strip the table qualifier from the projected columns: CREATE TABLE AS
     # derives column names, and `alerts.id` would name the column "id"
     # anyway — but PostgreSQL warns on qualified names in CTAS output,
@@ -198,16 +205,14 @@ async def bulk_close_alerts(
     if matched > max_count:
         raise BulkCloseOverMatch(matched=matched, max_count=max_count)
 
-    backup_table = f"bulk_close_backup_{uuid.uuid4().hex}"
+    backup_table = f"{_BACKUP_SCHEMA}.bulk_close_backup_{uuid.uuid4().hex}"
     if not _BACKUP_TABLE_RE.match(backup_table):  # pragma: no cover - belt over braces
         raise RuntimeError("generated backup table name failed identifier validation")
 
     select_stmt = _snapshot_select(preds)
-    compiled = select_stmt.compile(dialect=postgresql.dialect())
-    snapshot_params = dict(compiled.params)
 
     await db.execute(text(f"DROP TABLE IF EXISTS {backup_table}"))
-    await db.execute(text(_snapshot_sql(select_stmt, backup_table)), snapshot_params)
+    await db.execute(text(_snapshot_sql(select_stmt, backup_table)))
 
     now = datetime.now(UTC)
     updates: dict[str, Any] = {"status": close_status, "updated_at": now}

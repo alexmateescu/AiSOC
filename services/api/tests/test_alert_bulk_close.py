@@ -101,6 +101,31 @@ class TestPredicateBuilder:
         assert "status IN" not in rendered
 
 
+class TestSnapshotSqlRendering:
+    def test_snapshot_ddl_has_no_pyformat_binds(self):
+        """asyncpg rejects %(name)s placeholders — live-caught 500.
+
+        The snapshot DDL is compiled with literal_binds; a regression to a
+        psycopg2-style compile would reintroduce % binds into text() and
+        blow up at the driver, invisible to mocked-session tests.
+        """
+        from app.services.alert_bulk_close import _snapshot_select, _snapshot_sql
+
+        preds = build_bulk_close_predicates(
+            tenant_id=_tenant(),
+            alert_ids=None,
+            statuses=["new"],
+            severities=["low", "high"],
+            categories=None,
+            connector_types=["wazuh"],
+            older_than=None,
+        )
+        ddl = _snapshot_sql(_snapshot_select(preds), "aisoc_bulk_close_backup.bulk_close_backup_deadbeef")
+        assert "%" not in ddl
+        assert "CREATE TABLE aisoc_bulk_close_backup.bulk_close_backup_deadbeef AS SELECT" in ddl
+        assert "tenant_id" in ddl
+
+
 class TestValidationBeforeWrite:
     @pytest.mark.asyncio
     async def test_no_ids_no_filter_refused(self):
@@ -160,7 +185,7 @@ class TestHappyPath:
         )
         assert outcome["closed_count"] == 3
         assert outcome["close_status"] == "false_positive"
-        assert outcome["backup_table"].startswith("bulk_close_backup_")
+        assert outcome["backup_table"].startswith("aisoc_bulk_close_backup.bulk_close_backup_")
 
         statements = []
         for call in db.execute.await_args_list:
@@ -170,9 +195,9 @@ class TestHappyPath:
 
         # count → snapshot DDL → update, tenant predicate in each of them
         assert joined.count("tenant_id") >= 3
-        assert "CREATE TABLE bulk_close_backup_" in joined
+        assert "CREATE TABLE aisoc_bulk_close_backup.bulk_close_backup_" in joined
         assert "UPDATE alerts" in joined
-        assert "DROP TABLE IF EXISTS bulk_close_backup_" in joined
+        assert "DROP TABLE IF EXISTS aisoc_bulk_close_backup.bulk_close_backup_" in joined
         db.commit.assert_awaited_once()
 
     @pytest.mark.asyncio
