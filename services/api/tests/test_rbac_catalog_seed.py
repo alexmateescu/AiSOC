@@ -17,8 +17,8 @@ from pathlib import Path
 from app.core.rbac_catalog import (
     PERMISSIONS,
     ROLE_GRANTS,
-    SYSTEM_ROLES,
     SYSTEM_ROLE_LABELS,
+    SYSTEM_ROLES,
 )
 
 MIGRATION = Path(__file__).resolve().parents[1] / "migrations" / "092_rbac_catalog_seed.sql"
