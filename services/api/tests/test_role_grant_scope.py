@@ -34,14 +34,6 @@ refused **and no write is issued**, and a legitimate grant still lands.
 
 from __future__ import annotations
 
-
-def _http_request(method: str = "POST", path: str = "/api/v1/rbac/roles") -> Request:
-    """Minimal starlette Request for direct handler calls in tests."""
-    from starlette.requests import Request
-
-    return Request({"type": "http", "method": method, "path": path, "headers": [], "query_string": b""})
-
-
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -54,6 +46,14 @@ from app.api.v1.endpoints import mssp as mssp_mod
 from app.api.v1.endpoints import rbac as rbac_mod
 from app.api.v1.endpoints import tenants as tenants_mod
 from fastapi import HTTPException
+
+
+def _http_request(method: str = "POST", path: str = "/api/v1/rbac/roles"):
+    """Minimal starlette Request for direct handler calls in tests."""
+    from starlette.requests import Request
+
+    return Request({"type": "http", "method": method, "path": path, "headers": [], "query_string": b""})
+
 
 TENANT = uuid.uuid4()
 
