@@ -97,7 +97,11 @@
       "websocket-driver": ">=0.7.5",
       "tsup>esbuild": "^0.28.1",
       "vite>esbuild": "^0.28.1",
-      "bundle-require>esbuild": "^0.28.1"
+      "bundle-require>esbuild": "^0.28.1",
+      "tinypool": "^2.1.2",
+      "compression": "^1.8.2",
+      "source-map-js": "^1.2.2",
+      "braces": ">=3.0.2"
     }
   }
 }
