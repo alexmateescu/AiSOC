@@ -3,6 +3,7 @@
 from fastapi import APIRouter
 
 from app.api.v1.endpoints import (
+    admin_users,
     agent_tools,
     agents,
     airgap,
@@ -69,7 +70,6 @@ from app.api.v1.endpoints import (
     plugins,
     posture,
     push,
-    admin_users,
     rbac,
     realtime,
     remediation,

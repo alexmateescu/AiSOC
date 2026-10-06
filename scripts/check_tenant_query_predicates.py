@@ -326,16 +326,26 @@ RATCHET: dict[str, str] = {
     # tenant before writing). Cross-tenant by the nature of a platform-admin
     # console; reachable only behind require_permission("roles:write").
     "services/api/app/api/v1/endpoints/admin_users.py::_end_sessions::User": (
-        "write keyed on a user id from the tenant-scoped SELECT earlier in the same request; revoking another tenant's session requires guessing a UUID, not reaching it"
+        "write keyed on a user id from the tenant-scoped SELECT earlier in "
+        "the same request; revoking another tenant's session requires "
+        "guessing a UUID, not reaching it"
     ),
     "services/api/app/api/v1/endpoints/admin_users.py::_guard_last_admin::roles": (
-        "count of admins holding this user's role rows; user_id comes from the tenant-scoped read, and the answer only ever denies the operation"
+        "count of admins holding this user's role rows; user_id comes from "
+        "the tenant-scoped read, and the answer only ever denies the "
+        "operation"
     ),
     "services/api/app/api/v1/endpoints/rbac.py::set_primary_role::User": (
-        "mirrors the granted role name onto the user row, keyed on the user id validated against the caller's tenant at the top of this endpoint"
+        "mirrors the granted role name onto the user row, keyed on the "
+        "user id validated against the caller's tenant at the top of this "
+        "endpoint"
     ),
     "services/api/app/core/rbac_catalog.py::<module>::alerts": (
-        "false-positive attribution: the flagged line is the PERMISSIONS vocabulary tuple, not SQL — the word 'alerts' appears only inside permission slugs ('alerts:read' …); the module's only executable SQL is seed_tenant_catalog's INSERT INTO permissions/roles/role_permissions/user_roles, each bound to :t"
+        "false-positive attribution: the flagged line is the PERMISSIONS "
+        "vocabulary tuple, not SQL — the word 'alerts' appears only inside "
+        "permission slugs ('alerts:read' …); the module's only executable "
+        "SQL is seed_tenant_catalog's INSERT INTO permissions/roles/"
+        "role_permissions/user_roles, each bound to :t"
     ),
 }
 
