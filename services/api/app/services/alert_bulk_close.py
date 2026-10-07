@@ -55,6 +55,19 @@ DEFAULT_MAX_COUNT = 500
 _BACKUP_SCHEMA = "aisoc_bulk_close_backup"
 _BACKUP_TABLE_RE = re.compile(r"^aisoc_bulk_close_backup\.bulk_close_backup_[0-9a-f]{32}$")
 
+#: Log-injection guard (CodeQL py/log-injection): a bulk-close comment is
+#: free text from the request. CR/LF and control bytes would forge extra
+#: log lines (or break JSON handlers downstream); neutralise them and cap
+#: the length before anything reaches the logger.
+_LOG_UNSAFE_RE = re.compile(r"[\r\n\x00-\x1f\x7f]")
+
+
+def _safe_log_text(value: str | None, *, limit: int = 120) -> str:
+    """Single-line, control-char-free rendering of user free text for logs."""
+    if not value:
+        return ""
+    return _LOG_UNSAFE_RE.sub(" ", value)[:limit]
+
 #: Statuses an alert may be bulk-closed *to*. ``new``/``investigating`` are
 #: excluded: those are queue states, and bulk-moving work into the queue is
 #: not what this endpoint is for.
@@ -221,15 +234,19 @@ async def bulk_close_alerts(
     closed = int(result.rowcount or 0)
     await db.commit()
 
+    # Every interpolated value is neutralised or validated: tenant/actor are
+    # server-side UUIDs, close_status is membership-checked against
+    # CLOSE_STATUSES, backup_table is regex-validated above, comment is free
+    # text and goes through _safe_log_text (CodeQL py/log-injection).
     logger.info(
-        "alerts.bulk_close tenant=%s actor=%s matched=%d closed=%d target=%s backup=%s comment=%r",
+        "alerts.bulk_close tenant=%s actor=%s matched=%d closed=%d target=%s backup=%s comment=%s",
         tenant_id,
         actor_id,
         matched,
         closed,
         close_status,
         backup_table,
-        (comment or "")[:120],
+        _safe_log_text(comment),
     )
 
     return {

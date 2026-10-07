@@ -198,22 +198,22 @@ class TestTheStreamSplit:
 class TestThePromotionContract:
     def test_sql_is_fail_closed_and_scoped(self):
         from app.vuln_promotion_sql import (
-            _MARK_OVERDUE_SQL,
-            _PROMOTE_CANDIDATES_SQL,
-            _UPSERT_ALERT_SQL,
+            MARK_OVERDUE_SQL,
+            PROMOTE_CANDIDATES_SQL,
+            UPSERT_ALERT_SQL,
         )
 
-        for sql in (_MARK_OVERDUE_SQL, _PROMOTE_CANDIDATES_SQL, _UPSERT_ALERT_SQL):
+        for sql in (MARK_OVERDUE_SQL, PROMOTE_CANDIDATES_SQL, UPSERT_ALERT_SQL):
             assert "tenant_id" in sql, "every statement is tenant-scoped"
         # The exception path is spelled in the candidate query, not in a
         # prompt: overdue OR CVSS>9 OR exploited OR KEV.
-        assert "patch_status IN ('overdue', 'promoted')" in _PROMOTE_CANDIDATES_SQL
-        assert "cvss_score > 9" in _PROMOTE_CANDIDATES_SQL
-        assert "is_exploited" in _PROMOTE_CANDIDATES_SQL
-        assert "threat_intel_iocs" in _PROMOTE_CANDIDATES_SQL
+        assert "patch_status IN ('overdue', 'promoted')" in PROMOTE_CANDIDATES_SQL
+        assert "cvss_score > 9" in PROMOTE_CANDIDATES_SQL
+        assert "is_exploited" in PROMOTE_CANDIDATES_SQL
+        assert "threat_intel_iocs" in PROMOTE_CANDIDATES_SQL
         # one grouped alert per CVE via the idempotency key
-        assert "ON CONFLICT (tenant_id, idempotency_key)" in _UPSERT_ALERT_SQL
-        assert "GROUP BY v.cve_id" in _PROMOTE_CANDIDATES_SQL
+        assert "ON CONFLICT (tenant_id, idempotency_key)" in UPSERT_ALERT_SQL
+        assert "GROUP BY v.cve_id" in PROMOTE_CANDIDATES_SQL
 
     def test_scheduler_registers_the_promotion_job(self):
         import inspect

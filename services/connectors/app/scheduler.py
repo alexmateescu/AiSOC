@@ -77,6 +77,13 @@ from app.pipeline import (
     diff_fingerprints,
 )
 from app.security.credential_vault import CredentialVault, CredentialVaultError, get_vault
+from app.vuln_promotion_sql import (
+    MARK_OVERDUE_SQL,
+    MARK_PROMOTED_SQL,
+    PROMOTE_CANDIDATES_SQL,
+    RESOLVE_REMEDIATED_SQL,
+    UPSERT_ALERT_SQL,
+)
 
 logger = logging.getLogger("aisoc.connectors.scheduler")
 
@@ -881,14 +888,6 @@ class ConnectorScheduler:
             return
         from sqlalchemy import text
 
-        from app.vuln_promotion_sql import (
-            _MARK_OVERDUE_SQL,
-            _MARK_PROMOTED_SQL,
-            _PROMOTE_CANDIDATES_SQL,
-            _RESOLVE_REMEDIATED_SQL,
-            _UPSERT_ALERT_SQL,
-        )
-
         try:
             async with self._engine.connect() as conn:
                 tenants = (
@@ -911,13 +910,13 @@ class ConnectorScheduler:
                         {"tid": str(tenant_id)},
                     )
                     overdue = (
-                        await conn.execute(text(_MARK_OVERDUE_SQL), {"tenant_id": tenant_id})
+                        await conn.execute(text(MARK_OVERDUE_SQL), {"tenant_id": tenant_id})
                     ).rowcount
                     resolved = (
-                        await conn.execute(text(_RESOLVE_REMEDIATED_SQL), {"tenant_id": tenant_id})
+                        await conn.execute(text(RESOLVE_REMEDIATED_SQL), {"tenant_id": tenant_id})
                     ).rowcount
                     candidates = (
-                        await conn.execute(text(_PROMOTE_CANDIDATES_SQL), {"tenant_id": tenant_id})
+                        await conn.execute(text(PROMOTE_CANDIDATES_SQL), {"tenant_id": tenant_id})
                     ).fetchall()
 
                     promoted = 0
@@ -938,7 +937,7 @@ class ConnectorScheduler:
                         if row.is_exploited:
                             why.append("actively exploited")
                         await conn.execute(
-                            text(_UPSERT_ALERT_SQL),
+                            text(UPSERT_ALERT_SQL),
                             {
                                 "tenant_id": tenant_id,
                                 "title": f"{cve} overdue / urgent on {row.host_count} host(s)",
@@ -967,7 +966,7 @@ class ConnectorScheduler:
                             },
                         )
                         await conn.execute(
-                            text(_MARK_PROMOTED_SQL),
+                            text(MARK_PROMOTED_SQL),
                             {"tenant_id": tenant_id, "cve_id": cve.lower()},
                         )
                         promoted += 1

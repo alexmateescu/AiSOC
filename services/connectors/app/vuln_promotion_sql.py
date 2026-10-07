@@ -12,7 +12,7 @@ from __future__ import annotations
 #: alert, and rows with ``remediated_at`` set are done. Runs inside the
 #: promotion job's transaction so an alert is never created for a row the
 #: same sweep did not mark overdue.
-_MARK_OVERDUE_SQL = """
+MARK_OVERDUE_SQL = """
     UPDATE asset_vulnerabilities
        SET patch_status = 'overdue'
      WHERE tenant_id = CAST(:tenant_id AS uuid)
@@ -33,7 +33,7 @@ _MARK_OVERDUE_SQL = """
 #: the EXISTS clause contributes nothing today — it is the seam the 093
 #: KEV seed worker feeds when it lands. ``is_exploited`` is the exploited
 #: signal that works right now.
-_PROMOTE_CANDIDATES_SQL = """
+PROMOTE_CANDIDATES_SQL = """
     SELECT v.cve_id,
            MAX(v.cvss_score)                        AS cvss_score,
            bool_or(v.is_exploited)                  AS is_exploited,
@@ -66,7 +66,7 @@ _PROMOTE_CANDIDATES_SQL = """
 #: analyst touching 500 windows (policy §Alert lifecycle). Column names are
 #: the live schema (``resolved_at``/``disposition`` — there is no
 #: ``closed_at``/``resolution`` on ``alerts``).
-_RESOLVE_REMEDIATED_SQL = """
+RESOLVE_REMEDIATED_SQL = """
     UPDATE alerts al
        SET status = 'resolved',
            resolved_at = NOW(),
@@ -90,7 +90,7 @@ _RESOLVE_REMEDIATED_SQL = """
 #: meaningful changed (more hosts, new exploit status), keeping ``status``
 #: sticky: a promoted alert that an analyst moved to ``investigating`` must
 #: not snap back to ``new`` on the next sweep.
-_UPSERT_ALERT_SQL = """
+UPSERT_ALERT_SQL = """
     INSERT INTO alerts (
         tenant_id, connector_type, category, title, description,
         severity, status, event_time, first_seen, last_seen,
@@ -113,7 +113,7 @@ _UPSERT_ALERT_SQL = """
 
 #: After a CVE's alert row exists, mark its contributing rows promoted so
 #: the next sweep does not re-count them as fresh candidates.
-_MARK_PROMOTED_SQL = """
+MARK_PROMOTED_SQL = """
     UPDATE asset_vulnerabilities
        SET patch_status = 'promoted'
      WHERE tenant_id = CAST(:tenant_id AS uuid)
@@ -121,3 +121,16 @@ _MARK_PROMOTED_SQL = """
        AND lower(cve_id) = :cve_id
        AND patch_status IN ('tracked', 'overdue')
 """
+
+
+#: Public surface: the scheduler and tests import these names. Public (not
+#: underscore) because cross-module use of private names is what made an
+#: automated pass report them "unused globals" — the module is the SQL's
+#: only home, and its consumers are in-repo and explicit.
+__all__ = [
+    "MARK_OVERDUE_SQL",
+    "PROMOTE_CANDIDATES_SQL",
+    "RESOLVE_REMEDIATED_SQL",
+    "UPSERT_ALERT_SQL",
+    "MARK_PROMOTED_SQL",
+]

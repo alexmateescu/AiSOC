@@ -225,3 +225,17 @@ class TestHappyPath:
         update_stmt = str(db.execute.await_args_list[-1].args[0])
         assert "UPDATE alerts" in update_stmt
         assert "id IN" in update_stmt and "tenant_id" in update_stmt
+
+
+def test_safe_log_text_neutralises_log_injection() -> None:
+    """CodeQL py/log-injection: CR/LF/control bytes from user comments must
+    never reach the log stream verbatim."""
+    from app.services.alert_bulk_close import _safe_log_text
+
+    evil = "sweep\r\n2026-10-07 FAKE extra log line\x1b[31mred\x1b\x00end"
+    out = _safe_log_text(evil)
+    assert "\r" not in out and "\n" not in out
+    assert "\x1b" not in out and "\x00" not in out
+    assert out.startswith("sweep")
+    assert _safe_log_text("x" * 500) == "x" * 120
+    assert _safe_log_text(None) == ""
