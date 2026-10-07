@@ -1,6 +1,7 @@
 """Structured logging configuration using structlog."""
 
 import logging
+import os
 import sys
 
 import structlog
@@ -38,8 +39,10 @@ def configure_logging() -> None:
         cache_logger_on_first_use=True,
     )
 
-    # Silence noisy libraries
-    logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+    # Silence noisy libraries. `uvicorn.access` is opt-in via
+    # AISOC_ACCESS_LOG=1: without it a post-login bounce cannot be attributed
+    # to a specific request, since no per-request line reaches the logs.
+    logging.getLogger("uvicorn.access").setLevel(logging.INFO if os.getenv("AISOC_ACCESS_LOG") == "1" else logging.WARNING)
     logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
 
 

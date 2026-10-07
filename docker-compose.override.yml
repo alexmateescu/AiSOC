@@ -1,0 +1,23 @@
+# fra-hq-soc-01 migration overlay (2026-10-06)
+# - MLX on 10.41.193.128:8888 is the only inference endpoint; bundled Ollama disabled
+# - memory caps sized for 8 GiB host
+services:
+  opensearch:
+    environment:
+      OPENSEARCH_JAVA_OPTS: -Xms256m -Xmx256m
+  neo4j:
+    environment:
+      NEO4J_server_memory_heap_max__size: 384m
+      NEO4J_server_memory_pagecache_size: 128m
+  kafka:
+    environment:
+      KAFKA_HEAP_OPTS: -Xms256m -Xmx256m
+  zookeeper:
+    environment:
+      ZOOKEEPER_HEAP_OPTS: -Xmx128m
+  ollama:
+    profiles: ["disabled"]
+  ollama-pull:
+    profiles: ["disabled"]
+  litellm:
+    depends_on: !reset null
