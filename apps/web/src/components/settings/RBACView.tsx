@@ -6,7 +6,8 @@ import { EmptyState, EmptyStateIcons } from '@/components/ui/EmptyState';
 import { demoFallback } from '@/lib/demoFallback';
 import { FailureBanner } from '@/components/ui/FailureBanner';
 import { describeApiFailure } from '@/lib/failure';
-import { apiFetch, authedFetcher } from '@/lib/api';
+import { authedFetcher, rbacApi, type RbacRole } from '@/lib/api';
+import toast from 'react-hot-toast';
 
 interface Permission {
   id: string;
@@ -15,14 +16,8 @@ interface Permission {
   category: string | null;
 }
 
-interface Role {
-  id: string;
-  tenant_id: string;
-  name: string;
-  description: string | null;
-  is_system: boolean;
-  permissions: Permission[];
-}
+type Role = RbacRole;
+
 
 // Throws `ApiError`, so the banner below can tell a 403 (this operator cannot
 // read roles) from a 500 (the API is broken) from a 422 (the console is).
@@ -54,7 +49,8 @@ function RoleCard({ role, onEdit, onDelete }: { role: Role; onEdit: (r: Role) =>
       <div className="flex items-start justify-between gap-2">
         <div>
           <div className="flex items-center gap-2">
-            <span className="text-base font-semibold text-gray-100">{role.name}</span>
+            <span className="text-base font-semibold text-gray-100">{role.label || role.name}</span>
+            {role.label && <span className="font-mono text-xs text-gray-500">{role.name}</span>}
             {role.is_system && (
               <span className="rounded bg-indigo-100 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-indigo-700">
                 system
@@ -80,13 +76,42 @@ function RoleCard({ role, onEdit, onDelete }: { role: Role; onEdit: (r: Role) =>
           </div>
         )}
       </div>
-      <div className="mt-3 flex flex-wrap gap-1.5">
-        {role.permissions.length === 0 ? (
-          <span className="text-xs text-gray-600 italic">No permissions assigned</span>
-        ) : (
-          role.permissions.map((p) => <PermissionBadge key={p.id} perm={p} />)
+      <div className="mt-3 flex items-center gap-3 text-xs text-gray-400">
+        <span title="Users holding this role in this workspace">
+          {role.user_count} user{role.user_count === 1 ? '' : 's'}
+        </span>
+        {role.is_sso_default && (
+          <span className="rounded bg-sky-500/20 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-sky-300" title="New SSO sign-ins are provisioned with this role">
+            SSO default · protected
+          </span>
+        )}
+        {role.is_system && !role.is_sso_default && (
+          <span className="rounded bg-gray-700/60 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-gray-300">
+            protected · non-deletable
+          </span>
         )}
       </div>
+      {(() => {
+        const byCat = new Map<string, Permission[]>();
+        for (const p of role.permissions) {
+          const cat = p.category ?? 'other';
+          (byCat.get(cat) ?? byCat.set(cat, []).get(cat)!).push(p);
+        }
+        return role.permissions.length === 0 ? (
+          <p className="mt-3 text-xs italic text-gray-600">No permissions assigned</p>
+        ) : (
+          <div className="mt-3 space-y-2">
+            {[...byCat.entries()].sort().map(([cat, perms]) => (
+              <div key={cat}>
+                <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-gray-500">{cat}</p>
+                <div className="flex flex-wrap gap-1.5">
+                  {perms.map((p) => <PermissionBadge key={p.id} perm={p} />)}
+                </div>
+              </div>
+            ))}
+          </div>
+        );
+      })()}
     </div>
   );
 }
@@ -99,20 +124,21 @@ interface RoleFormProps {
 
 function RoleForm({ allPermissions, initial, onClose }: RoleFormProps) {
   const [name, setName] = useState(initial?.name ?? '');
+  const [label, setLabel] = useState(initial?.label ?? initial?.name ?? '');
   const [description, setDescription] = useState(initial?.description ?? '');
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(
-    new Set(initial?.permissions.map((p) => p.id) ?? [])
+  const [selectedNames, setSelectedNames] = useState<Set<string>>(
+    new Set(initial?.permissions.map((p) => p.name) ?? [])
   );
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const categories = Array.from(new Set(allPermissions.map((p) => p.category ?? 'other'))).sort();
 
-  const toggle = (id: string) => {
-    setSelectedIds((prev) => {
+  const toggle = (pname: string) => {
+    setSelectedNames((prev) => {
       const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
+      if (next.has(pname)) next.delete(pname);
+      else next.add(pname);
       return next;
     });
   };
@@ -122,21 +148,28 @@ function RoleForm({ allPermissions, initial, onClose }: RoleFormProps) {
     setSaving(true);
     setError(null);
     try {
-      const url = initial ? `/api/v1/rbac/roles/${initial.id}` : '/api/v1/rbac/roles';
-      const method = initial ? 'PATCH' : 'POST';
-      const res = await fetch(url, {
-        method,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, description: description || null, permission_ids: Array.from(selectedIds) }),
-      });
-      if (!res.ok) {
-        const data = await res.json();
-        throw new Error(data.detail ?? 'Save failed');
+      // permission_names: every key is validated server-side against the
+      // vocabulary; an unknown key returns a 400 that names it and lists
+      // the valid set — never a silently dropped grant.
+      if (initial) {
+        await rbacApi.updateRole(initial.id, {
+          label: label.trim() || initial.name,
+          description: description || null,
+          permission_names: [...selectedNames],
+        });
+        toast.success(`Role ${initial.name} updated — effective immediately for its ${initial.user_count} member(s).`);
+      } else {
+        await rbacApi.createRole({
+          name: name.trim(),
+          label: label.trim() || name.trim(),
+          description: description || null,
+          permission_names: [...selectedNames],
+        });
+        toast.success(`Role ${name.trim()} created.`);
       }
-      await mutate('/api/v1/rbac/roles');
       onClose();
-    } catch (e: any) {
-      setError(e.message);
+    } catch (e) {
+      setError((e as Error).message || 'Save failed');
     } finally {
       setSaving(false);
     }
@@ -144,20 +177,35 @@ function RoleForm({ allPermissions, initial, onClose }: RoleFormProps) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-      <div className="w-full max-w-2xl rounded-2xl bg-white shadow-2xl">
+      <div className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-2xl bg-white shadow-2xl">
         <div className="flex items-center justify-between border-b px-6 py-4">
-          <h2 className="text-lg font-semibold">{initial ? 'Edit Role' : 'Create Role'}</h2>
+          <h2 className="text-lg font-semibold">{initial ? `Edit Role — ${initial.name}` : 'Create Role'}</h2>
           <button onClick={onClose} className="text-gray-400 hover:text-gray-700">✕</button>
         </div>
         <div className="space-y-4 px-6 py-4">
-          {error && <p className="rounded bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p>}
+          {error && <p className="rounded bg-red-50 px-3 py-2 text-sm text-red-700" role="alert">{error}</p>}
           <div>
-            <label className="mb-1 block text-sm font-medium text-gray-700">Name</label>
+            <label className="mb-1 block text-sm font-medium text-gray-700">Name (machine id, immutable)</label>
             <input
               value={name}
               onChange={(e) => setName(e.target.value)}
-              className="w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              readOnly={Boolean(initial)}
+              className="w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 read-only:bg-gray-100 read-only:text-gray-500"
               placeholder="e.g. threat-hunter"
+            />
+            <p className="mt-1 text-xs text-gray-500">
+              {initial
+                ? 'The machine name reaches tokens, audit records and URLs — it cannot be renamed. Edit the display label instead.'
+                : 'Lowercase slug: letters, digits and dashes (e.g. threat-hunter). Reserved names (admin, viewer, infosec…) are refused.'}
+            </p>
+          </div>
+          <div>
+            <label className="mb-1 block text-sm font-medium text-gray-700">Display label</label>
+            <input
+              value={label}
+              onChange={(e) => setLabel(e.target.value)}
+              className="w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              placeholder="e.g. Threat Hunter"
             />
           </div>
           <div>
@@ -171,9 +219,9 @@ function RoleForm({ allPermissions, initial, onClose }: RoleFormProps) {
           </div>
           <div>
             <label className="mb-2 block text-sm font-medium text-gray-700">
-              Permissions ({selectedIds.size} selected)
+              Permissions ({selectedNames.size} selected)
             </label>
-            <div className="max-h-64 overflow-y-auto space-y-3 rounded-lg border p-3">
+            <div className="max-h-64 space-y-3 overflow-y-auto rounded-lg border p-3">
               {categories.map((cat) => (
                 <div key={cat}>
                   <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-gray-500">{cat}</p>
@@ -181,11 +229,11 @@ function RoleForm({ allPermissions, initial, onClose }: RoleFormProps) {
                     {allPermissions
                       .filter((p) => (p.category ?? 'other') === cat)
                       .map((perm) => (
-                        <label key={perm.id} className="flex cursor-pointer items-center gap-1.5">
+                        <label key={perm.name} className="flex cursor-pointer items-center gap-1.5" title={perm.description ?? ''}>
                           <input
                             type="checkbox"
-                            checked={selectedIds.has(perm.id)}
-                            onChange={() => toggle(perm.id)}
+                            checked={selectedNames.has(perm.name)}
+                            onChange={() => toggle(perm.name)}
                             className="rounded border-gray-300 text-indigo-600"
                           />
                           <span className="text-xs text-gray-700">{perm.name}</span>
@@ -206,7 +254,7 @@ function RoleForm({ allPermissions, initial, onClose }: RoleFormProps) {
             disabled={saving}
             className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
           >
-            {saving ? 'Saving…' : initial ? 'Update' : 'Create'}
+            {saving ? 'Saving…' : initial ? 'Save changes' : 'Create role'}
           </button>
         </div>
       </div>
@@ -233,21 +281,29 @@ const MOCK_ROLES: Role[] = [
   {
     id: 'role-1', tenant_id: 'default', name: 'SOC Analyst', description: 'Front-line analyst with read access to alerts, cases, and playbooks',
     is_system: true,
+    user_count: 0,
+    is_sso_default: false,
     permissions: MOCK_PERMISSIONS.filter((p) => ['p1', 'p3', 'p5', 'p7', 'p9', 'p12'].includes(p.id)),
   },
   {
     id: 'role-2', tenant_id: 'default', name: 'SOC Lead', description: 'Senior analyst with write access and playbook execution',
     is_system: true,
+    user_count: 0,
+    is_sso_default: false,
     permissions: MOCK_PERMISSIONS.filter((p) => ['p1', 'p2', 'p3', 'p4', 'p5', 'p6', 'p7', 'p9', 'p12'].includes(p.id)),
   },
   {
     id: 'role-3', tenant_id: 'default', name: 'Admin', description: 'Full access to all features and settings',
     is_system: true,
+    user_count: 0,
+    is_sso_default: false,
     permissions: MOCK_PERMISSIONS,
   },
   {
     id: 'role-4', tenant_id: 'default', name: 'Detection Engineer', description: 'Manages detection rules and connector integrations',
     is_system: false,
+    user_count: 0,
+    is_sso_default: false,
     permissions: MOCK_PERMISSIONS.filter((p) => ['p1', 'p7', 'p8', 'p9', 'p10'].includes(p.id)),
   },
 ];
@@ -266,11 +322,40 @@ export function RBACView() {
 
   const [showCreate, setShowCreate] = useState(false);
   const [editingRole, setEditingRole] = useState<Role | null>(null);
+  const [seeding, setSeeding] = useState(false);
+  const [seedMsg, setSeedMsg] = useState<string | null>(null);
+
+  // `roles:read` owns this screen server-side; a 403 means the operator is
+  // not a platform admin. The management controls hide themselves rather
+  // than rendering and failing — the server is the gate, the UI is just
+  // honest about what the gate already answered.
+  const rolesStatus = (rolesError as { status?: number } | undefined)?.status;
+  const isAdmin = rolesStatus !== 403 && rolesStatus !== 401;
+
+  const handleSeed = async () => {
+    setSeeding(true);
+    setSeedMsg(null);
+    try {
+      const res = await rbacApi.seedRoles();
+      setSeedMsg(`Catalog seeded: ${res.roles} roles, ${res.permissions} permissions, ${res.user_roles} memberships.`);
+      await reloadRoles();
+    } catch (e) {
+      setSeedMsg(`Seeding failed: ${(e as Error).message}`);
+    } finally {
+      setSeeding(false);
+    }
+  };
 
   const handleDelete = async (role: Role) => {
-    if (!confirm(`Delete role "${role.name}"?`)) return;
-    await apiFetch(`/api/v1/rbac/roles/${role.id}`, { method: 'DELETE' });
-    mutate('/api/v1/rbac/roles');
+    if (!confirm(`Delete role "${role.label || role.name}"? This cannot be undone.`)) return;
+    try {
+      await rbacApi.deleteRole(role.id);
+      toast.success(`Role ${role.name} deleted.`);
+      await reloadRoles();
+    } catch (e) {
+      // 409 = still assigned (the server names the count); 403 = system role.
+      toast.error((e as Error).message || 'Delete failed');
+    }
   };
 
   return (
@@ -280,12 +365,14 @@ export function RBACView() {
           <h2 className="text-xl font-bold text-gray-100">Roles & Permissions</h2>
           <p className="mt-0.5 text-sm text-gray-500">Manage access control for your organization.</p>
         </div>
-        <button
-          onClick={() => setShowCreate(true)}
-          className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700"
-        >
-          + New Role
-        </button>
+        {isAdmin && (
+          <button
+            onClick={() => setShowCreate(true)}
+            className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700"
+          >
+            + New Role
+          </button>
+        )}
       </div>
 
       {/* `roles` is `undefined` on failure outside the hosted demo, which
@@ -319,17 +406,33 @@ export function RBACView() {
         <EmptyState
           icon={EmptyStateIcons.shield}
           title="No roles defined yet"
-          description="Create your first role to start managing access control for your organization."
+          description="Seed the standard catalog (viewer, infosec, admin) with its permissions, or create a custom role. Seeding is idempotent and backfills existing members' memberships so nobody loses access."
           action={
-            <button
-              type="button"
-              onClick={() => setShowCreate(true)}
-              className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 transition-colors"
-            >
-              + New Role
-            </button>
+            isAdmin ? (
+              <div className="flex gap-3">
+                <button
+                  type="button"
+                  onClick={handleSeed}
+                  disabled={seeding}
+                  className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 transition-colors disabled:opacity-50"
+                >
+                  {seeding ? 'Seeding…' : 'Seed roles'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowCreate(true)}
+                  className="rounded-lg border border-gray-700 px-4 py-2 text-sm font-medium text-gray-200 hover:bg-gray-800 transition-colors"
+                >
+                  + New Role
+                </button>
+              </div>
+            ) : undefined
           }
         />
+      )}
+
+      {seedMsg && (
+        <p className="rounded-lg border border-indigo-800/60 bg-indigo-950/40 px-4 py-2 text-sm text-indigo-200">{seedMsg}</p>
       )}
 
       {roles && roles.length > 0 && (
@@ -338,14 +441,14 @@ export function RBACView() {
             <RoleCard
               key={role.id}
               role={role}
-              onEdit={(r) => setEditingRole(r)}
-              onDelete={handleDelete}
+              onEdit={isAdmin ? (r) => setEditingRole(r) : () => undefined}
+              onDelete={isAdmin ? handleDelete : () => undefined}
             />
           ))}
         </div>
       )}
 
-      {(showCreate || editingRole) && permissions && (
+      {isAdmin && (showCreate || editingRole) && permissions && (
         <RoleForm
           allPermissions={permissions}
           initial={editingRole ?? undefined}

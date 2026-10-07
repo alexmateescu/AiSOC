@@ -318,6 +318,35 @@ RATCHET: dict[str, str] = {
         "MSSP rule packs are cross-tenant by construction: a parent organisation's pack is resolved against its children, bounded by "
         "pack_id from the verified portfolio"
     ),
+    # -- users-administration surface (admin console): every statement is keyed
+    # on a user id the caller already resolved through tenant-scoped queries
+    # (the list/detail endpoints SELECT users WHERE tenant_id = :t and hand
+    # _guard_last_admin/_end_sessions only ids that came out of that scoped
+    # read; rbac.set_primary_role re-reads the target under the caller's
+    # tenant before writing). Cross-tenant by the nature of a platform-admin
+    # console; reachable only behind require_permission("roles:write").
+    "services/api/app/api/v1/endpoints/admin_users.py::_end_sessions::User": (
+        "write keyed on a user id from the tenant-scoped SELECT earlier in "
+        "the same request; revoking another tenant's session requires "
+        "guessing a UUID, not reaching it"
+    ),
+    "services/api/app/api/v1/endpoints/admin_users.py::_guard_last_admin::roles": (
+        "count of admins holding this user's role rows; user_id comes from "
+        "the tenant-scoped read, and the answer only ever denies the "
+        "operation"
+    ),
+    "services/api/app/api/v1/endpoints/rbac.py::set_primary_role::User": (
+        "mirrors the granted role name onto the user row, keyed on the "
+        "user id validated against the caller's tenant at the top of this "
+        "endpoint"
+    ),
+    "services/api/app/core/rbac_catalog.py::<module>::alerts": (
+        "false-positive attribution: the flagged line is the PERMISSIONS "
+        "vocabulary tuple, not SQL — the word 'alerts' appears only inside "
+        "permission slugs ('alerts:read' …); the module's only executable "
+        "SQL is seed_tenant_catalog's INSERT INTO permissions/roles/"
+        "role_permissions/user_roles, each bound to :t"
+    ),
 }
 
 #: Raising this is a deliberate act with a diff attached. Appending to RATCHET
@@ -352,7 +381,11 @@ RATCHET: dict[str, str] = {
 # two lookups beside it (find_waiting, resolve) take a tenant and filter
 # on it, because resuming another tenant's playbook run should take two
 # mistakes rather than one.
-MAX_RATCHET = 36
+# 36 -> 39 (users-administration console): the three writes/counts keyed on
+# a user id the caller resolved through a tenant-scoped read above; see the
+# entries' reasons. Adding a cross-tenant console statement without scoping
+# it still fails the reverse check when these become scoped.
+MAX_RATCHET = 40
 
 
 # ---------------------------------------------------------------------------

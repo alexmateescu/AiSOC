@@ -42,6 +42,14 @@ from app.api.v1.endpoints import rbac as rbac_mod
 from app.api.v1.endpoints import tenants as tenants_mod
 from fastapi import HTTPException
 
+
+def _http_request(method: str = "POST", path: str = "/api/v1/rbac/roles"):
+    """Minimal starlette Request for direct handler calls in tests."""
+    from starlette.requests import Request
+
+    return Request({"type": "http", "method": method, "path": path, "headers": [], "query_string": b""})
+
+
 TENANT = uuid.uuid4()
 
 pytestmark = pytest.mark.anyio
@@ -294,6 +302,7 @@ class TestRoleAuthoring:
 
         with pytest.raises(HTTPException) as exc:
             await rbac_mod.create_role(
+                request=_http_request(),
                 body=rbac_mod.RoleIn(name="playbook-ops", permission_ids=[perm.id]),
                 current_user=caller,
                 db=db,
@@ -311,6 +320,7 @@ class TestRoleAuthoring:
 
         with pytest.raises(HTTPException) as exc:
             await rbac_mod.update_role(
+                request=_http_request(),
                 role_id=role.id,
                 body=rbac_mod.RoleUpdate(permission_ids=[perm.id]),
                 current_user=caller,

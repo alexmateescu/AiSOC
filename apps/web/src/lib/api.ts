@@ -702,6 +702,160 @@ export const retroHuntsApi = {
   },
 };
 
+export interface RbacPermission {
+  id: string;
+  name: string;
+  description: string | null;
+  category: string | null;
+}
+
+export interface RbacRole {
+  id: string;
+  tenant_id: string;
+  name: string;
+  label?: string | null;
+  description: string | null;
+  is_system: boolean;
+  permissions: RbacPermission[];
+  user_count: number;
+  is_sso_default: boolean;
+}
+
+export interface UserRoleOut {
+  user_id: string;
+  role_id: string;
+  role_name: string;
+}
+
+export interface RbacPermissionLite {
+  name: string;
+  description?: string | null;
+  category?: string | null;
+}
+
+export interface AdminUserRow {
+  id: string;
+  email: string;
+  username?: string | null;
+  is_active: boolean;
+  role: string;
+  roles: string[];
+  provider: string;
+  last_login: string | null;
+  created_at: string;
+  effective_permissions: string[];
+}
+
+export interface AdminUserPage {
+  items: AdminUserRow[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+/**
+ * RBAC console surface. All endpoints are admin-gated server-side
+ * (`roles:read` / `roles:write`); a 403 here means the signed-in operator
+ * is not a platform admin, and the screens must render read-only or hide
+ * management controls accordingly — never pretend success.
+ */
+export const rbacApi = {
+  async listRoles(): Promise<RbacRole[]> {
+    return request<RbacRole[]>('/api/v1/rbac/roles');
+  },
+
+  async listPermissions(): Promise<RbacPermissionLite[]> {
+    return request<RbacPermissionLite[]>('/api/v1/rbac/permissions');
+  },
+
+  async seedRoles(): Promise<{ seeded: boolean; permissions: number; roles: number; role_permissions: number; user_roles: number }> {
+    return request('/api/v1/rbac/roles/seed', { method: 'POST' });
+  },
+
+  async createRole(body: { name: string; label?: string; description?: string | null; permission_names: string[] }): Promise<RbacRole> {
+    return request<RbacRole>('/api/v1/rbac/roles', { method: 'POST', body: JSON.stringify(body) });
+  },
+
+  /** Update label/description and (optionally) replace the permission set. */
+  async updateRole(roleId: string, body: { label?: string; description?: string | null; permission_names?: string[] }): Promise<RbacRole> {
+    return request<RbacRole>(`/api/v1/rbac/roles/${roleId}`, { method: 'PATCH', body: JSON.stringify(body) });
+  },
+
+  async deleteRole(roleId: string): Promise<void> {
+    await apiFetch(`/api/v1/rbac/roles/${roleId}`, { method: 'DELETE' });
+  },
+
+  /** Replace a user's primary role. Takes effect on their next request. */
+  async setPrimaryRole(userId: string, roleName: string, reason: string): Promise<UserRoleOut> {
+    return request<UserRoleOut>(`/api/v1/rbac/users/${userId}/role`, {
+      method: 'PUT',
+      body: JSON.stringify({ role_name: roleName, reason }),
+    });
+  },
+};
+
+/**
+ * Admin Users screen. Server-gated to `roles:write` (admin) on every route;
+ * role changes revoke the target's sessions and take effect immediately.
+ */
+export const adminUsersApi = {
+  async listUsers(params: {
+    search?: string;
+    role?: string;
+    status?: 'active' | 'disabled';
+    sort?: 'name' | 'email' | 'status' | 'created' | 'last_login';
+    order?: 'asc' | 'desc';
+    limit?: number;
+    offset?: number;
+  } = {}): Promise<AdminUserPage> {
+    const qs = new URLSearchParams();
+    Object.entries(params).forEach(([k, v]) => {
+      if (v !== undefined && v !== null && v !== '') qs.set(k, String(v));
+    });
+    const suffix = qs.toString();
+    return request<AdminUserPage>(`/api/v1/admin/users${suffix ? `?${suffix}` : ''}`);
+  },
+
+  async getUser(userId: string): Promise<AdminUserRow> {
+    return request<AdminUserRow>(`/api/v1/admin/users/${userId}`);
+  },
+
+  async setRoles(userId: string, roleNames: string[], reason: string): Promise<AdminUserRow> {
+    return request<AdminUserRow>(`/api/v1/admin/users/${userId}/roles`, {
+      method: 'PUT',
+      body: JSON.stringify({ role_names: roleNames, reason }),
+    });
+  },
+
+  async addRole(userId: string, roleName: string, reason: string): Promise<AdminUserRow> {
+    return request<AdminUserRow>(`/api/v1/admin/users/${userId}/roles`, {
+      method: 'POST',
+      body: JSON.stringify({ role_name: roleName, reason }),
+    });
+  },
+
+  async removeRole(userId: string, roleName: string, reason: string): Promise<AdminUserRow> {
+    const qs = reason ? `?reason=${encodeURIComponent(reason)}` : '';
+    return request<AdminUserRow>(`/api/v1/admin/users/${userId}/roles/${encodeURIComponent(roleName)}${qs}`, {
+      method: 'DELETE',
+    });
+  },
+
+  async setStatus(userId: string, isActive: boolean, reason: string): Promise<AdminUserRow> {
+    return request<AdminUserRow>(`/api/v1/admin/users/${userId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ is_active: isActive, reason }),
+    });
+  },
+
+  async deleteUser(userId: string, reason: string): Promise<void> {
+    await request<void>(
+      `/api/v1/admin/users/${userId}?reason=${encodeURIComponent(reason)}`,
+      { method: 'DELETE' },
+    );
+  },
+};
+
 export const tenantsApi = {
   /**
    * Lightweight tenant identity for the SOC console TopBar.
