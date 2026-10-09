@@ -223,6 +223,17 @@ async def sync_findings(
 
                     _pc = pathlib.Path(__file__).with_name("patch_calendar.py")
                     _spec = importlib.util.spec_from_file_location("aisoc_patch_calendar", _pc)
+                    # `spec_from_file_location` returns None when the path is
+                    # not importable, and a spec can carry no loader. Both are
+                    # unreachable for a file this package ships, but a bare
+                    # `exec_module` on either would raise AttributeError
+                    # several frames from the cause — so say what went wrong.
+                    if _spec is None or _spec.loader is None:
+                        # `from None`: this is a fresh condition, not a
+                        # re-raise of the ImportError that put us in this
+                        # branch, and chaining the two would suggest the
+                        # import error caused it.
+                        raise RuntimeError(f"patch calendar is not importable from {_pc}") from None
                     _mod = importlib.util.module_from_spec(_spec)
                     sys.modules[_spec.name] = _mod
                     _spec.loader.exec_module(_mod)

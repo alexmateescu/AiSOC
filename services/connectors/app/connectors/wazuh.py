@@ -350,7 +350,7 @@ class WazuhConnector(BaseConnector):
         after normalization, so dropping here is the only place the two
         streams provably cannot both claim the same event.
         """
-        query = {
+        query: dict[str, Any] = {
             "size": 1000,
             "sort": [{"@timestamp": {"order": "asc"}}],
             "query": {
@@ -370,6 +370,10 @@ class WazuhConnector(BaseConnector):
             },
         }
         if self._vuln_mode == "inventory":
+            # Annotated at the literal rather than indexed through `object`:
+            # without it mypy infers the nested dict's values as `object`,
+            # which is not indexable, and the chained subscript below is
+            # unchecked.
             query["query"]["bool"]["must_not"] = [
                 {"terms": {"rule.groups": list(_VULN_RULE_GROUPS)}},
             ]
