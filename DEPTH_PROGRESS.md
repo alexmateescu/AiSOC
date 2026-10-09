@@ -278,6 +278,7 @@ Instead, every selector field, `group-by` and `distinct_by` is checked
 against the emitted-field namespace with **no ceiling**, which caught three
 invented fields on the first run of the gate.
 
+<<<<<<< HEAD
 ### D9 -- Five of the 45 "unreachable" rules were never unreachable
 
 `scripts/check_detection_fields.py` carries its own copy of the matcher's
@@ -339,6 +340,8 @@ are among the 18 above. Each has no subject field any source emits, and
 guessing a subject would produce a boolean that is confidently wrong rather
 than absent.
 
+=======
+>>>>>>> feat/cve-patch-windows-v2
 ## Phase 1: Verdict quality you can publish
 
 - [x] **1.1** Balanced, labelled verdict corpus
@@ -366,11 +369,15 @@ than absent.
   refused with a reason. `MAX_UNREACHABLE` 119 → 45.
 - [x] **3.2** Ordered sequences and Sigma correlations — the windowed engine
   stages ordered and unordered sequences; all four translatable Sigma
+<<<<<<< HEAD
   correlation types compile. Windowed corpus 68 → 72. See D7 and D8.
   correlation types compile. See D7 and D8.
 - [x] **3.3** Enrichment inputs (parity 5.5) — identity privilege and a
   per-tenant first-seen store built; 18 rules retired with a reason.
   `MAX_UNREACHABLE` 45 → 2. See D9–D11.
+=======
+  correlation types compile. See D7 and D8.
+>>>>>>> feat/cve-patch-windows-v2
 - [ ] **3.2** Ordered sequences and Sigma correlations
 - [ ] **3.3** Enrichment inputs (parity 5.5)
 - [ ] **3.4** Behavioural baselines in CORE
