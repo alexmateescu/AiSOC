@@ -1,4 +1,4 @@
--- 097b: fix the jsonb null test (jsonb 'null' is not SQL NULL).
+-- 101b: fix the jsonb null test (jsonb 'null' is not SQL NULL).
 CREATE OR REPLACE FUNCTION public.audit_log_immutable()
 RETURNS trigger
 LANGUAGE plpgsql
