@@ -33,6 +33,7 @@ we first see this" is the question an exposure window is asked.
 
 from __future__ import annotations
 
+import pathlib
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -210,7 +211,21 @@ async def sync_findings(
                 # first enters inventory — never recomputed by a re-poll
                 # (the touch path deliberately omits it). Environment comes
                 # from the hostname classifier; unknown hosts are PROD.
-                from app.patch_calendar import classify_environment, patch_due_for
+                try:
+                    from app.patch_calendar import classify_environment, patch_due_for
+                except ModuleNotFoundError:  # pragma: no cover - import-shape only
+                    # The isolation harness loads this module by path under a
+                    # private name (both services package as ), so the
+                    # sibling package is not on sys.modules here. Load the
+                    # calendar off disk the same way the harness does.
+                    import importlib.util, sys
+                    _pc = pathlib.Path(__file__).with_name("patch_calendar.py")
+                    _spec = importlib.util.spec_from_file_location("aisoc_patch_calendar", _pc)
+                    _mod = importlib.util.module_from_spec(_spec)
+                    sys.modules[_spec.name] = _mod
+                    _spec.loader.exec_module(_mod)
+                    classify_environment = _mod.classify_environment
+                    patch_due_for = _mod.patch_due_for
 
                 environment = classify_environment(hostname)
                 await conn.execute(
