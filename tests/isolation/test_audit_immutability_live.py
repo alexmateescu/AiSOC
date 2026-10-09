@@ -50,8 +50,9 @@ async def engine():
 async def row(engine):
     """A fresh audit row to attack, deleted on teardown. Its actor is then
     deleted too, so the FK SET NULL path is exercised for real."""
-    from sqlalchemy import text
     import uuid
+
+    from sqlalchemy import text
 
     aid = str(uuid.uuid4())
     user_id = str(uuid.uuid4())
