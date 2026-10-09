@@ -117,7 +117,7 @@ class TestSnapshotSqlRendering:
             statuses=["new"],
             severities=["low", "high"],
             categories=None,
-            connector_types=["wazuh"],
+            connector_types=["scanner"],
             older_than=None,
         )
         ddl = _snapshot_sql(_snapshot_select(preds), "aisoc_bulk_close_backup.bulk_close_backup_deadbeef")
@@ -178,7 +178,7 @@ class TestHappyPath:
             actor_id=uuid.uuid4(),
             close_status="false_positive",
             categories=["vulnerability"],
-            connector_types=["wazuh"],
+            connector_types=["scanner"],
             older_than=datetime.now(UTC) - timedelta(days=1),
             max_count=5000,
             comment="kernel backlog suppression",
