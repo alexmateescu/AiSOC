@@ -68,6 +68,7 @@ def _safe_log_text(value: str | None, *, limit: int = 120) -> str:
         return ""
     return _LOG_UNSAFE_RE.sub(" ", value)[:limit]
 
+
 #: Statuses an alert may be bulk-closed *to*. ``new``/``investigating`` are
 #: excluded: those are queue states, and bulk-moving work into the queue is
 #: not what this endpoint is for.

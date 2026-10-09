@@ -220,6 +220,7 @@ async def sync_findings(
                     # calendar off disk the same way the harness does.
                     import importlib.util
                     import sys
+
                     _pc = pathlib.Path(__file__).with_name("patch_calendar.py")
                     _spec = importlib.util.spec_from_file_location("aisoc_patch_calendar", _pc)
                     _mod = importlib.util.module_from_spec(_spec)
