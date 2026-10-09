@@ -10,8 +10,15 @@ DECLARE
 BEGIN
     FOR key IN SELECT jsonb_object_keys(new_row) LOOP
         IF old_row -> key IS DISTINCT FROM new_row -> key THEN
-            -- the one legal mutation: attribution nulled by ON DELETE SET NULL
-            IF jsonb_typeof(old_row -> key) <> 'null'
+            -- The ONE legal mutation, pinned to its column: only actor_id
+            -- carries ON DELETE SET NULL. audit_log has ten nullable columns
+            -- (actor_email, actor_ip, resource, resource_id, changes,
+            -- metadata, prev_hash, entry_hash, chain_index); a blanket
+            -- value->NULL exemption would let one UPDATE strip every fact an
+            -- auditor reads while the trigger stayed silent. Review #1231
+            -- reproduced exactly that on Postgres 16; this guard refuses it.
+            IF key = 'actor_id'
+               AND jsonb_typeof(old_row -> key) <> 'null'
                AND jsonb_typeof(new_row -> key) = 'null'
             THEN
                 CONTINUE;
