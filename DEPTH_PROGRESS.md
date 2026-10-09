@@ -339,7 +339,31 @@ invented fields on the first run of the gate.
   hub, and the Data Lake Gen2 listing path has never run against a real
   storage account. The claim row is `PARTIAL` for exactly that reason.
 - [ ] **4.2** Standard inputs (syslog, OTLP, Kafka, TAXII 2.1)
-- [ ] **4.3** Retention the tenant chooses
+- [~] **4.3** Retention the tenant chooses. **Two of three bullets
+  closed.** The lake TTL is now a 400-day ceiling rather than a fixed 90
+  days, in `001_init.sql`, in the tiering DELETE and in a `MODIFY TTL`
+  migration so an existing volume converges; `MAX_LAKE_DAYS` bounds what a
+  tenant may choose and the three numbers are held equal. Legal hold now
+  blocks the purge, through `may_purge` so the decision has one home, with
+  unreadable hold evidence withholding rather than proceeding, and the run
+  reporting what it withheld. Gated by
+  `scripts/check_retention_window.py` (self-test: eight injected
+  violations, one per rule) wired into `ci.yml :: python-lint`. 13 new
+  tests, api suite 4,569 -> 4,582.
+
+  **Open, and not attempted:** the third bullet — a cold-data query through
+  `/lake/sql` or a hunt reporting an estimated cost and a progress state
+  instead of timing out silently. `/lake/sql`'s `cost` today is a
+  rate-limit token price, not a scan estimate, and there is no progress
+  state at all.
+
+  **Two limits on what is closed**, recorded rather than left to be found:
+  the lake half is gated statically — no test in CI watches a row survive
+  past day 90 on a real ClickHouse, so what is proven is that the numbers
+  agree and the migration exists; and a hold stops the whole tenant's sweep
+  rather than only its own subjects, because both purges are bulk
+  statements. Narrowing that needs a per-subject predicate on each store
+  and is follow-up.
 - [ ] **4.4** Throughput (parity 6.9) and a cloud-hardware run
 - [ ] **4.5** Deployment completeness (parity 6.8)
 
@@ -393,6 +417,7 @@ invented fields on the first run of the gate.
 |---|---|---|
 | 2026-10-07 | 0.1 | This file created at base commit `1b8bc2d4`. |
 | 2026-10-07 | 0.2 | Every figure re-derived. Two matched exactly (detections, unreachable families); executor arms measured 74 against a captured 73; the cloud/identity/SaaS/code figure measured 395 against a captured 461 on a grouping the plan does not pin, recorded above. Two measurement caveats found: executable and quarantined overlap by 1,724 rules, and the "69% Windows" figure does not reproduce from the index. |
+| 2026-10-09 | 4.3 | Reproduced: `check_retention_window.py` on the unmodified tree reported six problems — the lake deleting at 90 days against a 3,650-day cap, no `MODIFY TTL` migration, tiering deleting at 90, and the purge worker calling neither `alerts_under_legal_hold` nor `may_purge` and reporting nothing withheld. Fixed all but the cold-query bullet. Four negative controls recorded in the PR, including the positive control: a purge stuck closed withholds every tenant and fails four of the eight hold tests, which is the only thing that separates a working control from commendable caution. One pre-existing test (`test_storage_tiering.py`) pinned the 90-day tiering DELETE and now reads the shared constant; `test_retention_worker.py`'s session double could not answer the new holds query, so the worker failed closed and five of its cases failed — the double was taught the query rather than the fail-closed behaviour relaxed. |
 | 2026-10-09 | 4.2 | Reproduced: `check_syslog_listener.py` against `origin/main` reported "no Go sources under services/ingest/internal/syslog", and the only syslog path was `POST /v1/inbox/cef`, which needs a forwarder that already speaks HTTP. Implemented `services/ingest/internal/syslog` (UDP + TCP, both RFC 6587 framings, four wire formats, token-derived tenant, batched publish, `/readyz` subscription). Five negative controls recorded in the PR; one of them found a hole in the new gate itself, which reported OK while the tenant came from `msg.Hostname` through a struct field — the detector now knows all three Go syntaxes and the self-test exercises each. Writing the tests also found a shutdown deadlock: `Stop` waited on goroutines watching a context the caller had not cancelled yet. Ingest suite green, `internal/syslog` 33 cases. |
 | 2026-10-07 | 0.3 | `make up` and `make smoke` (10/10) pass. Injection suite and load-harness baselines committed. `make up-full` deferred (D2) and hosted model rows blocked (D3). Fixing D1 was a precondition for the load-harness baseline. |
 | 2026-10-09 | 3.3 | Identity privilege (18 rules) and a per-tenant first-seen store (2) built; 5 rules were never unreachable (gate operator drift, D9); 18 retired with a reason (D10). `MAX_UNREACHABLE` 45 → 2, the two remaining both needing the 3.4 baseline. Two matcher operators three shipped rules already used were implemented. |

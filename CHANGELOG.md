@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [18.0.0] - 2026-10-09
+
 ### BREAKING
 
 - **Three tables that had no reader now change authorization outcomes.**
@@ -44,6 +46,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The retention window a tenant chooses is now the one the lake honours,
+  and a legal hold outranks it.** Three things made the retention promise
+  false, and the tree had all three.
+
+  `aisoc.raw_events` carried `TTL ... + INTERVAL 90 DAY` written into the
+  table. ClickHouse enforces that during merges with no reference to any
+  per-tenant setting, so a tenant who chose 400 days — and whose policy row
+  said 400 — lost every event at day 90. Nothing errored. The console kept
+  saying 400. The table TTL is now a *ceiling* (`MAX_LAKE_DAYS`, 400 days)
+  with the per-tenant window enforced above it by the purge worker, and the
+  three places that number appears are held equal by a gate.
+
+  `retention.alerts_under_legal_hold` and `retention.may_purge` were
+  written, tested, and reachable from no production caller — so "a hold
+  outranks retention unconditionally", which migration `088`'s own comment
+  states, was true of a function and false of the system. The purge worker
+  reads the holds in force before every sweep and withholds what they
+  cover. Unreadable hold evidence withholds too: the opposite default
+  deletes evidence under litigation because a query failed.
+
+  And the run now reports what a hold withheld, by count and by matter
+  reference. A hold that silently stops a purge and a purge that silently
+  had nothing to do look identical in a log, and an auditor asking "did the
+  hold work" can only be answered by a number.
+
+  Two things stated rather than buried. **A deployment whose purge worker
+  is not armed now grows its lake for 400 days instead of 90** — the worker
+  is off and in dry-run by default, so arm it or lower both numbers
+  together. And **a hold currently stops the whole tenant's sweep rather
+  than only its own subjects**, because both purges are bulk statements
+  that cannot evaluate a per-subject predicate row by row; that
+  over-retains, which is recoverable, and narrowing it is recorded as
+  follow-up.
 - **An appliance that speaks only syslog can now reach AiSOC on its own.**
   The one syslog path that existed, `POST /v1/inbox/cef`, requires something
   in front of it that already speaks HTTP — so the firewall, the proxy, the
@@ -278,50 +313,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   because a pack statement is most often falsified by a change nowhere near
   `docs/security/`. (#PR)
 
-### Fixed
-
-- **A permission the module declared but no migration seeded could not be
-  granted from the console.** `test_rbac_catalog_seed.py` pinned the
-  vocabulary against `092_rbac_catalog_seed.sql` alone, which has already run
-  on every deployment — so the only correct way to add a permission, a new
-  migration, failed the test, and the tempting fix (editing an applied
-  migration) seeds the row on fresh installs and on nobody else. The pin now
-  reads every migration that seeds the catalog, derived from the tree. Doing
-  so immediately surfaced `playbooks:delete`, seeded by `003_rbac.sql` before
-  `rbac_catalog.py` existed and enforced by no route in the tree: recorded in
-  the test with its reason rather than adopted, because absorbing it would
-  make the catalog claim a permission the product does not enforce. (#PR)
-
-- **`docs/trust/data-flows.md` told a reader the opposite of the truth, twice
-  in one paragraph.** It said hosted egress is "**not** pseudonymized before
-  egress today ... a planned control rather than a shipped one" and then, in
-  the same paragraph, "Restored by parity 2.4" — a correction appended without
-  removing what it corrected. Parity 2.4 did wire the pseudonymizer at the
-  contract layer (`services/agents/app/llm/contract.py` calls
-  `egress_privacy.open_session`), so the page understated a shipped control on
-  the single question a buyer cares most about. Two further statements were
-  stale in the same direction: the Helm default-deny `NetworkPolicy` is
-  described as pending when `infra/helm/aisoc/templates/networkpolicy.yaml`
-  ships it, and the air-gapped CI proof is described as planned when
-  `container-egress.yml` runs it with a canary and a red run. All three
-  corrected, each now naming its gate, and each carrying the limit that goes
-  with it — the NetworkPolicy is opt-in because a CNI that does not enforce it
-  ignores it silently, and the sinkhole cannot observe a dial straight to an IP
-  literal. The matching "still outstanding" note in
-  `docs/audit/REALITY_REPORT.md` is closed with the same evidence. (#PR)
-
-- **ADR-0002 asserts a CI gate that has never existed**, and the security pack
-  repeated it before the new link gate caught it on its first run.
-  `scripts/audit_compliance_claims.py` is cited twice in
-  `docs/decisions/0002-compliance-claims.md` as already shipped and guarding
-  the "controls aligned to" framing; no such script is in the tree and no
-  workflow references it, a finding `docs/audit/REALITY_REPORT.md` already
-  recorded. The pack now states that the framing is a convention rather than a
-  gate, lists it as a gap, and the script is recorded in the link gate's
-  `KNOWN_ABSENT` table so that building it will fail the gate until the prose
-  is corrected. (#PR)
-
-### Added
 
 - **An event classification catalogue, read by ingest at boot.**
   `schemas/event_catalog/<source>.yaml` maps each vendor's own event type
@@ -373,7 +364,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   both classified and excused, and any drift between `schemas/` and the
   vendored copy the binary carries.
 
+
+- `scripts/check_ocsf_class_coverage.py`, wired into `ci.yml` with its
+  self-test ahead of it. A declared connector with neither a class nor a
+  recorded reason fails, as does an entry carrying both, a class uid whose
+  declared category disagrees with `uid/1000`, a non-finding class whose
+  severity map cannot reach the promote floor of 4, and a profile whose class
+  name contradicts its uid. It reports the number of connector types on the
+  generic mapping and holds it at a ceiling that may shrink but not grow. The
+  self-test injects each of those eleven defects and requires the gate to
+  catch each one, and requires an empty tree to be refused rather than
+  reported clean.
+
 ### Fixed
+
+- **A permission the module declared but no migration seeded could not be
+  granted from the console.** `test_rbac_catalog_seed.py` pinned the
+  vocabulary against `092_rbac_catalog_seed.sql` alone, which has already run
+  on every deployment — so the only correct way to add a permission, a new
+  migration, failed the test, and the tempting fix (editing an applied
+  migration) seeds the row on fresh installs and on nobody else. The pin now
+  reads every migration that seeds the catalog, derived from the tree. Doing
+  so immediately surfaced `playbooks:delete`, seeded by `003_rbac.sql` before
+  `rbac_catalog.py` existed and enforced by no route in the tree: recorded in
+  the test with its reason rather than adopted, because absorbing it would
+  make the catalog claim a permission the product does not enforce. (#PR)
+
+- **`docs/trust/data-flows.md` told a reader the opposite of the truth, twice
+  in one paragraph.** It said hosted egress is "**not** pseudonymized before
+  egress today ... a planned control rather than a shipped one" and then, in
+  the same paragraph, "Restored by parity 2.4" — a correction appended without
+  removing what it corrected. Parity 2.4 did wire the pseudonymizer at the
+  contract layer (`services/agents/app/llm/contract.py` calls
+  `egress_privacy.open_session`), so the page understated a shipped control on
+  the single question a buyer cares most about. Two further statements were
+  stale in the same direction: the Helm default-deny `NetworkPolicy` is
+  described as pending when `infra/helm/aisoc/templates/networkpolicy.yaml`
+  ships it, and the air-gapped CI proof is described as planned when
+  `container-egress.yml` runs it with a canary and a red run. All three
+  corrected, each now naming its gate, and each carrying the limit that goes
+  with it — the NetworkPolicy is opt-in because a CNI that does not enforce it
+  ignores it silently, and the sinkhole cannot observe a dial straight to an IP
+  literal. The matching "still outstanding" note in
+  `docs/audit/REALITY_REPORT.md` is closed with the same evidence. (#PR)
+
+- **ADR-0002 asserts a CI gate that has never existed**, and the security pack
+  repeated it before the new link gate caught it on its first run.
+  `scripts/audit_compliance_claims.py` is cited twice in
+  `docs/decisions/0002-compliance-claims.md` as already shipped and guarding
+  the "controls aligned to" framing; no such script is in the tree and no
+  workflow references it, a finding `docs/audit/REALITY_REPORT.md` already
+  recorded. The pack now states that the framing is a convention rather than a
+  gate, lists it as a gap, and the script is recorded in the link gate's
+  `KNOWN_ABSENT` table so that building it will fail the gate until the prose
+  is corrected. (#PR)
+
 
 - **Routine telemetry was promoted to an alert as though a vendor had judged
   it.** Ingest mapped 78 of the 84 declared connector types onto OCSF class
@@ -415,21 +460,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   filtering on 2002 returned incidents alongside Qualys and Tenable findings.
   Found by the new gate, which fails on a profile whose class name contradicts
   its own uid.
-
-### Added
-
-- `scripts/check_ocsf_class_coverage.py`, wired into `ci.yml` with its
-  self-test ahead of it. A declared connector with neither a class nor a
-  recorded reason fails, as does an entry carrying both, a class uid whose
-  declared category disagrees with `uid/1000`, a non-finding class whose
-  severity map cannot reach the promote floor of 4, and a profile whose class
-  name contradicts its uid. It reports the number of connector types on the
-  generic mapping and holds it at a ceiling that may shrink but not grow. The
-  self-test injects each of those eleven defects and requires the gate to
-  catch each one, and requires an empty tree to be refused rather than
-  reported clean.
-
-
 
 ## [17.1.0] - 2026-10-07
 
