@@ -83,6 +83,7 @@ class Settings(BaseSettings):
     CISA_KEV_POLL_INTERVAL: int = 86400  # 24 h
     # Legacy alias
     CISA_POLL_INTERVAL: int = 86400
+    OPENCTI_POLL_INTERVAL: int = 1800  # 30 min
 
     # Air-gap egress policy (Tier 3.1).
     # When enabled, public threat-intel feeds (OTX, CISA KEV, MISP/TAXII/

@@ -21,6 +21,7 @@ from app.clients.taxii import TaxiiClient
 from app.parsers.stix import StixParser
 
 if TYPE_CHECKING:
+    from app.clients.opencti import OpenCtiClient
     from app.feeds.pipeline import ThreatIntelPipeline
 
 logger = structlog.get_logger(__name__)
@@ -143,3 +144,29 @@ async def handle_cisa_kev_feed(
 
     except Exception as exc:
         logger.error("CISA KEV feed handler failed", error=str(exc))
+
+
+# ─── OpenCTI Feed Handler ───────────────────────────────────────────────────
+
+async def handle_opencti_feed(
+    client: OpenCtiClient,
+    pipeline: ThreatIntelPipeline,
+    since_hours: int = 24,
+) -> None:
+    """Poll an OpenCTI platform for freshly-updated Indicator objects."""
+    logger.info("Polling OpenCTI feed", since_hours=since_hours)
+
+    try:
+        nodes = await client.get_recent_indicators(since_hours=since_hours)
+        all_iocs: list[dict[str, Any]] = []
+        for node in nodes:
+            all_iocs.extend(client.extract_iocs(node))
+
+        if all_iocs:
+            stats = await pipeline.ingest_iocs(all_iocs, source="opencti")
+            logger.info("OpenCTI IOCs ingested", **stats, indicator_count=len(nodes))
+        else:
+            logger.info("OpenCTI: no updated indicators this window")
+
+    except Exception as exc:
+        logger.error("OpenCTI feed handler failed", error=str(exc))

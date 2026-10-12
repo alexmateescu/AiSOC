@@ -31,6 +31,7 @@ from app.api.actor_attribution import router as actor_attribution_router
 from app.api.indicators import router as indicators_router
 from app.clients.cisa_kev import CisaKevClient
 from app.clients.misp import MispClient
+from app.clients.opencti import OpenCtiClient
 from app.clients.otx import OtxClient
 from app.clients.taxii import TaxiiClient
 from app.config import settings
@@ -38,6 +39,7 @@ from app.core.kafka_security import kafka_client_kwargs
 from app.feeds.handlers import (
     handle_cisa_kev_feed,
     handle_misp_feed,
+    handle_opencti_feed,
     handle_otx_feed,
     handle_taxii_feed,
 )
@@ -196,6 +198,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         else None
     )
 
+    opencti_client = (
+        OpenCtiClient(
+            url=settings.OPENCTI_URL,
+            token=S_OPENCTI_TOKEN
+        )
+        if settings.OPENCTI_URL and settings.OPENCTI_TOKEN
+        else None
+    )
+
     otx_client = (
         OtxClient(
             api_key=settings.OTX_API_KEY,
@@ -234,6 +245,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             feed_name="misp",
             handler=partial(handle_misp_feed, client=misp_client, pipeline=pipeline),
             interval_seconds=settings.MISP_POLL_INTERVAL,
+        )
+
+    # Register OpenCTI feed (internal platform or public instance;
+    # air-gap policy treats a public opencti.io as non-egress-safe).
+    if opencti_client and _airgap_check_feed_url("opencti", settings.OPENCTI_URL):
+        scheduler.register(
+            feed_name="opencti",
+            handler=partial(handle_opencti_feed, client=opencti_client, pipeline=pipeline),
+            interval_seconds=settings.OPENCTI_POLL_INTERVAL,
         )
 
     # Register OTX feed (always public, so air-gapped mode unconditionally
