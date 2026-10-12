@@ -1252,7 +1252,9 @@ export interface Alert {
   source: string;
   sourceRef?: string;
   tenantId: string;
-  riskScore: number;
+  /** Normalised 0-100 integer. Absent when nothing scored the alert — do not
+   *  render a `0` in its place, that is a measurement nobody made. */
+  riskScore?: number;
   mitreAttack?: MitreAttack[];
   iocs?: AlertIOC[];
   rawEvent?: Record<string, unknown>;
@@ -1480,14 +1482,33 @@ function normalizeAlert(raw: unknown): Alert {
     });
   }
 
-  // ``risk_score`` legacy fallback: fusion sometimes only ships
-  // ``confidence`` (0-100) and not the older ``risk_score``. Prefer
-  // the explicit field, fall back to confidence as a soft signal.
+  // Risk has the same two-scales-one-field problem confidence had above, and
+  // it resolved across three keys: `risk_score ?? ai_score ?? confidence ?? 0`.
+  // `risk_score` and `ai_score` are [0,1] floats (fusion documents the first
+  // as "0-1, vendor-provided"; `metrics.py` buckets the second "across
+  // [0, 1]"), while `confidence` is the canonical 0-100 integer. The live
+  // path is `ai_score` — the `alerts` table has no `risk_score` column — so a
+  // real alert scoring 0.85 reached the console as 0.85, and the two surfaces
+  // reading it disagreed: the rail printed `Math.round(0.85)` as "risk 1"
+  // while the detail view printed "0.85".
+  //
+  // Normalised here, once, to the canonical 0-100 integer, with the scale
+  // decided by the *key*: a genuine confidence of 1 is indistinguishable from
+  // a model score of 1.0 by value alone. The camelCase `riskScore` is this
+  // function's own output name, so it is already on the 0-100 scale and is
+  // passed through — re-normalising an alert must not multiply it again.
+  //
+  // The `?? 0` that used to close the chain is gone too: an alert carrying
+  // none of these keys is unscored, and "nobody scored this" is not "scored
+  // zero risk". The rail already guards on `typeof riskScore === 'number'` to
+  // omit the chip, and the default made that guard unreachable.
+  const unitScaleRisk =
+    pickNum('risk_score', 'risk_score') ?? pickNum('ai_score', 'aiScore');
+  const alreadyNormalisedRisk = pickNum('riskScore', 'riskScore');
   const riskScore =
-    pickNum('risk_score', 'riskScore') ??
-    pickNum('ai_score', 'aiScore') ??
-    pickNum('confidence', 'confidence') ??
-    0;
+    unitScaleRisk !== undefined
+      ? Math.round(unitScaleRisk * 100)
+      : (alreadyNormalisedRisk ?? canonicalConfidence);
 
   return {
     id: String(r.id ?? ''),
@@ -1551,6 +1572,52 @@ export interface AlertsResponse {
   total: number;
   page: number;
   pageSize: number;
+  /** Absent when the server did not send them — see `AlertFacets`. */
+  facets?: AlertFacets;
+}
+
+/**
+ * Counts over the whole filtered result set, from `AlertListResponse.facets`.
+ *
+ * The stat strip used to derive these in the browser from the loaded page, so
+ * they were capped at `pageSize` and sat beside a server-side `total` in the
+ * hundreds. The server computes them off the same `WHERE` clause as `total`.
+ *
+ * A missing key inside `bySeverity` / `byStatus` means the server counted and
+ * found none. The whole object being absent means the server told us nothing,
+ * which is a different thing and must not render as a zero.
+ */
+export interface AlertFacets {
+  bySeverity: Record<string, number>;
+  byStatus: Record<string, number>;
+  /** Uses the API's shared unresolved vocabulary (`new | triaging | in_progress`). */
+  unresolved: number;
+}
+
+function countMap(raw: unknown): Record<string, number> {
+  if (!raw || typeof raw !== 'object') return {};
+  return Object.fromEntries(
+    Object.entries(raw as Record<string, unknown>).filter(
+      (entry): entry is [string, number] => typeof entry[1] === 'number',
+    ),
+  );
+}
+
+/**
+ * Reads `AlertListResponse.facets`, or returns `undefined` when the server
+ * sent none. Returning an empty-but-present object here would be the same
+ * mistake as a `?? 0`: the strip could not tell "no criticals" from "nobody
+ * counted".
+ */
+function normalizeAlertFacets(raw: unknown): AlertFacets | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const r = raw as Record<string, unknown>;
+  const unresolved = r.unresolved;
+  return {
+    bySeverity: countMap(r.by_severity ?? r.bySeverity),
+    byStatus: countMap(r.by_status ?? r.byStatus),
+    unresolved: typeof unresolved === 'number' ? unresolved : 0,
+  };
 }
 
 export interface AlertFilters {
@@ -1564,6 +1631,37 @@ export interface AlertFilters {
   page?: number;
   pageSize?: number;
   tenantId?: string;
+  /**
+   * `newest` (created_at descending) or `priority` (severity first, then
+   * created_at). The API defaults to `newest` to keep its published contract;
+   * the console asks for `priority` so a noisy low-severity source cannot
+   * push a critical off page one.
+   */
+  sort?: 'newest' | 'priority';
+}
+
+/**
+ * The five fields `PATCH /api/v1/alerts/{id}` can actually apply.
+ *
+ * This was `Partial<Alert>`, which let the console send any of the row's
+ * ~40 columns. The server ignored everything outside this set and still
+ * answered 200, so `{ disposition }` or `{ severity }` compiled, ran and
+ * changed nothing (issue #1280). The server now refuses them; narrowing
+ * the type here makes the rejected call fail to compile instead, and
+ * `AlertUpdateRequest` on the Python side is the one definition this
+ * mirrors.
+ *
+ * Severity goes through `POST /alerts/{id}/escalate`, a disposition
+ * through `POST /feedback/alert-override`, and a snooze through
+ * `POST /alerts/{id}/snooze`.
+ */
+export interface AlertUpdate {
+  status?: AlertStatus;
+  priority?: number;
+  tags?: string[];
+  /** `null` releases the alert back to the pool. */
+  assignee?: string | null;
+  case_id?: string | null;
 }
 
 export const alertsApi = {
@@ -1575,6 +1673,7 @@ export const alertsApi = {
       page?: number;
       page_size?: number;
       pageSize?: number;
+      facets?: unknown;
     }>('/api/v1/alerts', {
       params: filters as Record<string, string>,
     });
@@ -1598,6 +1697,7 @@ export const alertsApi = {
           : typeof raw.page_size === 'number'
             ? raw.page_size
             : 50,
+      facets: normalizeAlertFacets(raw.facets),
     } satisfies AlertsResponse;
   },
 
@@ -1606,7 +1706,7 @@ export const alertsApi = {
     return normalizeAlert(raw);
   },
 
-  update: async (id: string, data: Partial<Alert>) => {
+  update: async (id: string, data: AlertUpdate) => {
     const raw = await request<unknown>(`/api/v1/alerts/${id}`, {
       method: 'PATCH',
       body: JSON.stringify(data),
@@ -4649,7 +4749,13 @@ export type DetectionLanguage =
   | 'kql'
   | 'eql'
   | 'lucene'
-  | 'regex';
+  | 'regex'
+  /**
+   * The compiled ``match_when`` spec the fusion detection engine evaluates.
+   * Deliberately not one of the six the rule IDE can execute: the body is
+   * read-only and the engine, not the API, is what runs it.
+   */
+  | 'aisoc-match';
 
 export interface DetectionRule {
   id: string;
@@ -4665,6 +4771,54 @@ export interface DetectionRule {
   updatedAt: string;
   lastTriggeredAt?: string;
   hitCount?: number;
+  /**
+   * True when the fusion detection engine loads this rule from the compiled
+   * corpus and evaluates it against live telemetry. A tenant's own rule is
+   * not loaded by the engine, so "disabled" means different things for the
+   * two and the card says which.
+   */
+  isBuiltin?: boolean;
+  /** The engine's rule id (``det-cloud-063``) — what an alert carries. */
+  sourceId?: string | null;
+  /** Whether this tenant has stored any decision about the rule. */
+  tuned?: boolean;
+  /**
+   * ``createdAt``/``updatedAt`` on an untuned built-in are the timestamp of
+   * the compiled artefact this deployment ships, not an authoring date.
+   */
+  timestampsFromArtefact?: boolean;
+}
+
+export interface DetectionRuleListResult {
+  rules: DetectionRule[];
+  /** Rules matching the request's filters — not the number returned. */
+  total: number;
+  /** The library before filters, split by origin. */
+  builtinTotal: number;
+  customTotal: number;
+  returned: number;
+  offset: number;
+  limit: number;
+  /**
+   * Set when the compiled corpus could not be read at all. Rendered as a
+   * failure, never as "no rules exist": telling an operator their coverage
+   * is zero when a file is merely unreachable is the defect this surface was
+   * reported for.
+   */
+  catalogError: string | null;
+  /** Artefacts that resolved nowhere while others did. */
+  missingArtefacts: string[];
+}
+
+export interface DetectionRuleListParams {
+  search?: string;
+  severity?: string;
+  category?: string;
+  mitre?: string;
+  enabled?: boolean;
+  source?: 'all' | 'builtin' | 'custom';
+  limit?: number;
+  offset?: number;
 }
 
 // ─── Detection management UI (WS-B3) ─────────────────────────────────────────
@@ -4717,6 +4871,13 @@ export interface DetectionDriftSummary {
   highFpRate: number;
   lowConfidence: number;
   stale: number;
+  /**
+   * Rules the drift heuristics cannot judge. Every one of them reads a
+   * column only operator review and the rule IDE write, and the compiled
+   * corpus records none, so built-ins are counted here rather than filed as
+   * "low confidence, stale".
+   */
+  unscored?: number;
 }
 
 export interface DetectionDrift {
@@ -4769,6 +4930,12 @@ export interface ConfidenceSummary {
   medianConfidence: number;
   /** Rules below the drift low-confidence threshold (server side: 60). */
   lowConfidence: number;
+  /**
+   * Rules excluded from every figure above because no confidence has ever
+   * been recorded for them. Rendered beside the averages so a mean over
+   * three rules is not read as a mean over the whole library.
+   */
+  unscored?: number;
 }
 
 export interface DetectionConfidence {
@@ -4792,10 +4959,24 @@ export interface DetectionBacktestResult {
 }
 
 export const detectionApi = {
-  list: () =>
-    request<{ rules: DetectionRule[]; total: number }>(
-      '/api/v1/detection/rules',
-    ),
+  /**
+   * The tenant's effective rule library: the compiled corpus the engine runs
+   * plus whatever this tenant has tuned. Filters and paging are server-side
+   * because the library is 2,586 rules on a default install and serialising
+   * all of it is several megabytes.
+   */
+  list: (params: DetectionRuleListParams = {}) => {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(params)) {
+      if (value !== undefined && value !== null && value !== '') {
+        query.set(key, String(value));
+      }
+    }
+    const suffix = query.toString() ? `?${query.toString()}` : '';
+    return request<DetectionRuleListResult>(
+      `/api/v1/detection/rules${suffix}`,
+    );
+  },
 
   get: (id: string) => request<DetectionRule>(`/api/v1/detection/rules/${id}`),
 
@@ -5743,11 +5924,40 @@ export interface AutonomyActionPolicy {
   last_updated_at?: string | null;
   last_updated_by?: string | null;
   last_reason?: string | null;
+  /**
+   * Whether this verb reaches a vendor without a human, resolved by the API
+   * from the autonomy tier and the capability contract — the control that
+   * actually gates execution. Optional so an older API blanks the posture
+   * rather than letting the console infer one from the thresholds, which is
+   * the defect this field exists to retire.
+   */
+  effective_auto_execute?: boolean;
+  /** The same question at the top of the tier ladder. */
+  auto_executes_at_any_tier?: boolean;
+  /** Capability it resolves to in the action registry, null when none does. */
+  capability?: string | null;
+  executable?: boolean;
+  effective_tier?: string;
+  effective_reason?: string;
+}
+
+/** The control that gates execution, as reported by the API. */
+export interface AutonomyEffective {
+  tier: string;
+  tier_label: string;
+  tier_source: string;
+  max_automatic_impact: string | null;
+  auto_executing_actions: string[];
+  high_blast_auto_executing: string[];
+  unimplemented_actions: string[];
+  thresholds_are_advisory: boolean;
+  advisory_note: string;
 }
 
 export interface AutonomyPolicyResponse {
   tenant_id: string;
   actions: AutonomyActionPolicy[];
+  effective?: AutonomyEffective;
 }
 
 export interface AutonomyThresholdUpdate {
@@ -6155,6 +6365,8 @@ export type LlmProvider =
 
 export type LlmEffectivePath = 'live' | 'fallback';
 
+export type LlmRecentHealth = 'healthy' | 'degraded' | 'unknown';
+
 export interface LlmStatus {
   /** Stable provider id classified from the configured base URL. */
   provider: LlmProvider;
@@ -6185,6 +6397,22 @@ export interface LlmStatus {
   effective_path: LlmEffectivePath;
   /** Operator-readable explanation of the current state. */
   policy_note: string;
+  /**
+   * Whether the provider is actually *answering*, from the outcomes of the
+   * calls this pod already made — not a probe, and not a latency figure.
+   *
+   * Everything above describes configuration, which is why a deployment
+   * timing out on every call used to render the emerald "Live" pill. Three
+   * states, and ``unknown`` is a real one: a pod that has observed no call
+   * has not earned a green badge.
+   */
+  recent_health: LlmRecentHealth;
+  /** Observed chat-completions calls in the recent window (this pod only). */
+  recent_calls: number;
+  /** How many of those failed. */
+  recent_failures: number;
+  /** Operator-readable summary of the window, including what to do about it. */
+  recent_note: string;
 }
 
 // ─── BYOK per-tenant LLM credentials (WS-H2) ────────────────────────────────
@@ -7145,4 +7373,115 @@ export const evaluationsApi = {
   exportUrl: (id: string, format: ReplayExportFormat, excludeLatency = false): string =>
     `${API_BASE}/api/v1/evaluations/replay/${id}/export` +
     `?format=${format}&exclude_latency=${excludeLatency ? 'true' : 'false'}`,
+};
+
+// ─── Case depth (depth 9.3 / parity 5.6 remainder) ───────────────────────────
+
+export interface BulkTriageChange {
+  set_status?: string;
+  set_severity?: string;
+  assign_to?: string;
+  unassign?: boolean;
+}
+
+export interface BulkTriageResult {
+  matched_count: number;
+  updated_count: number;
+  changes: Record<string, unknown>;
+}
+
+export interface AnalystWorkloadRow {
+  analyst: string;
+  total: number;
+  open_cases: number;
+  closed_cases: number;
+  open_high_or_critical: number;
+  overdue: number;
+  /**
+   * `null` when the analyst has closed nothing in the window. The console
+   * must render that as "no data" and never as `0.0`, which reads as
+   * "instant" — the exact confusion that left two console figures wrong for
+   * months.
+   */
+  mean_hours_to_close: number | null;
+  /** How many closed cases the mean above was taken over. */
+  mean_over_cases: number;
+}
+
+export interface AnalystWorkload {
+  since: string;
+  computed_at: string;
+  analysts: AnalystWorkloadRow[];
+  unassigned: { open_cases: number; open_high_or_critical: number };
+}
+
+export const caseDepthApi = {
+  /**
+   * Apply one triage decision to many alerts.
+   *
+   * `maxCount` is a preflight the caller states: a larger match is refused
+   * with a 409 carrying the real figure and **nothing is written**, so the
+   * first call is a dry run. The bar surfaces that count and asks again
+   * rather than retrying silently with a bigger number.
+   */
+  bulkTriage: (alertIds: string[], change: BulkTriageChange, maxCount: number, comment = '') =>
+    request<BulkTriageResult>('/api/v1/case-depth/alerts/bulk-triage', {
+      method: 'POST',
+      body: JSON.stringify({ alert_ids: alertIds, max_count: maxCount, comment, ...change }),
+    }),
+
+  mergeAlerts: (primaryId: string, duplicateIds: string[], reason = '') =>
+    request<{ primary_id: string; merged_ids: string[]; case_id: string | null }>(
+      '/api/v1/case-depth/alerts/merge',
+      {
+        method: 'POST',
+        body: JSON.stringify({ primary_id: primaryId, duplicate_ids: duplicateIds, reason }),
+      },
+    ),
+
+  mergeCases: (primaryId: string, duplicateIds: string[], reason = '') =>
+    request<{ primary_id: string; merged_ids: string[]; case_id: string | null }>(
+      '/api/v1/case-depth/cases/merge',
+      {
+        method: 'POST',
+        body: JSON.stringify({ primary_id: primaryId, duplicate_ids: duplicateIds, reason }),
+      },
+    ),
+
+  workload: (days = 30) =>
+    request<AnalystWorkload>('/api/v1/case-depth/workload', { params: { days: String(days) } }),
+
+  customFields: () =>
+    request<
+      Array<{
+        id: string;
+        key: string;
+        label: string;
+        help_text: string;
+        field_type: string;
+        choices: string[];
+        required: boolean;
+        position: number;
+        active: boolean;
+      }>
+    >('/api/v1/case-depth/custom-fields'),
+
+  caseCustomValues: (caseId: string) =>
+    request<
+      Array<{
+        key: string;
+        label: string;
+        field_type: string;
+        value: string;
+        required: boolean;
+        updated_by: string;
+        updated_at: string | null;
+      }>
+    >(`/api/v1/case-depth/cases/${caseId}/custom-values`),
+
+  setCaseCustomValues: (caseId: string, values: Record<string, string>) =>
+    request<unknown>(`/api/v1/case-depth/cases/${caseId}/custom-values`, {
+      method: 'PUT',
+      body: JSON.stringify({ values }),
+    }),
 };

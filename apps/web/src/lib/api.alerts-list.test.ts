@@ -90,3 +90,75 @@ describe('alertsApi.list envelope', () => {
     expect(result.total).toBe(0);
   });
 });
+
+/**
+ * `facets` is the whole-result-set aggregate the stat strip renders. The strip
+ * used to derive those numbers from the loaded page, so they were capped at
+ * `page_size` and sat beside a `total` in the hundreds.
+ */
+describe('alertsApi.list facets', () => {
+  it('reads the snake_case aggregate the API sends', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({
+        items: [ALERT_ROW],
+        total: 522,
+        page: 1,
+        page_size: 25,
+        facets: {
+          by_severity: { critical: 118, high: 64 },
+          by_status: { new: 200, triaging: 90 },
+          unresolved: 290,
+        },
+      }),
+    );
+
+    const result = await alertsApi.list();
+
+    expect(result.facets).toEqual({
+      bySeverity: { critical: 118, high: 64 },
+      byStatus: { new: 200, triaging: 90 },
+      unresolved: 290,
+    });
+  });
+
+  it('leaves facets absent when the server sends none', async () => {
+    // Absent is not empty: an empty-but-present object would let the strip
+    // print a confident 0 for a count nobody made.
+    fetchMock.mockResolvedValue(jsonResponse({ items: [], total: 0, page: 1, page_size: 25 }));
+
+    expect((await alertsApi.list()).facets).toBeUndefined();
+  });
+
+  it('keeps a zero the server did send', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({
+        items: [],
+        total: 0,
+        page: 1,
+        page_size: 25,
+        facets: { by_severity: {}, by_status: {}, unresolved: 0 },
+      }),
+    );
+
+    expect((await alertsApi.list()).facets).toEqual({
+      bySeverity: {},
+      byStatus: {},
+      unresolved: 0,
+    });
+  });
+});
+
+/**
+ * `sort` is how the console avoids a flood burying a critical. The API
+ * defaults to `newest` for its SDK clients, so the console has to ask.
+ */
+describe('alertsApi.list ordering', () => {
+  it('sends the sort the caller asked for', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ items: [], total: 0, page: 1, page_size: 25 }));
+
+    await alertsApi.list({ page: 1, pageSize: 25, sort: 'priority' });
+
+    const url = String(fetchMock.mock.calls[0][0]);
+    expect(url).toContain('sort=priority');
+  });
+});

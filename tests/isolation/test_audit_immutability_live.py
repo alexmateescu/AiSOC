@@ -30,9 +30,7 @@ def _dsn() -> str:
     value = os.environ.get("ISOLATION_AUDIT_DSN", "").strip()
     if not value:
         pytest.skip("ISOLATION_AUDIT_DSN is not set")
-    return value.replace("postgresql://", "postgresql+asyncpg://", 1) if value.startswith(
-        "postgresql://"
-    ) else value
+    return value.replace("postgresql://", "postgresql+asyncpg://", 1) if value.startswith("postgresql://") else value
 
 
 @pytest_asyncio.fixture(scope="module", loop_scope="module")
@@ -63,10 +61,7 @@ async def row(engine):
             {"id": tenant_id, "n": f"imm-{aid[:8]}", "s": f"imm-{aid[:8]}"},
         )
         await conn.execute(
-            text(
-                "INSERT INTO users (id, tenant_id, email, username, hashed_password) "
-                "VALUES (:id, :t, :e, :u, :h)"
-            ),
+            text("INSERT INTO users (id, tenant_id, email, username, hashed_password) VALUES (:id, :t, :e, :u, :h)"),
             {
                 "id": user_id,
                 "t": tenant_id,
@@ -177,3 +172,37 @@ class TestAuditImmutabilityExemption:
             {"id": row["id"], "other": str(uuid.uuid4())},
         )
         assert outcome.startswith("REFUSED"), outcome
+
+    async def test_delete_is_still_refused_loudly(self, engine, row) -> None:
+        """The trigger is BEFORE UPDATE **OR DELETE** and both arms run this
+        one function, so rewriting it for the UPDATE shape has to keep the
+        DELETE arm working.
+
+        Without the `TG_OP = 'DELETE'` guard the loop over
+        `jsonb_object_keys(NEW)` iterates zero times — there is no NEW on a
+        delete — and `RETURN NEW` returns NULL, which in a BEFORE trigger
+        silently *cancels* the statement. The row survives, so immutability
+        holds by accident, but the caller is told nothing and reads
+        `DELETE 0` as success. Refusing loudly is the behaviour migration
+        004 shipped and the one an operator can act on.
+
+        Asserted both ways round: the statement raises, and the row is
+        still there afterwards.
+        """
+        outcome = await _attempt(engine, "DELETE FROM audit_log WHERE id = :id", {"id": row["id"]})
+        assert outcome.startswith("REFUSED"), outcome
+        assert "DELETE" in outcome, outcome
+
+        # Imported in the function, as every other case here does: a
+        # module-scope import of a service dependency has taken 241
+        # unrelated tests down in the offline collection job.
+        from sqlalchemy import text
+
+        async with engine.connect() as conn:
+            remaining = (
+                await conn.execute(
+                    text("SELECT count(*) FROM audit_log WHERE id = :id"),
+                    {"id": row["id"]},
+                )
+            ).scalar()
+        assert remaining == 1, "the row was removed even though the statement was refused"

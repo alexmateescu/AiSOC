@@ -47,6 +47,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.database import AsyncSessionLocal
 from app.models.report import ReportArtefact
 from app.models.tenant import Tenant
+from app.services.branding.resolver import resolve_branding
 from app.services.digest_pdf import WeasyPrintUnavailableError, render_digest_pdf
 from app.services.executive_digest import build_weekly_digest
 
@@ -136,9 +137,18 @@ async def _generate_for_tenant(
             period_end=period_end,
         )
 
+        # The interactive route resolved branding and this worker did not,
+        # so the digest an operator actually receives every Monday — the
+        # one a managed customer forwards to their board — rendered in the
+        # platform palette under the platform name while the documentation
+        # said it carried theirs. `inline_logo` because WeasyPrint runs
+        # server-side: a referenced logo would be an outbound request the
+        # server makes to an address an operator supplied.
+        branding = await resolve_branding(db, tenant_id, inline_logo=True)
+
         output_format = "pdf"
         try:
-            raw_bytes = render_digest_pdf(digest)
+            raw_bytes = render_digest_pdf(digest, branding)
         except WeasyPrintUnavailableError:
             # Fall back to HTML when the native WeasyPrint stack is absent
             # (e.g. dev containers without Pango/Cairo).  The artefact is
@@ -149,12 +159,12 @@ async def _generate_for_tenant(
             )
             from app.services.digest_html import render_digest_html  # lazy import
 
-            raw_bytes = render_digest_html(digest).encode("utf-8")
+            raw_bytes = render_digest_html(digest, branding).encode("utf-8")
             output_format = "html"
 
         body_b64 = base64.b64encode(raw_bytes).decode("ascii")
         storage_key = f"weekly_digest/{tenant_id}/{period_start.strftime('%Y-%m-%d')}_{period_end.strftime('%Y-%m-%d')}.{output_format}"
-        title = f"AiSOC Weekly Executive Digest {period_start.strftime('%d %b')}–{period_end.strftime('%d %b %Y')}"
+        title = f"{branding.product_name} Weekly Executive Digest {period_start.strftime('%d %b')}–{period_end.strftime('%d %b %Y')}"
 
         artefact = ReportArtefact(
             id=uuid.uuid4(),
@@ -169,7 +179,10 @@ async def _generate_for_tenant(
             file_size_bytes=len(raw_bytes),
             data_snapshot=digest.model_dump(mode="json"),
             generated_by="weekly_digest_worker",
-            status="ready",
+            # See report_scheduler: the column's CHECK allows
+            # pending | generating | completed | failed, and "ready" is not a
+            # member either, so the Monday digest raised on commit too.
+            status="completed",
         )
         db.add(artefact)
         await db.commit()

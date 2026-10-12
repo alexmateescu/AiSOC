@@ -20,6 +20,7 @@ from app.api.v1.endpoints import (
     autonomy_policy,
     branding,
     business_context,
+    case_depth,
     cases,
     community,
     compliance,
@@ -86,6 +87,7 @@ from app.api.v1.endpoints import (
     saved_hunts,
     saved_views,
     scim_tokens,
+    semantic_memory,
     sla,
     sso_connections,
     stix_taxii,
@@ -117,6 +119,12 @@ api_router.include_router(alert_explain.router)
 # Dry-run by default; AISOC_SIEM_WRITEBACK_EXECUTE opts in to the vendor call.
 api_router.include_router(alert_writeback.router)
 api_router.include_router(cases.router)
+# Depth 9.3 (parity 5.6 remainder): alert and case merge, bulk triage,
+# tenant custom fields and per-analyst workload. Its own prefix rather
+# than hanging off /alerts and /cases, because a path parameter compiles
+# to `[^/]+` and `/alerts/merge` beside `/alerts/{alert_id}` is the exact
+# shape that had `GET /{hunt_id}` swallowing its sibling `/runs`.
+api_router.include_router(case_depth.router)
 # Attack-chain timeline (T3.3 — v8.0 parallel team plan).
 # Backs the attack-chain view in apps/web/src/components/cases/CaseWorkspace.tsx with a
 # ranked timeline (graph-distance + temporal proximity + risk overlap)
@@ -162,6 +170,12 @@ api_router.include_router(plugins.router)
 api_router.include_router(community.router)
 api_router.include_router(marketplace.router)
 api_router.include_router(mcp_servers.router)
+# Depth 9.2 (parity 6.5): vector recall over past cases, runbooks and
+# institutional memory, every hit carrying an author, a source, a scope,
+# an expiry and a state. `knowledge_base` above is the full-text half and
+# stays: the two answer differently-shaped questions and the recall score
+# in `scripts/score_memory_recall.py` measures exactly that difference.
+api_router.include_router(semantic_memory.router)
 # Gap-closure Phase 6.1 and 6.2: tenant-authored investigation skills:
 # authored in YAML, validated against the tools this tenant's agent can
 # actually call, backtested through the Phase 1 replay with and without the

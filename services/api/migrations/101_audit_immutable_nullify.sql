@@ -8,6 +8,19 @@ DECLARE
     old_row jsonb := to_jsonb(OLD);
     new_row jsonb := to_jsonb(NEW);
 BEGIN
+    -- The trigger is BEFORE UPDATE **OR DELETE** (migration 004), and both
+    -- arms run this one function. On DELETE there is no NEW, so
+    -- `jsonb_object_keys(NULL)` yields no rows, the loop below never runs,
+    -- and `RETURN NEW` returns NULL -- which in a BEFORE trigger silently
+    -- *cancels* the statement. The row survives and the caller is told
+    -- nothing, so a deployment would read "DELETE 0" as success while
+    -- immutability quietly stopped being enforced as an error.
+    --
+    -- DELETE is refused first and unconditionally, the way 004 refused it.
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'audit_log rows are immutable (attempted %)', TG_OP;
+    END IF;
+
     FOR key IN SELECT jsonb_object_keys(new_row) LOOP
         IF old_row -> key IS DISTINCT FROM new_row -> key THEN
             -- The ONE legal mutation, pinned to its column: only actor_id

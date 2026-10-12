@@ -408,6 +408,95 @@ async def complete_run(
         )
 
 
+def _inserted_a_row(status: Any) -> bool:
+    """True when an asyncpg command status reports a row was written.
+
+    ``conn.execute`` returns the tag, e.g. ``"INSERT 0 1"`` for a write and
+    ``"INSERT 0 0"`` when ``ON CONFLICT DO NOTHING`` suppressed it. That is
+    the only signal distinguishing a first write from a replay, and the
+    artifacts have no unique key of their own to lean on.
+    """
+    try:
+        return int(str(status).rsplit(" ", 1)[-1]) > 0
+    except (ValueError, IndexError):
+        # An unrecognised tag means "do not know". Writing nothing is the
+        # safe side: a missing transcript is visibly missing, a duplicated
+        # one silently doubles every replayed run.
+        return False
+
+
+async def fail_stale_runs(
+    *,
+    older_than_seconds: float,
+    reason: str,
+    limit: int = 500,
+) -> list[uuid.UUID]:
+    """Close ``investigation_runs`` rows abandoned by a process that is gone.
+
+    The wall-clock deadline in :func:`app.api.investigate._run_and_store` ends
+    a run whose process is still alive. A restart, an OOM kill or an ordinary
+    rollout leaves the row at ``'running'`` with nothing left to finish it:
+    the in-memory run store is gone, so no poller, no WebSocket tail and no
+    exception handler will ever write a terminal status. The Investigation
+    Ledger then renders a run that never ends.
+
+    Safe on several replicas and safe to re-run: the predicate is part of the
+    ``UPDATE``, so two reapers racing the same row close it once and the loser
+    simply matches nothing.
+
+    Safe against reaping a *live* run only because the deadline exists — a run
+    cannot legitimately outlast its own budget any more, so ``older_than_seconds``
+    is set well beyond it (see :mod:`app.investigator.run_reaper`). Shortening
+    that margin without the deadline in place would cancel healthy work.
+
+    No RLS context is set: this is a cross-tenant maintenance sweep, and
+    migration ``008_investigation_ledger.sql`` writes the policy as
+    ``USING (tenant_id = current_tenant_id() OR current_tenant_id() IS NULL)``,
+    whose second arm is what admits it. Named here because a future policy that
+    drops that arm would turn this into a silent no-op rather than an error.
+
+    Returns the ids closed (empty when there was nothing to do, no database is
+    configured, or the sweep failed — the caller logs and retries).
+    """
+    pool = await get_pool()
+    if pool is None:
+        return []
+
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                UPDATE investigation_runs
+                   SET status = 'failed',
+                       error = COALESCE(NULLIF(error, ''), $2),
+                       completed_at = now()
+                 WHERE id IN (
+                     SELECT id
+                       FROM investigation_runs
+                      WHERE status = 'running'
+                        AND started_at < now() - make_interval(secs => $1::double precision)
+                      ORDER BY started_at
+                      LIMIT $3
+                 )
+                RETURNING id
+                """,
+                float(older_than_seconds),
+                reason,
+                int(limit),
+            )
+        closed = [row["id"] for row in rows]
+        if closed:
+            logger.warning(
+                "ledger.stale_runs_closed",
+                count=len(closed),
+                older_than_seconds=older_than_seconds,
+            )
+        return closed
+    except Exception as exc:  # noqa: BLE001 — the caller backs off and retries
+        logger.warning("ledger.fail_stale_runs_failed", error=str(exc))
+        return []
+
+
 def _coerce_uuid(value: Any) -> uuid.UUID | None:
     try:
         return uuid.UUID(str(value))
@@ -439,6 +528,7 @@ async def persist_auto_triage(
     groundedness: float | None = None,
     ungrounded: bool | None = None,
     shadow: bool = False,
+    llm_exchanges: list[dict[str, Any]] | None = None,
 ) -> bool:
     """Durably record an auto-triage outcome (issue #571) in ONE transaction:
 
@@ -499,16 +589,56 @@ async def persist_auto_triage(
                     json.dumps(raw_alert or {}),
                     f"kafka:auto_triage:{tier}",
                 )
-                await conn.execute(
+                # The model call that produced the verdict, at seq 0 so it
+                # precedes it (issue #1276). This path recorded no prompt at
+                # all, so the decision taken on every fused alert was the one
+                # decision in the platform that could not be replayed.
+                #
+                # seq 0 rather than renumbering: seq 1 is the verdict's key
+                # under `ON CONFLICT (run_id, seq)`, the run id is
+                # deterministic, and moving the verdict would let a replay
+                # write a second one. Escalation graph steps start at seq 2
+                # (`run_escalation(..., seq_start=1)`), so 0 is the free slot
+                # and it is also the one the manual path puts its first
+                # prompt in.
+                for exchange in (llm_exchanges or [])[:1]:
+                    await conn.execute(
+                        """
+                        INSERT INTO investigation_events
+                          (id, run_id, tenant_id, seq, ts, kind, agent, summary,
+                           payload, input_hash, output_hash, duration_ms, created_at)
+                        VALUES
+                          ($1, $2, $3, 0, now(), 'llm_call', $4, $5, $6::jsonb, $7, $8, $9, now())
+                        ON CONFLICT (run_id, seq) DO NOTHING
+                        """,
+                        uuid.uuid4(),
+                        run_id,
+                        tenant_id,
+                        str(exchange.get("agent") or "auto_triage"),
+                        f"model call: {exchange.get('purpose') or 'triage'}"[:8000],
+                        json.dumps(exchange),
+                        exchange.get("input_hash"),
+                        exchange.get("output_hash"),
+                        int(exchange.get("duration_ms") or 0),
+                    )
+
+                verdict_event_id = uuid.uuid4()
+                # The hashes travel onto the verdict too. An auditor asking
+                # "what produced this verdict" reads the verdict row, and a
+                # null `input_hash` there is indistinguishable from a run that
+                # never called a model — which is a real state on the
+                # deterministic path and must stay tellable apart.
+                first = (llm_exchanges or [{}])[0]
+                written = await conn.execute(
                     """
                     INSERT INTO investigation_events
                       (id, run_id, tenant_id, seq, ts, kind, agent, summary,
-                       payload, duration_ms, created_at)
+                       payload, input_hash, output_hash, duration_ms, created_at)
                     VALUES
-                      ($1, $2, $3, 1, now(), 'triage_verdict', $4, $5, $6::jsonb, 0, now())
+                      ($1, $2, $3, 1, now(), 'triage_verdict', $4, $5, $6::jsonb, $7, $8, $9, now())
                     ON CONFLICT (run_id, seq) DO NOTHING
                     """,
-                    uuid.uuid4(),
+                    verdict_event_id,
                     run_id,
                     tenant_id,
                     f"auto_triage:{tier}",
@@ -523,7 +653,53 @@ async def persist_auto_triage(
                             "auto_closed": auto_closed,
                         }
                     ),
+                    first.get("input_hash"),
+                    first.get("output_hash"),
+                    int(first.get("duration_ms") or 0),
                 )
+
+                # The literal transcript, attached to the verdict event.
+                # `GET /investigations/{run}/explain?step=1` inlines the
+                # artifacts of the focal event, which is how the MCP
+                # `aisoc_explain_step` tool keeps its documented promise to
+                # return "the prompt, response, and tools used".
+                #
+                # Written inline rather than through `record_artifact`
+                # because that acquires its own connection, and a transcript
+                # committed separately from the verdict it explains can
+                # survive a rollback of the verdict.
+                #
+                # Skipped entirely when the verdict row already existed.
+                # `investigation_artifacts` has no natural key to conflict
+                # on, so without this a replay of a deterministic run id
+                # would append a second copy of the transcript on every
+                # pass while the events it explains stayed at one.
+                if not _inserted_a_row(written):
+                    llm_exchanges = []
+                for exchange in llm_exchanges or []:
+                    for kind, text in (
+                        ("llm_prompt", exchange.get("prompt")),
+                        ("llm_response", exchange.get("response")),
+                    ):
+                        if not text:
+                            continue
+                        blob = str(text)
+                        await conn.execute(
+                            """
+                            INSERT INTO investigation_artifacts
+                              (id, run_id, event_id, tenant_id, kind, content,
+                               sha256, size_bytes, created_at)
+                            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
+                            """,
+                            uuid.uuid4(),
+                            run_id,
+                            verdict_event_id,
+                            tenant_id,
+                            kind,
+                            blob,
+                            hashlib.sha256(blob.encode("utf-8")).hexdigest(),
+                            len(blob.encode("utf-8")),
+                        )
                 await conn.execute(
                     # `total_cost_usd` is measured cost only. It used to carry
                     # a list-price guess keyed on a gateway alias, so a local

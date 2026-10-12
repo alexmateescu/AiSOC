@@ -172,7 +172,7 @@ EVIDENCE: dict[str, Evidence] = {
             "and requires six of the ten tests to fail."
         ),
     ),
-    "SCIM 2.0, white-label, usage metering": Evidence(
+    "SCIM 2.0 provisioning": Evidence(
         tests=("tests/isolation/test_scim_live.py",),
         workflow="scim-live.yml",
         job="scim-live",
@@ -184,6 +184,37 @@ EVIDENCE: dict[str, Evidence] = {
             "`FastAPI()` rather than the real application. This drives "
             "`create_application()` against real Postgres as the runtime role, and the two "
             "static contract gates move here from a path-filtered workflow."
+        ),
+    ),
+    "White-label branding": Evidence(
+        tests=("tests/isolation/test_white_label_live.py",),
+        workflow="white-label-live.yml",
+        job="white-label-live",
+        negative_control=".github/workflows/white-label-live.yml",
+        negative_marker="The negative control.",
+        rationale=(
+            "Split out of a row that read `SCIM 2.0, white-label, usage metering` and "
+            "named only `test_scim_live.py`, which tests neither of the other two. One "
+            "row covering three capabilities passed this gate for four releases because "
+            "`_match_key` matches a prefix and the first capability's evidence was real. "
+            "The scheduled report and its covering email are the surfaces an operator "
+            "actually receives, and the email is where the defect was: both workers "
+            "resolved branding nowhere, and neither could store an artefact on real "
+            "Postgres at all."
+        ),
+    ),
+    "Usage metering": Evidence(
+        tests=("tests/isolation/test_usage_lake_meter_live.py",),
+        workflow="lake-live.yml",
+        job="lake-live",
+        negative_control=".github/workflows/lake-live.yml",
+        negative_marker="OK: an unscoped lake meter makes the suite fail, as it must.",
+        rationale=(
+            "Split out of the same bundled row, and the evidence string was wrong as well "
+            "as missing: this runs on live **ClickHouse**, not Postgres. A meter is the "
+            "one claim that cannot be tested against itself -- four meters in this "
+            "repository read zero on real data while passing their own suites -- so the "
+            "negative control drops the tenant predicate and requires the suite to go red."
         ),
     ),
     "Scheduled connectors": Evidence(
@@ -583,6 +614,47 @@ def has_negative_control(entry: Evidence) -> tuple[bool, str]:
     return True, ""
 
 
+#: Words that make a comma a subordinate clause rather than a list item.
+#: "Alert-triggered playbooks, with a durable approval pause" is one
+#: capability; "SCIM 2.0, white-label, usage metering" is three.
+_CLAUSE_OPENERS: tuple[str, ...] = (
+    "with",
+    "which",
+    "including",
+    "and its",
+    "compiled",
+    "of",
+    "plus",
+    "backed",
+    "scoped",
+)
+
+
+def bundles_several_capabilities(capability: str) -> tuple[bool, str]:
+    """Whether one row is standing in for several capabilities.
+
+    This is the shape that defeated the gate for four releases. The row read
+    ``SCIM 2.0, white-label, usage metering`` and named a single SCIM test;
+    ``_match_key`` matches on a prefix, so the first capability's real
+    evidence satisfied the lookup and the other two were never checked. The
+    row was Stable, the gate printed OK, and two of the three capabilities
+    had no live cover at all.
+
+    Checking that each row's evidence exercises it is not enough on its own,
+    because a bundled row has only one evidence entry to check. The row has
+    to be split first, which is what this refuses to let anyone skip.
+    """
+    segments = [s.strip() for s in capability.split(",")[1:]]
+    listed = [s for s in segments if s and not s.lower().startswith(_CLAUSE_OPENERS)]
+    if not listed:
+        return False, ""
+    return True, (
+        f"{capability!r} names more than one capability ({', '.join(repr(s) for s in listed)}). "
+        "Give each its own row and its own evidence: a bundled row is matched on its first "
+        "capability, so the others inherit a pass they never earned."
+    )
+
+
 def scan() -> Scan:
     if not README.is_file():
         return Scan(findings=[Finding("no-readme", f"{README} does not exist")])
@@ -594,6 +666,10 @@ def scan() -> Scan:
     for row in rows:
         if row.status != "Stable":
             continue
+        bundled, why = bundles_several_capabilities(row.capability)
+        if bundled:
+            result.findings.append(Finding("bundled-capabilities", f"line {row.line}: {why}"))
+
         key = _match_key(row.capability)
         if key is None:
             result.findings.append(
@@ -662,6 +738,24 @@ def _self_test() -> int:
     the gate is exercised against the table it actually grades.
     """
     import dataclasses
+
+    # The bundling check is a pure function over the capability cell, so it
+    # is proved directly: the row that defeated this gate for four releases
+    # must be caught, and every legitimate shape must pass. Both directions,
+    # because a check that flags everything is as useless as one that flags
+    # nothing -- and one of these rows really does carry a comma.
+    for capability, should_flag in (
+        ("SCIM 2.0, white-label, usage metering", True),
+        ("A, B and C", True),
+        ("Alert-triggered playbooks, with a durable approval pause", False),
+        ("Detection engine (2603 executable rules) of 6991", False),
+        ("SCIM 2.0 provisioning", False),
+        ("Event lake + hunting (ClickHouse)", False),
+    ):
+        flagged, _ = bundles_several_capabilities(capability)
+        if flagged != should_flag:
+            print(f"self-test FAILED: bundles_several_capabilities({capability!r}) returned {flagged}, expected {should_flag}")
+            return 1
 
     cases: list[tuple[str, bool]] = []
     baseline = scan()

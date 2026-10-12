@@ -89,7 +89,22 @@ def _at(day: date, hour: int) -> datetime:
 @pytest.fixture(scope="module")
 def lake():
     """A ClickHouse carrying the product's own schema and a known corpus."""
-    driver = pytest.importorskip("clickhouse_driver")
+    # Not `importorskip`. The module-level guard above has already decided
+    # this is a live run, so a missing driver is a broken job and not an
+    # absent store — and a skip here would leave `pytest` exiting 0 with
+    # nothing measured, which is the shape that let a weekly evaluation
+    # report success for ten weeks having graded nothing.
+    try:
+        import clickhouse_driver as driver  # noqa: PLC0415 — live-only dependency
+    except ImportError as exc:  # pragma: no cover — only on a misconfigured runner
+        # `raise` rather than a bare `pytest.fail(...)`: Failed is a
+        # BaseException and the call never returns, but that is not visible
+        # to static analysis, which then reads `driver` below as possibly
+        # unbound. Raising the same failure says so in the syntax.
+        raise pytest.fail.Exception(
+            f"ISOLATION_CLICKHOUSE_HOST is set, so this is a live run, but clickhouse_driver is missing ({exc}). "
+            "Install it in the job rather than letting the suite skip."
+        ) from exc
     client = driver.Client(
         host=os.environ["ISOLATION_CLICKHOUSE_HOST"],
         port=int(os.environ.get("ISOLATION_CLICKHOUSE_PORT", "9000")),

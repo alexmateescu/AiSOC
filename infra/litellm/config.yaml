@@ -128,6 +128,26 @@ model_list:
   #   a bigger local     AISOC_LLM_MODEL_DEEP=ollama_chat/llama3.1:8b
   #                      (pull it first: docker compose exec ollama ollama pull llama3.1:8b)
   #
+  # On "a bigger local": pick by measurement, and mind the generation. Graded
+  # on the 72-item balanced verdict corpus, five local models came out:
+  #
+  #   llama3.1:8b-instruct-q4_K_M   0.357 balanced  ECE 0.349   <- best
+  #   llama3.2:3b-instruct-q4_K_M   0.285 balanced  ECE 0.442   <- CPU default
+  #   llama3:8b                     0.279 balanced  ECE 0.421
+  #   qwen2.5:7b-instruct-q4_K_M    0.260 balanced  ECE 0.594
+  #   mistral:7b-instruct-v0.3      0.210 balanced  ECE 0.366
+  #
+  # So "8B" is not the useful unit: llama3.1:8b leads and the previous-
+  # generation llama3:8b scores below the 3B it would replace. The GPU and
+  # host-LLM overlays already default to the winner; this line is for anyone
+  # routing a single role by hand.
+  #
+  # Two caveats that outrank the ranking. A constant answer scores 0.250, so
+  # every row here is far closer to chance than to useful. And auto-close
+  # precision is poor across all five (0.091-0.571 on 7-37 candidates), so
+  # nothing measured supports autonomous closure on any of them. Re-grade
+  # with `scripts/run_verdict_eval.py` before moving a deployment.
+  #
   # Per-alias divergence — a different model for one workload only — is the case
   # that does need an edit: replace that alias's `os.environ/...` with a literal.
 
@@ -147,7 +167,34 @@ litellm_settings:
   require_auth_for_metrics_endpoint: false
   # Never wait forever on a stalled provider — fall through to AiSOC's own
   # deterministic path instead of hanging the alert drawer.
-  request_timeout: 60
+  #
+  # This read `request_timeout: 60`, the one bare literal in a file where every
+  # other value resolves from the environment, so raising it meant editing a
+  # mounted file and rebuilding. 60s is not a universal number: the bundled 3B
+  # model doing CPU-only inference on a long generation can exceed it, and
+  # every call then times out while the Settings panel still reports the
+  # provider Live (issue #1241). The default is unchanged — the knob is new.
+  #
+  # Measured against `ghcr.io/berriai/litellm:main-stable`, because two
+  # plausible-looking alternatives do not work:
+  #
+  #  * LiteLLM's own `REQUEST_TIMEOUT` environment variable is read and
+  #    float-coerced in `litellm/constants.py`, but it does **not** reach the
+  #    proxy's router path: a gateway started with `REQUEST_TIMEOUT=5` and no
+  #    key here was still waiting on a blackholed provider after 200s.
+  #  * This key *does* reach it. `get_secret` resolves `os.environ/...` to a
+  #    string (it coerces only booleans), LiteLLM assigns that straight onto
+  #    `litellm.request_timeout`, and the value lands: with the variable at 3,
+  #    the gateway answered 408 with `timeout value=3.0, time taken=3.0`.
+  #
+  # The variable must therefore be SET. `get_secret` returns None for an unset
+  # one, and a gateway in that state answers 200 on `/health/liveliness` while
+  # failing every completion with `float() argument must be a string or a real
+  # number, not 'NoneType'`. `docker-compose.yml` supplies the default, and
+  # `test_litellm_config.py` fails if that default is ever removed — the config
+  # is already hard-dependent on its environment in the same way (with
+  # `AISOC_LLM_MODEL_FAST` unset this file does not start at all).
+  request_timeout: os.environ/AISOC_LITELLM_REQUEST_TIMEOUT
 
 # ── Router: retries + cross-model fallbacks ───────────────────────────────────
 # model_pins.py documents that "the LiteLLM gateway owns any model-level
@@ -157,6 +204,13 @@ litellm_settings:
 router_settings:
   # Retry a transient failure (rate limit / 5xx / timeout) on the same alias
   # before falling back.
+  #
+  # A literal on purpose, and not environment-driven like the timeout above.
+  # LiteLLM hands `router_settings` straight to `Router.__init__` with no type
+  # coercion (`router_params[k] = v`), and the retry path evaluates
+  # `num_retries > 0`, which raises `TypeError` against a string at precisely
+  # the moment a retry is needed. The knob that matters for slow hardware is
+  # the timeout, and that one is environment-driven.
   num_retries: 2
   # Cross-model failover: if an alias's primary model keeps failing, route the
   # request to an adjacent/cheaper alias so quality degrades gracefully instead

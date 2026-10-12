@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import and_, func, select, update
 from sqlalchemy.exc import IntegrityError
 
@@ -28,6 +28,7 @@ from app.services.alert_queue import (
     QueueResponse,
     build_queue,
     claim_alert,
+    severity_rank_expr,
 )
 from app.services.alert_rail import (
     MiniTimelineEvent,
@@ -35,6 +36,7 @@ from app.services.alert_rail import (
     RelatedEntity,
     build_rail_envelope,
 )
+from app.services.alert_status import is_unresolved
 from app.services.audit import emit_audit
 from app.services.event_sanitiser import (
     SubmitPayloadTooLarge,
@@ -202,16 +204,54 @@ class AlertSnoozeRequest(BaseModel):
     reason: str | None = None
 
 
+class AlertFacetCounts(BaseModel):
+    """Counts over the whole filtered result set, not the returned page.
+
+    The console's Critical / High / Unresolved tiles used to be
+    `alerts.filter(...)` over the 25 rows it had loaded, rendered beside a
+    server-side `total` in the hundreds — so the tiles were arithmetically
+    capped at the page size and changed when the analyst paged.
+
+    Computed from the same `WHERE` clause as `total` rather than over the
+    whole tenant, so all four numbers on that strip describe one set of rows.
+    """
+
+    by_severity: dict[str, int] = Field(default_factory=dict)
+    by_status: dict[str, int] = Field(default_factory=dict)
+    #: Resolved through `app.services.alert_status`, not by counting `new` —
+    #: `triaging` and `in_progress` are outstanding work too.
+    unresolved: int = 0
+
+
 class AlertListResponse(BaseModel):
     items: list[AlertResponse]
     total: int
     page: int
     page_size: int
     pages: int
+    facets: AlertFacetCounts = Field(default_factory=AlertFacetCounts)
+
+
+#: Fields this endpoint cannot apply, mapped to the route that can.
+#:
+#: Each key is a real ``Alert`` column, which is why they arrive here and
+#: why dropping them silently was expensive: the caller is asking for
+#: something the platform does support, just not through this verb.
+_ALERT_UPDATE_ELSEWHERE = {
+    "disposition": "POST /api/v1/feedback/alert-override",
+    "corrected_verdict": "POST /api/v1/feedback/alert-override",
+    "verdict": "POST /api/v1/feedback/alert-override",
+    "severity": "POST /api/v1/alerts/{alert_id}/escalate",
+    "snoozed_until": "POST /api/v1/alerts/{alert_id}/snooze",
+}
 
 
 class AlertUpdateRequest(BaseModel):
-    model_config = ConfigDict(populate_by_name=True)
+    #: ``extra="forbid"``, because the default is ``ignore`` and this is a
+    #: write endpoint. An ignored field on a read is a tolerated unknown;
+    #: on a write it is a 200 reporting a change that did not happen, and
+    #: nothing in the response body distinguishes the two.
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
     status: str | None = None
     priority: int | None = None
@@ -220,6 +260,29 @@ class AlertUpdateRequest(BaseModel):
     # canonical field name and that alias.
     assigned_to_id: uuid.UUID | None = Field(default=None, alias="assignee")
     case_id: uuid.UUID | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _name_the_route_that_applies_it(cls, data: Any) -> Any:
+        """Refuse an unapplicable field by name, and say where it does apply.
+
+        ``extra="forbid"`` alone answers "Extra inputs are not permitted",
+        which tells an operator their call was wrong without telling them
+        what is right. Three of these fields have a route that works.
+        """
+        if not isinstance(data, dict):
+            return data
+
+        accepted = {"status", "priority", "tags", "assigned_to_id", "assignee", "case_id"}
+        unknown = [str(key) for key in data if str(key) not in accepted]
+        if not unknown:
+            return data
+
+        parts = []
+        for key in sorted(unknown):
+            route = _ALERT_UPDATE_ELSEWHERE.get(key)
+            parts.append(f"{key} (use {route})" if route else key)
+        raise ValueError(f"PATCH /alerts cannot apply: {', '.join(parts)}. It accepts only: {', '.join(sorted(accepted))}.")
 
 
 class AlertStatsResponse(BaseModel):
@@ -685,12 +748,49 @@ async def submit_alert(
     return AlertResponse.model_validate(alert)
 
 
+async def _alert_facets(db: Any, tenant_id: Any, filters: list[Any]) -> AlertFacetCounts:
+    """Severity / status breakdown of every row the filters select.
+
+    Two `GROUP BY`s rather than one query per tile: the console renders four
+    numbers off this and a per-tile round-trip would make them individually
+    stale. `unresolved` is derived from the status breakdown through the
+    shared `alert_status` vocabulary so it cannot drift from the four other
+    sites that already carry the rule.
+
+    The tenant is a parameter of its own and is applied here rather than
+    being left to whatever `filters` happens to contain. The caller does
+    pass it, but a predicate reached through a list cannot be seen at the
+    statement — not by `check_tenant_query_predicates.py` and not by the
+    next reader — and a second caller that forgot it would read every
+    tenant's counts while still looking correct.
+    """
+    scoped = [Alert.tenant_id == tenant_id, *filters]
+    sev_rows = (await db.execute(select(Alert.severity, func.count()).where(and_(*scoped)).group_by(Alert.severity))).all()
+    status_rows = (await db.execute(select(Alert.status, func.count()).where(and_(*scoped)).group_by(Alert.status))).all()
+
+    by_severity = {row[0]: row[1] for row in sev_rows if row[0]}
+    by_status = {row[0]: row[1] for row in status_rows if row[0]}
+
+    return AlertFacetCounts(
+        by_severity=by_severity,
+        by_status=by_status,
+        unresolved=sum(count for state, count in by_status.items() if is_unresolved(state)),
+    )
+
+
 @router.get("", response_model=AlertListResponse)
 async def list_alerts(
     current_user: Annotated[AuthUser, Depends(require_permission("alerts:read"))],
     db: TenantDBSession,
+    http_request: Request,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=25, ge=1, le=200),
+    limit: int | None = Query(
+        default=None,
+        ge=1,
+        le=200,
+        description="Alias for `page_size`, bounded identically. Supplying both with different values is a 400.",
+    ),
     severity: str | None = Query(default=None),
     status: str | None = Query(default=None),
     category: str | None = Query(default=None),
@@ -698,6 +798,7 @@ async def list_alerts(
     search: str | None = Query(default=None),
     min_confidence: int | None = Query(default=None, ge=0, le=100),
     confidence_label: str | None = Query(default=None),
+    sort: Literal["newest", "priority"] = Query(default="newest"),
 ) -> AlertListResponse:
     """List alerts for the current tenant with filtering and pagination.
 
@@ -706,7 +807,43 @@ async def list_alerts(
     that pre-date the confidence column will have NULL and therefore won't
     match either filter — that's intentional; analysts who care about
     confidence should only see alerts that actually carry the signal.
+
+    `sort` is `newest` (created_at descending) or `priority` (severity
+    descending, then created_at descending). It defaults to `newest`: this
+    endpoint has generated SDK clients and "page one is the newest rows" is
+    part of what they were built against, so changing the order silently
+    would alter what every existing caller reads *without* altering the
+    schema — which `openapi-breaking.yml` cannot detect. The console asks for
+    `priority`, because a noisy low-severity source emitting faster than an
+    analyst pages pushes a critical off page one and keeps it there.
+
+    `limit` is an accepted spelling of `page_size`. Supplying both with
+    different values is a 400.
     """
+    # Why `limit` is declared at all (issue #1246): the route named only
+    # `page_size`, and FastAPI discards an undeclared query parameter in
+    # silence — `?limit=1000` neither clamped nor 422'd, it served the default
+    # 25 under a 200, and `?limit=5` served 25 as well. Declaring the alias
+    # with the identical `ge=1, le=200` bound makes both halves loud: an
+    # in-range value takes effect, an out-of-range one is refused by the
+    # validator `page_size` has always used.
+    #
+    # Clamping 1000 down to 200 was the other option and is the same defect in
+    # better clothing — the caller is served a page size they did not ask for
+    # and are not told. Two spellings that disagree are refused for the same
+    # reason rather than one being picked.
+    if limit is not None:
+        # Presence in the raw query string, not value inequality: `page_size`
+        # carries a default of 25, so `limit=5&page_size=25` is indistinguishable
+        # from `limit=5` by value alone and refusing it would break the alias
+        # for every caller who happens to pick the default.
+        if "page_size" in http_request.query_params and limit != page_size:
+            raise HTTPException(
+                status_code=400,
+                detail=f"`limit` ({limit}) and `page_size` ({page_size}) disagree. They are the same parameter — supply one.",
+            )
+        page_size = limit
+
     filters = [Alert.tenant_id == current_user.tenant_id]
 
     if severity:
@@ -729,13 +866,35 @@ async def list_alerts(
             )
         filters.append(Alert.confidence_label == confidence_label)
 
+    if sort not in ("newest", "priority"):
+        # `Literal` makes FastAPI answer 422 before the handler runs, and
+        # publishes the enum so an SDK generator knows the allowed values.
+        # This guard covers the direct-call path, where `Literal` is not
+        # enforced: the branch below treats anything that is not "priority"
+        # as "newest", and silently serving an order the caller did not ask
+        # for is how a typo becomes a buried critical.
+        #
+        # Literal 400 because the local `status` parameter shadows
+        # `fastapi.status`, same as above.
+        raise HTTPException(status_code=400, detail="sort must be one of: newest, priority")
+
     # Count
     count_result = await db.execute(select(func.count()).select_from(Alert).where(and_(*filters)))
     total = count_result.scalar_one()
 
-    # Fetch
+    # Facets over the *same* filters as `total`, so the console's stat strip
+    # describes one set of rows. It used to derive those tiles from the loaded
+    # page, which capped them at `page_size`.
+    facets = await _alert_facets(db, current_user.tenant_id, filters)
+
+    # Fetch. `created_at` is always the final key so the order is total and
+    # paging cannot repeat or skip a row.
+    order_by = [Alert.created_at.desc()]
+    if sort == "priority":
+        order_by.insert(0, severity_rank_expr().asc())
+
     offset = (page - 1) * page_size
-    result = await db.execute(select(Alert).where(and_(*filters)).order_by(Alert.created_at.desc()).offset(offset).limit(page_size))
+    result = await db.execute(select(Alert).where(and_(*filters)).order_by(*order_by).offset(offset).limit(page_size))
     alerts = result.scalars().all()
 
     return AlertListResponse(
@@ -744,6 +903,7 @@ async def list_alerts(
         page=page,
         page_size=page_size,
         pages=(total + page_size - 1) // page_size,
+        facets=facets,
     )
 
 
@@ -890,14 +1050,54 @@ async def get_alert(
     )
 
 
+#: Columns ``update_alert`` stamps itself rather than taking from the caller.
+#:
+#: Excluded from the audit payload because they are derived: ``resolved_at``
+#: and ``assigned_at`` are a function of the status and assignee transitions
+#: recorded beside them, and ``updated_at`` is a function of the write
+#: happening at all. Recording them would pad every entry with three rows an
+#: auditor has to read past to find the one decision a human made.
+_AUDIT_DERIVED_COLUMNS = frozenset({"updated_at", "resolved_at", "assigned_at"})
+
+
+def _audit_value(value: Any) -> Any:
+    """Render a column value for the JSONB ``changes`` payload.
+
+    ``changes`` is serialised with ``json.dumps``, which raises on the UUID and
+    datetime values this table stores. A failure there aborts the transaction
+    the alert update is in, so an unconvertible value would turn an audit
+    improvement into a 500 on the route it was meant to make accountable.
+    """
+    if isinstance(value, uuid.UUID):
+        return str(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, list):
+        return [_audit_value(v) for v in value]
+    return value
+
+
 @router.patch("/{alert_id}", response_model=AlertResponse)
 async def update_alert(
     alert_id: uuid.UUID,
     request: AlertUpdateRequest,
     current_user: Annotated[AuthUser, Depends(require_permission("alerts:write"))],
     db: DBSession,
+    http_request: Request,
 ) -> AlertResponse:
-    """Update alert status, priority, tags, assignment, or case link."""
+    """Update alert status, priority, tags, assignment, or case link.
+
+    Emits an `alerts:update` audit event carrying a before/after payload for
+    the fields this call changed.
+    """
+    # Until issue #1246 this route emitted nothing, so the only row a closure
+    # produced came from `AuditMiddleware` — which builds its `AuditLog` with
+    # no `changes` argument and labels the action from the URL. Marking a
+    # critical alert as a false positive therefore recorded that *something*
+    # changed and never what, which is the one thing an auditor reading that
+    # line needs. The payload below is derived from `updates`, the same dict
+    # that is written, rather than listed out a second time, so a column added
+    # to the write cannot quietly stay out of the trail.
     result = await db.execute(select(Alert).where(Alert.id == alert_id, Alert.tenant_id == current_user.tenant_id))
     alert = result.scalar_one_or_none()
     if alert is None:
@@ -923,11 +1123,39 @@ async def update_alert(
 
     if updates:
         updates["updated_at"] = datetime.now(UTC)
+        # Read the prior values off the loaded row before the write lands.
+        # A Core UPDATE synchronises the session, so asking afterwards can
+        # return the value we just set and record `{"from": X, "to": X}`.
+        changes = {
+            column: {"from": _audit_value(getattr(alert, column, None)), "to": _audit_value(value)}
+            for column, value in updates.items()
+            if column not in _AUDIT_DERIVED_COLUMNS
+        }
         # Tenant predicate on the write as well as the read above. The read
         # already 404s another tenant's alert, so this is belt and braces
         # today — but a write scoped only by a preceding read is one reorder
         # away from being scoped by nothing.
         await db.execute(update(Alert).where(Alert.id == alert_id, Alert.tenant_id == current_user.tenant_id).values(**updates))
+        # Same session, same transaction, committed below: the alert change
+        # and the record of it land together or not at all.
+        #
+        # `http_request` is passed so the row carries the source IP and so
+        # `AuditMiddleware` sees the mark and stands down. Without it the
+        # request has two audit writers, which is what forked the chain
+        # before migration 074 — and the unique index now refuses the second
+        # row, so the symptom would be a *dropped* entry rather than a fork.
+        await emit_audit(
+            db=db,
+            tenant_id=current_user.tenant_id,
+            actor_id=current_user.user_id,
+            actor_email=current_user.email,
+            api_key_prefix=getattr(current_user, "api_key_prefix", None),
+            action="alerts:update",
+            resource="alert",
+            resource_id=str(alert_id),
+            changes=changes,
+            request=http_request,
+        )
         await db.commit()
         await db.refresh(alert)
 

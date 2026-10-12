@@ -311,6 +311,73 @@ renderer is a different artefact from the one you read. The per-decision rows
 are kept separately, and carry the evidence triage was given, so a number you
 disagree with can be re-derived rather than re-argued.
 
+### The design-partner kit
+
+The three paths above give you a report. The kit wraps the same run in the
+two things you need before a report can leave your building: a signature that
+says it came from your deployment unaltered, and a redaction pass that means
+you can hand it to us without handing over your estate.
+
+```bash
+make replay-eval ARGS="--connector-id <uuid>"
+```
+
+It needs two values in the environment — `AISOC_API_KEY`, and
+`AISOC_REPLAY_SIGNING_KEY`, which is any secret you choose and keep. The
+signing key never leaves your deployment and is not recoverable from a
+bundle, so a bundle you send us proves it was produced by a holder of that
+key and has not been edited since, and nothing more.
+
+The output is a JSON evidence bundle:
+
+```
+{
+  "payload":   { "schema_version", "generated_at", "method", "scores", "privacy", "items"? },
+  "integrity": { "payload_sha256", "algorithm": "HMAC-SHA256", "signature" }
+}
+```
+
+Verify one — yours, or one we send back to you — with:
+
+```bash
+make replay-eval-verify ARGS="path/to/bundle.json"
+```
+
+It exits non-zero and says so when the signature does not match the key in
+your environment, which is the same answer for an edited bundle and for one
+produced by a different deployment, because from the outside those are the
+same event.
+
+**Aggregates by default; items only if you ask.** A bundle carries the
+scores, the method and the privacy block. Per-finding rows are withheld
+unless you pass `--export-items`, and the hallucinated-indicator examples are
+withheld with them, because an example is a verbatim quotation of your
+analyst's or the model's prose about one of your machines.
+
+**What redaction does and does not do.** Identifiers — finding id, rule,
+source, tenant, connector — are replaced whole with stable tokens (`RULE_1`,
+`HOST_2`), so two rows about one rule can still be seen to concern one rule
+while the rule is not named. The agent's free text goes through the same
+tokens plus the platform's pattern redactor plus a pass for host-shaped words
+the identifier pass never saw, which is what catches a machine the model
+quoted in its reasoning and nothing else mentioned. Public taxonomy is held
+back deliberately: `SHA-256`, `CVE-2026-1234`, `RFC-1918` and `x86-64` all
+match the host shape and all stay readable, because reasoning rewritten into
+`HOST_4 hashing` protects nothing and cannot be reviewed. The raw evidence
+triage was given is dropped outright rather than redacted.
+
+The bundle states its own limits in a `privacy` block rather than leaving you
+to infer them: what the free-text pass does not catch, that the token map is
+never exported, and that evidence was withheld. Read it before you send one.
+
+**Egress is classified, not assumed.** Every bundle records whether anything
+left your estate, derived from the models the run actually resolved rather
+than from the flags you passed: `none` when every call went to a local model
+or no call was placed at all, `hosted` when a third-party provider was used —
+which the kit refuses to do unless you pass `--hosted` — and `unverified`
+when calls were placed that the gateway did not attribute, which is reported
+as unknown rather than quietly as `none`.
+
 ## Reproducibility, stated precisely
 
 **A report reproduces byte for byte between two runs over the same pinned
@@ -382,6 +449,16 @@ through the same triage path production uses.
   on a local checkout. When they are, the PDF route answers 503 naming them,
   rather than serving an empty file; JSON and Markdown carry the same report
   and need nothing extra.
+- **Redaction is a pattern pass, and patterns have edges.** A single-word
+  machine name with no digit and no separator is indistinguishable from an
+  ordinary word, and a host whose first segment collides with public
+  taxonomy — one literally named `sha-1` — is kept for the same reason
+  `SHA-256` is. The bundle names both limits in its own privacy block. Read
+  a bundle before sending it; the kit makes a leak unlikely, not impossible.
+- **A signature proves integrity and origin, not honesty.** It says a holder
+  of your key produced those bytes and nobody changed them afterwards. It
+  says nothing about whether the window was chosen fairly, which is why the
+  method block travels inside the signed payload.
 - **Hallucination counting errs high.** Indicators are extracted from the
   agent's own reasoning with the same pattern set the synthetic-corpus grader
   checks against, so a phrase shaped like a domain is checked and, if absent

@@ -73,6 +73,29 @@ ENTRY_POINT_DIRS = (
     "alembic/versions",
 )
 
+#: Repo-root CLIs that are themselves a way the product is run, mapped to
+#: the service whose ``app`` package they put on ``sys.path``. Their
+#: ``from app.…`` imports are entry points into that service.
+#:
+#: Deliberately a named map and not "anything under ``scripts/`` counts".
+#: Nine repo-root scripts import a service's ``app``, and most are CI
+#: analysis tools that import a module precisely to inspect it — counting
+#: those would let a checker vouch for dead code, which is weaker evidence
+#: than the test imports this gate already refuses. The bar for an entry
+#: here is that a user runs it: a documented ``make`` target or a command
+#: the docs tell someone to type.
+#:
+#: A path that no longer exists, or that no longer imports the service,
+#: fails the gate rather than lingering — the same discipline as the
+#: allowlist below, for the same reason.
+CLI_ENTRY_POINTS: dict[str, str] = {
+    # `make replay-eval` / `make replay-eval-verify`. Builds and verifies
+    # the design-partner evidence bundle on the operator's machine, so the
+    # builder, the redactor and the verifier are imported from the API tree
+    # rather than reached through a route.
+    "scripts/run_replay_eval.py": "services/api",
+}
+
 #: Loaders that import by computed name. Each maps to the directory whose
 #: modules it reaches.
 DYNAMIC_LOADERS: dict[str, tuple[str, ...]] = {
@@ -179,6 +202,7 @@ class Report:
     reachable: int = 0
     unreachable: list[str] = field(default_factory=list)
     stale_allowlist: list[str] = field(default_factory=list)
+    broken_cli_entries: list[str] = field(default_factory=list)
 
 
 def _service_dirs(root: pathlib.Path) -> list[pathlib.Path]:
@@ -257,6 +281,30 @@ def inspect(root: pathlib.Path) -> Report:
             rel = path.relative_to(service).as_posix()
             if rel in ENTRY_POINT_NAMES or any(rel.startswith(d + "/") for d in ENTRY_POINT_DIRS):
                 entries.add(name)
+
+        # A repo-root CLI reaches into exactly one service's `app`, so the
+        # modules it names are roots for that service.
+        service_rel = service.relative_to(root).as_posix()
+        for cli_rel, cli_service in CLI_ENTRY_POINTS.items():
+            if cli_service != service_rel:
+                continue
+            cli = root / cli_rel
+            if not cli.is_file():
+                report.broken_cli_entries.append(f"{cli_rel} (no such file)")
+                continue
+            named = {i for i in _imports(cli, "") if i == "app" or i.startswith("app.")}
+            resolved = set()
+            for imported in named:
+                candidate = imported
+                while candidate and candidate not in by_name:
+                    candidate = candidate.rsplit(".", 1)[0] if "." in candidate else ""
+                if candidate:
+                    resolved.add(candidate)
+            if not resolved:
+                report.broken_cli_entries.append(f"{cli_rel} (imports no module of {cli_service})")
+                continue
+            entries |= resolved
+
         report.entry_points += len(entries)
 
         # Dynamic loaders reach whole directories.
@@ -330,6 +378,23 @@ def _verdict(report: Report) -> int:
         )
         return 2
 
+    # Ahead of the findings below: a CLI entry that no longer resolves
+    # silently stops rooting the walk, which *adds* unreachable modules. The
+    # gate would then report those as dead code and send someone to delete
+    # working code, when the real fault is one stale path here.
+    if report.broken_cli_entries:
+        print(
+            "check_module_reachability: CLI entry points that no longer reach their service:",
+            file=sys.stderr,
+        )
+        for rel in report.broken_cli_entries:
+            print(f"  {rel}", file=sys.stderr)
+        print(
+            "Fix the path or drop the entry. Left stale it roots nothing, and the modules it reached are then reported as dead code.",
+            file=sys.stderr,
+        )
+        return 1
+
     if report.stale_allowlist:
         print(
             "check_module_reachability: allowlist entries that no longer describe an unreachable module:",
@@ -391,6 +456,47 @@ def self_test() -> int:
         report = inspect(pathlib.Path(tmp))
         unreachable = {pathlib.Path(r).name for r in report.unreachable}
         extra.append(("reach is transitive", "deep.py" not in unreachable))
+
+        # A repo-root CLI roots the walk — and only when it is mapped, so
+        # the map cannot be bypassed by dropping a file into `scripts/`.
+        cli_dir = pathlib.Path(tmp) / "scripts"
+        cli_dir.mkdir(parents=True)
+        (cli_dir / "run_probe.py").write_text("from app import orphan\n", encoding="utf-8")
+        report = inspect(pathlib.Path(tmp))
+        extra.append(
+            (
+                "an unmapped script under scripts/ does not rescue a module",
+                "orphan.py" in {pathlib.Path(r).name for r in report.unreachable},
+            )
+        )
+
+        CLI_ENTRY_POINTS["scripts/run_probe.py"] = "services/probe"
+        try:
+            report = inspect(pathlib.Path(tmp))
+            extra.append(
+                (
+                    "a mapped CLI makes what it imports reachable",
+                    "orphan.py" not in {pathlib.Path(r).name for r in report.unreachable},
+                )
+            )
+
+            # The stale-entry arm, which is what keeps the map honest.
+            (cli_dir / "run_probe.py").unlink()
+            report = inspect(pathlib.Path(tmp))
+            extra.append(("a mapped CLI that has gone is reported", bool(report.broken_cli_entries)))
+            extra.append(("and that is a failure, not a pass", _verdict(report) == 1))
+
+            # Present but no longer importing the service: the quieter half.
+            (cli_dir / "run_probe.py").write_text("X = 1\n", encoding="utf-8")
+            report = inspect(pathlib.Path(tmp))
+            extra.append(
+                (
+                    "a mapped CLI that stopped importing the service is reported",
+                    any("imports no module" in e for e in report.broken_cli_entries),
+                )
+            )
+        finally:
+            CLI_ENTRY_POINTS.pop("scripts/run_probe.py", None)
 
     report = inspect(repo_root())
     extra.append(

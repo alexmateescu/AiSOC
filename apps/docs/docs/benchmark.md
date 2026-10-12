@@ -95,53 +95,87 @@ the numbers.
 3. **The CI gate runs on every PR targeting `main` / `develop`** — [latest run](https://github.com/beenuar/AiSOC/actions/workflows/ci.yml). (CI is currently scoped to those two branches; PRs to long-lived feature branches are not gated.)
 4. **Historical numbers are queryable** — every successful build pushes its report (written by `scripts/run_evals.py --out`) to the [`eval-results`](https://github.com/beenuar/AiSOC/tree/eval-results) branch as `eval/results/<commit_sha>.json`.
 
-## Verdict accuracy, and why it is not measured here
+## Verdict quality
 
-Parity 3.2 asks for verdict accuracy, per-class precision and recall,
-malicious recall with a confidence interval, and false-negative counts.
-The scoring for every one of those exists in
-[`aisoc_benchmark.replay`](https://github.com/beenuar/AiSOC/blob/main/packages/aisoc-benchmark/aisoc_benchmark/replay.py)
-and is tested. What does not exist is a corpus that could produce an
-honest number from it.
+**This section used to say verdict accuracy was not measured here and could
+not be. That was true when it was written, and it is no longer true.** The
+reason it was true is worth keeping: every labelled set in this repository
+was malicious by construction, so an agent answering "true positive" to
+everything, without reading anything, posted 100% accuracy and 100%
+malicious recall. `scripts/score_replay_set.py` still refuses those corpora,
+and a test still asserts that **this tree's own two corpora are refused**,
+because that was the finding rather than a bug to route around.
 
-**Every labelled set in this repository is entirely malicious by
-construction.** `synthetic_incidents.json` and `adversary_incidents.json`
-are 200 incidents each and every one is a real attack. Their
-`response_class` field says which action to take — `isolate_host`,
-`disable_account` — not whether the finding was true. There is no benign
-case and no false positive anywhere in `services/agents/tests/eval_data/`.
+What changed is a corpus that can produce an honest number:
+[`verdict_corpus_v1.json`](https://github.com/beenuar/AiSOC/blob/main/services/agents/tests/eval_data/verdict/verdict_corpus_v1.json)
+— 72 hand-authored items in 36 twin pairs, where each pair shares its title,
+rule, severity, vendor and ATT&CK technique and differs **only** in the
+evidence. Severity alone therefore separates nothing. Every item carries
+`is_synthetic: true`; no recorded customer telemetry is involved, and the
+corpus README names every public dataset considered and why each was
+refused.
 
-Score an agent against that and **an agent that answers "true positive"
-to everything, without reading anything, posts 100% accuracy and 100%
-malicious recall.** Publishing that figure would be the exact mirror of
-the failure `replay.py` already guards against at the other end, where it
-withholds headline accuracy below 30 malicious cases because 98% on a
-corpus of three is misleading in the direction that sells.
+<!-- BEGIN:verdict-quality -->
 
-So nothing publishes it. `scripts/score_replay_set.py` refuses a corpus
-whose minority class is under 5% of the set, names the counts in the
-refusal, and a test asserts that **this tree's own two corpora are
-refused** — because that is the finding, not a bug to route around.
+Corpus: **72 items** in **36 twin pairs** (`verdict_corpus_v1`, digest `sha256:ec60d7bddabcc5b28d8942cea52d770bd8a2d13b93396826a6deab1dcba6aa86`). Twins share title, rule, severity, vendor and technique and differ only in the evidence, so severity alone separates nothing and a constant answer scores at most **0.250**. Hand-authored and synthetic: no recorded customer telemetry is involved.
 
-| Metric | Shipped model `llama3.2:3b-instruct-q4_K_M` | `qwen2.5:0.5b` | Any hosted model |
-|---|---|---|---|
-| Verdict accuracy | not measured — no corpus with a benign class | not measured — same | not measured — no funded key |
-| Per-class precision / recall | not measured — same | not measured — same | not measured — no funded key |
-| Malicious recall (95% CI) | not measured — same | not measured — same | not measured — no funded key |
-| False-negative count | not measured — same | not measured — same | not measured — no funded key |
-| Groundedness | graded weekly by `live-agent-eval.yml` | floor 0.40, measured over 12 runs | not measured — no funded key |
+| Model | Mode | Balanced accuracy | MCC | Malicious recall | Abstention | Hallucination rate | Calls placed |
+|---|---|---|---|---|---|---|---|
+| `llama3.2:3b-instruct-q4_K_M` | live | 0.285 | 0.047 | 0.250 / 36 | 0.000 | 0.000 | 72 |
+| `llama3.1:8b-instruct-q4_K_M` | live | 0.357 | 0.209 | 0.583 / 36 | 0.000 | 0.000 | 72 |
+| `llama3:8b` | live | 0.279 | 0.113 | 0.639 / 36 | 0.000 | 0.000 | 72 |
+| `qwen2.5:7b-instruct-q4_K_M` | live | 0.260 | 0.032 | 0.083 / 36 | 0.097 | 0.000 | 72 |
+| `mistral:7b-instruct-v0.3-q4_K_M` | live | 0.210 | 0.202 | 0.639 / 36 | 0.306 | 0.000 | 72 |
+| `any hosted provider (GPT-4o class)` | – | not measured — no funded key exists in this repository, and no hosted provider has ever been exercised | – | – | – | – | 0 |
 
-The numbers that would fill that table need one of two things: a customer
-replaying their own closed findings, which the replay path exists for and
-runs entirely on their infrastructure; or a balanced corpus built here
-with real benign cases in it. Manufacturing the second from the corpora
-above by labelling everything `true_positive` would produce a table of
-100%s, which is why the guard exists rather than a `--force` flag.
+Malicious recall prints the count behind it: a rate over 36 cases is a different claim from the same rate over four, and the figure alone cannot say which. Every measured row placed the model calls shown in the last column; a row that placed none is refused rather than published, because triage answers from a deterministic scorer when a provider fails and the resulting scorecard looks entirely normal.
 
-**No hosted provider has ever been exercised.** Every hosted column reads
-*not measured* rather than `0`, because a zero in an accuracy column says
-the model got everything wrong and "nobody has run it" is a different
-fact with a different remedy.
+**Shipped default: `llama3.2:3b-instruct-q4_K_M (CPU) / llama3.1:8b-instruct-q4_K_M (GPU, host-LLM)`.** Chosen strictly by balanced accuracy, the metric this corpus was built to make meaningful. llama3.1:8b-instruct-q4_K_M leads at 0.357 against the 3B's 0.285 and a 0.250 constant-answer floor, and also leads on MCC (0.209), malicious precision (0.724) and calibration (ECE 0.349, the only row below 0.40). It therefore becomes the default on the GPU and host-LLM overlays. The 3B stays the default for CPU `make up`, where a ~5 GB model does not fit the 8 GB CORE budget -- a deployment constraint, not a score. Two findings outrank the ranking. First, every model measured is far closer to chance than to useful: the best balanced accuracy is 0.357 against a 0.250 floor, and three of five score below the 0.500 plain accuracy of always guessing the majority class. Second, auto-close precision is poor across the board -- 0.571 on seven candidates at best, 0.091 to 0.243 elsewhere -- so nothing measured here supports autonomous closure, and that is a finding about the auto-close gate rather than about which model to pick.
+
+<!-- END:verdict-quality -->
+
+### How to read this table
+
+The two baselines are the point. With four classes, **a constant answer
+scores 0.250 balanced accuracy**, and **always guessing the majority class
+scores 0.500 plain accuracy**. The best model measured reaches 0.357, and
+three of the five fall below 0.500 on plain accuracy. So the honest
+headline is not which model wins — it is that **every one of them is far
+closer to chance than to useful**, and that the next thing to change is the
+verdict path and the prompt rather than the size of the model.
+
+**Size is the wrong unit.** `llama3.1:8b` leads the table, and the
+previous-generation `llama3:8b` scores *below* the 3B it would replace.
+"Upgrade to an 8B" is not advice that survives measurement; the generation
+mattered more than the parameter count here.
+
+**`mistral:7b` is why balanced accuracy is the headline metric.** It posts
+the highest plain accuracy of any row (0.500) and the lowest balanced
+accuracy (0.210), because it abstains on 31% of items. Plain accuracy
+rewards that and balanced accuracy sees through it, which is the entire
+reason the corpus was built in twin pairs.
+
+**Nothing here supports autonomous closure.** Auto-close precision ranges
+from 0.091 to 0.571 across the five, on denominators of 7 to 37 candidates.
+Even the best of those means closing seven alerts to get four right. That
+is a finding about the auto-close gate rather than about model choice, and
+it is the reason the shipped posture stays human-approval.
+
+**Latency is excluded from the comparison and is published per row anyway.**
+The 3B ran CPU-bound inside the stack container and the four 7–8B rows ran
+GPU-accelerated on the host, so the figures measure different machines.
+Dropping the column would have hidden that asymmetry instead of naming it.
+
+**Per-decision model attribution is unverified.** Every run placed the model
+calls shown and every call was answered — the reasoning in each decision is
+specific to its alert — but `resolved_models` came back empty, so the
+scorecard can show that 72 calls happened and cannot show which model served
+each one. The count is measured; the attribution is not.
+
+**No hosted provider has ever been exercised.** The hosted row reads *not
+measured* rather than `0`, because a zero in an accuracy column says the
+model got everything wrong, and "nobody has run it" is a different fact with
+a different remedy.
 
 ## Before and after
 

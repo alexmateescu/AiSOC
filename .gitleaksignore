@@ -85,6 +85,14 @@ apps/docs/docs/connectors/orca.md:curl-auth-header:121
 # has to contain things that look like credentials — a sample JWT, a PEM
 # header, and AWS's own published example key AKIAIOSFODNN7EXAMPLE. A scanner
 # matching them is the test data doing its job.
+#
+# The same body, `IOSFODNN7EXAMPLE`, is published by AWS under both prefixes:
+# AKIA for a permanent key and ASIA for a temporary STS one. The session
+# fixtures use the ASIA form because the code under test reads an access key
+# id out of a CloudTrail `userIdentity` to key a session, so the value has to
+# be key-shaped or the assertion proves nothing. AWS rejects it —
+# `sts:GetCallerIdentity` answers InvalidClientTokenId — and GitHub secret
+# scanning alert #1 is resolved as a false positive on that evidence.
 tests/test_support_bundle.py:jwt:44
 tests/test_support_bundle.py:private-key:62
 tests/test_support_bundle.py:generic-api-key:112

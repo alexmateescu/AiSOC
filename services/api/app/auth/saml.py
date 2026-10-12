@@ -127,6 +127,29 @@ def _saml_settings(idp: dict[str, Any] | None = None) -> dict[str, Any]:
     return {
         "strict": True,
         "debug": os.getenv("SAML_DEBUG", "false").lower() == "true",
+        "security": {
+            # Keycloak's built-in "role list" mapper is on by default and
+            # emits **one `<Attribute Name="Role">` element per role**, so
+            # a stock Keycloak sends six of them before anybody adds a
+            # mapper. python3-saml defaults `allowRepeatAttributeName` to
+            # False and raises `Found an Attribute element with duplicated
+            # Name` out of `process_response()` — past every `except` this
+            # handler has, so the ACS answered an unhandled 500 and **no
+            # Keycloak user could complete a SAML sign-in at all**.
+            #
+            # Repeated `<Attribute>` elements are legal SAML 2.0 and this
+            # merges their values rather than refusing the assertion. It is
+            # not a relaxation of trust: `process_response()` calls
+            # `response.is_valid()` — signature, conditions and audience —
+            # and only reads attributes once that has passed, so an
+            # attacker cannot add an element without invalidating the
+            # signature that admitted it.
+            #
+            # Found by depth 8.1's containerised-IdP probe. The
+            # self-authored provider in `tests/isolation/test_sso_live.py`
+            # emits one attribute per name, so it could not have found it.
+            "allowRepeatAttributeName": True,
+        },
         "sp": {
             "entityId": sp_entity,
             "assertionConsumerService": {

@@ -21,7 +21,16 @@ organisation's portfolio, plus the organisation's own staff console.
 | Replay evaluation report (PDF) | Product name, logo, primary colour, accent colour, footer, support link |
 | Investigation summary (PDF) | Product name, primary colour, footer, support contact |
 | Email approvals | Product name in the subject and body, `sender_name` as the From display name, primary and accent colours, footer, support contact |
+| Scheduled report email | Product name in the subject, `sender_name` as the From display name |
 | Usage CSV export | The organisation named in the header block |
+
+The executive digest is branded on both paths that produce it: the
+interactive `GET /api/v1/reports/digest`, and the weekly worker that mails
+it out every Monday. They are separate code paths, and for a while only the
+first of them resolved branding.
+
+As with email approvals below, the `From` **address** on a scheduled report
+is the relay's own and is not white-labelled. Only the display name changes.
 
 Branding resolves field by field. An organisation that sets a product name
 and no colours renders its name against the platform palette, rather than

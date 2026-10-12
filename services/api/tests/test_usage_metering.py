@@ -164,6 +164,12 @@ async def _alert(db, *, tenant: uuid.UUID, when: datetime, ai: bool) -> None:
 #: two literals honest.
 DETERMINISTIC_RUN = "kafka:auto_triage:deterministic"
 MODEL_RUN = "kafka:auto_triage:llm"
+#: The two tiers the worker also stamps, both of which answer without
+#: placing a model call. Seeded because a fixture holding only the first two
+#: cannot tell "the model path" from "not the deterministic path", and the
+#: meters read the second for four days of this branch's life.
+MEMORY_RUN = "kafka:auto_triage:memory"
+CACHED_RUN = "kafka:auto_triage:cached"
 
 
 def _run(db, *, tenant: uuid.UUID, when: datetime, case: str, model_used: str | None) -> None:
@@ -200,10 +206,11 @@ async def seeded(session_factory):
         for hour in (2, 3, 4, 5):
             await _alert(db, tenant=OTHER_TENANT, when=_at(DAY_ONE, hour), ai=True)
 
-        # Seven runs for this tenant across the three days, in the three
-        # shapes `investigation_runs` actually holds: auto-triage that
-        # reached a model, auto-triage that did not, and an analyst-driven
-        # investigation. All three counts differ, so a meter that collapsed
+        # Nine runs for this tenant across the three days, covering every
+        # tier the worker stamps plus the analyst-driven shape: auto-triage
+        # that reached a model, auto-triage answered on each of the three
+        # paths that did not, and an investigation that is not auto-triage
+        # at all. All three meter counts differ, so a meter that collapsed
         # any two of them cannot pass by coincidence.
         _run(db, tenant=TENANT, when=_at(DAY_ONE, 0), case="a1", model_used=DETERMINISTIC_RUN)
         _run(db, tenant=TENANT, when=_at(DAY_ONE, 13), case="a2", model_used=MODEL_RUN)
@@ -211,6 +218,9 @@ async def seeded(session_factory):
         _run(db, tenant=TENANT, when=_at(DAY_ONE + timedelta(days=1), 9), case="a3", model_used=DETERMINISTIC_RUN)
         _run(db, tenant=TENANT, when=_at(DAY_ONE + timedelta(days=1), 10), case="a4", model_used=DETERMINISTIC_RUN)
         _run(db, tenant=TENANT, when=_at(DAY_ONE + timedelta(days=2), 1), case="a5", model_used=MODEL_RUN)
+        # Auto-triage that answered without a model on the other two tiers.
+        _run(db, tenant=TENANT, when=_at(DAY_ONE, 15), case="a6", model_used=MEMORY_RUN)
+        _run(db, tenant=TENANT, when=_at(DAY_ONE + timedelta(days=1), 11), case="a7", model_used=CACHED_RUN)
         # `start_run` leaves `model_used` null when the caller names no
         # model, and `replay_redaction` already reads that as deterministic.
         # It is still an investigation, so it belongs in that meter.
@@ -388,6 +398,33 @@ class TestThePathMetersReadTheRecordedPath:
         assert values["triages_model"] == 0, "a deterministic triage was counted as a model triage"
         assert values["triages_deterministic"] == 1
 
+    @pytest.mark.parametrize("tier", ["memory", "cached"])
+    async def test_a_run_that_placed_no_call_is_not_a_model_triage(self, session_factory, tier):
+        """The worker has four tiers, and only one of them reaches a model.
+
+        `memory` is institutional-memory suppression and `cached` is a
+        deduplicated replay. Neither places an LLM call — the worker says
+        so in as many words — so neither is an AI triage, and on a
+        deployment with no model configured both can still happen.
+
+        Discriminating on "not the deterministic literal" counted both as
+        AI triages, which is the same sentence this item exists to make
+        false, reached by a different route.
+        """
+        async with session_factory() as db:
+            _run(db, tenant=TENANT, when=_at(DAY_ONE, 9), case="alert-1", model_used=f"kafka:auto_triage:{tier}")
+            await db.commit()
+
+        async with session_factory() as db:
+            values = (await usage_metering.measure_day(db, TENANT, DAY_ONE)).values
+            quota = await measure_usage(db, TENANT)
+
+        assert values["triages_model"] == 0, f"a `{tier}` run was counted as a model triage"
+        assert values["triages_deterministic"] == 1, f"a `{tier}` run went unaccounted for"
+        assert values["investigations"] == 0, f"a `{tier}` run was counted as an analyst investigation"
+        # The quota shares the definition, so it has to share the fix.
+        assert quota["triages_per_month"] == 0, f"a `{tier}` run burned the tenant's AI-triage quota"
+
     async def test_a_model_triage_is_counted_as_one(self, session_factory):
         """The other half of the control.
 
@@ -465,6 +502,56 @@ class TestTheProducerStillWritesWhatTheseMetersRead:
         assert any(s.startswith("kafka:auto_triage:") for s in stamps), (
             f"the ledger no longer stamps `kafka:auto_triage:<tier>`; it writes {stamps!r}"
         )
+
+    #: Where the tier literals are decided, as opposed to where they are
+    #: written. `persist_auto_triage` interpolates whatever its caller
+    #: passed, so reading the ledger alone proves the *prefix* and says
+    #: nothing about the vocabulary.
+    WORKER = pathlib.Path(__file__).resolve().parents[3] / "services" / "agents" / "app" / "workers" / "fused_alert_consumer.py"
+
+    def test_every_tier_the_worker_can_stamp_is_classified(self):
+        """A new tier must red this, not land silently in `triages_model`.
+
+        The vocabulary lives in the worker and the classification lives
+        here, in another service that cannot import it. Nothing connected
+        the two, which is how `memory` and `cached` came to be counted as
+        AI triages: the meters discriminated on "not the deterministic
+        literal", and that reads as "the model path" only while
+        `deterministic` is the sole alternative.
+
+        Read from source rather than imported for the usual reason — both
+        services call their top-level package `app`.
+        """
+        assert self.WORKER.exists(), f"{self.WORKER} has moved; the tier vocabulary is no longer pinned"
+        tree = ast.parse(self.WORKER.read_text())
+
+        stamped: set[str] = set()
+        for node in ast.walk(tree):
+            # `tier = "cached"` and `tier: str = "..."`.
+            targets = [node.target] if isinstance(node, ast.AnnAssign) else list(node.targets) if isinstance(node, ast.Assign) else []
+            if any(isinstance(t, ast.Name) and t.id == "tier" for t in targets):
+                if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+                    stamped.add(node.value.value)
+            # `tier="memory"` passed to `_record` / `persist_auto_triage`.
+            if isinstance(node, ast.Call):
+                for kw in node.keywords:
+                    if kw.arg == "tier" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+                        stamped.add(kw.value.value)
+            # `return state, "llm"` out of `_llm_triage`, whose contract is
+            # `tuple[InvestigationState, str]` — the str is the tier.
+            if isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef) and node.name == "_llm_triage":
+                for inner in ast.walk(node):
+                    if isinstance(inner, ast.Return) and isinstance(inner.value, ast.Tuple):
+                        stamped |= {e.value for e in inner.value.elts if isinstance(e, ast.Constant) and isinstance(e.value, str)}
+
+        assert stamped, "no tier literals found in the worker; this pin has stopped reading the vocabulary"
+        classified = set(usage_metering.MODEL_TIERS) | set(usage_metering.NON_MODEL_TIERS)
+        assert stamped <= classified, (
+            f"the auto-triage worker stamps {sorted(stamped - classified)!r}, which no meter classifies. "
+            "Add each to MODEL_TIERS or NON_MODEL_TIERS in usage_metering — a tier in neither is a run "
+            "missing from every triage meter, and the usage screen will not add up."
+        )
+        assert not set(usage_metering.MODEL_TIERS) & set(usage_metering.NON_MODEL_TIERS), "a tier cannot be both"
 
     def test_the_alert_columns_are_written_on_both_paths(self):
         """Which is why the meters cannot read them.

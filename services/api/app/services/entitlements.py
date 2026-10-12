@@ -31,11 +31,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 
-from sqlalchemy import DateTime, String, Uuid, bindparam, text
+from sqlalchemy import DateTime, Uuid, bindparam, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.services.usage_metering import AUTO_TRIAGE_PREFIX, DETERMINISTIC_RUN
+from app.services.usage_metering import MODEL_RUNS
 
 logger = logging.getLogger("aisoc.entitlements")
 
@@ -96,8 +96,7 @@ LIMIT_KEYS: Final[tuple[LimitKey, ...]] = (
         "Auto-triage runs that reached a model this calendar month.",
         (
             "SELECT count(*) FROM investigation_runs "
-            "WHERE tenant_id = :tenant_id AND created_at >= :month_start "
-            "AND model_used LIKE :auto_triage_prefix || '%' AND model_used <> :deterministic_run"
+            "WHERE tenant_id = :tenant_id AND created_at >= :month_start AND model_used IN :model_runs"
         ),
     ),
 )
@@ -216,9 +215,12 @@ _BIND_TYPES: Final[dict[str, Any]] = {
     "tenant_id": Uuid(as_uuid=True),
     "since": DateTime(timezone=True),
     "month_start": DateTime(timezone=True),
-    "auto_triage_prefix": String(),
-    "deterministic_run": String(),
 }
+
+#: Bound as a list, and imported rather than rebuilt here: a quota that
+#: decides "which runs are AI triages" for itself is a second definition,
+#: and the two drift in front of a customer who is being throttled.
+_EXPANDING: Final[tuple[str, ...]] = ("model_runs",)
 
 
 async def measure_usage(db: AsyncSession, tenant_id: uuid.UUID) -> dict[str, int]:
@@ -230,14 +232,17 @@ async def measure_usage(db: AsyncSession, tenant_id: uuid.UUID) -> dict[str, int
         "month_start": now.replace(day=1, hour=0, minute=0, second=0, microsecond=0),
         # Imported rather than repeated, so "which runs are AI triages" has
         # one definition shared with the usage meters.
-        "auto_triage_prefix": AUTO_TRIAGE_PREFIX,
-        "deterministic_run": DETERMINISTIC_RUN,
+        "model_runs": list(MODEL_RUNS),
     }
     usage: dict[str, int] = {}
     for key in LIMIT_KEYS:
         present = [name for name in _BIND_TYPES if f":{name}" in key.usage_sql]
-        statement = text(key.usage_sql).bindparams(*[bindparam(name, type_=_BIND_TYPES[name]) for name in present])
-        result = await db.execute(statement, {name: params[name] for name in present})
+        expanding = [name for name in _EXPANDING if f":{name}" in key.usage_sql]
+        statement = text(key.usage_sql).bindparams(
+            *[bindparam(name, type_=_BIND_TYPES[name]) for name in present],
+            *[bindparam(name, expanding=True) for name in expanding],
+        )
+        result = await db.execute(statement, {name: params[name] for name in (*present, *expanding)})
         usage[key.name] = int(result.scalar_one() or 0)
     return usage
 

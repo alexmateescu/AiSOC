@@ -890,11 +890,7 @@ class ConnectorScheduler:
 
         try:
             async with self._engine.connect() as conn:
-                tenants = (
-                    await conn.execute(
-                        text("SELECT DISTINCT tenant_id FROM connectors WHERE is_enabled")
-                    )
-                ).scalars().all()
+                tenants = (await conn.execute(text("SELECT DISTINCT tenant_id FROM connectors WHERE is_enabled"))).scalars().all()
         except Exception:  # pragma: no cover
             logger.exception("connector.scheduler.promotion_tenant_enum_failed")
             return
@@ -909,25 +905,15 @@ class ConnectorScheduler:
                         text("SELECT set_config('aisoc.tenant_id', :tid, true)"),
                         {"tid": str(tenant_id)},
                     )
-                    overdue = (
-                        await conn.execute(text(MARK_OVERDUE_SQL), {"tenant_id": tenant_id})
-                    ).rowcount
-                    resolved = (
-                        await conn.execute(text(RESOLVE_REMEDIATED_SQL), {"tenant_id": tenant_id})
-                    ).rowcount
-                    candidates = (
-                        await conn.execute(text(PROMOTE_CANDIDATES_SQL), {"tenant_id": tenant_id})
-                    ).fetchall()
+                    overdue = (await conn.execute(text(MARK_OVERDUE_SQL), {"tenant_id": tenant_id})).rowcount
+                    resolved = (await conn.execute(text(RESOLVE_REMEDIATED_SQL), {"tenant_id": tenant_id})).rowcount
+                    candidates = (await conn.execute(text(PROMOTE_CANDIDATES_SQL), {"tenant_id": tenant_id})).fetchall()
 
                     promoted = 0
                     for row in candidates:
                         cve = str(row.cve_id)
                         score = float(row.cvss_score) if row.cvss_score is not None else None
-                        sev = (
-                            "critical"
-                            if (score is not None and score >= 9.0) or row.is_exploited
-                            else "high"
-                        )
+                        sev = "critical" if (score is not None and score >= 9.0) or row.is_exploited else "high"
                         hosts = row.affected_hosts or []
                         why = []
                         if row.patch_due_date is not None:
@@ -948,9 +934,7 @@ class ConnectorScheduler:
                                 ),
                                 "severity": sev,
                                 "affected_hosts": json.dumps(hosts),
-                                "tags": json.dumps(
-                                    ["patch-window", "vulnerability", cve.lower()]
-                                ),
+                                "tags": json.dumps(["patch-window", "vulnerability", cve.lower()]),
                                 "idempotency_key": f"vuln-promo:{cve.lower()}",
                                 "connector_id": None,
                                 "raw_event": json.dumps(
@@ -973,8 +957,7 @@ class ConnectorScheduler:
 
                 if overdue or promoted or resolved:
                     logger.info(
-                        "connector.scheduler.vuln_promotion tenant=%s marked_overdue=%d "
-                        "alerts_promoted=%d alerts_resolved=%d",
+                        "connector.scheduler.vuln_promotion tenant=%s marked_overdue=%d alerts_promoted=%d alerts_resolved=%d",
                         tenant_id,
                         overdue,
                         promoted,
@@ -982,9 +965,7 @@ class ConnectorScheduler:
                     )
             except Exception:
                 # One tenant's failure must not stop the others' sweep.
-                logger.exception(
-                    "connector.scheduler.vuln_promotion_failed tenant=%s", tenant_id
-                )
+                logger.exception("connector.scheduler.vuln_promotion_failed tenant=%s", tenant_id)
 
     async def _record_failure(self, connector_id: uuid.UUID) -> None:
         if self._engine is None:  # pragma: no cover

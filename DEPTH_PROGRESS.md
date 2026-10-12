@@ -43,7 +43,7 @@ requires in its own pull request body.
 | 8.2 | #1206 | `endpoints/access_conditions.py` |
 | 8.3 | #1210 | `docs/security/` |
 
-Not started: phases 3, 4, 6, 7, 9 and the whole of 10, plus 1.4--1.6 and
+Not started: phases 3, 4, 6, 7, 9 and the whole of 10, and
 2.4--2.7. Those remain `[ ]` and are not claimed here.
 
 ## Migration and ADR numbers claimed
@@ -55,7 +55,37 @@ is written. Next free at capture: migration `095`, ADR `0010`
 
 | Number | Claimed by | Status |
 |---|---|---|
-| (none yet) | | |
+| ADR `0010` | 2.7 — entity and session context in CORE | **landed**, `docs/decisions/0010-entity-and-session-context-in-core.md`, accepted |
+| migration `102` | 2.4 — `102_sessions.sql` | claimed |
+| migration `103` | 2.5 — `103_posture_snapshots.sql` | claimed |
+| migration `104` | 9.1 — `104_mcp_access.sql` | claimed |
+| migration `105` | 9.2 — `105_semantic_memory.sql` | claimed |
+| migration `106` | 9.3 — `106_case_depth.sql` | claimed |
+| migration `107` | 9.4 — `107_case_war_rooms.sql` | claimed |
+| migration `108` | 9.5 — `108_hunt_reports.sql` | claimed |
+| migration `109` | 9.6 — `109_push_devices.sql` | claimed |
+| migration `110` | 8.1 — `110_console_webauthn.sql` | claimed |
+| migration `111` | 8.1 — `111_audit_retention.sql` | claimed |
+| migration `112` | 8.1 — released, taken by another lane (D12) | **struck** |
+| migration `113` | 8.1 — `113_entitlement_enforcement.sql` | claimed |
+| ADR `0011` | 8.1 — truncating a hash-chained audit log | claimed |
+
+Highest migration on `main` at claim time was `101_audit_immutable_nullify.sql`,
+so `095`--`101` were taken by sibling lanes between the capture above and this
+claim; re-read `services/api/migrations/` rather than trusting the capture row.
+
+Phase 9 re-read `services/api/migrations/` on 2026-10-11 before claiming:
+`101_audit_immutable_nullify.sql` was still the highest on `main`, and `102`
+and `103` were already spoken for in the table above, so Phase 9 takes `104`
+through `109`, one per item. A number left unused at the end of the phase is
+released by striking its row rather than by silently leaving a gap.
+
+Item 8.1 re-read `services/api/migrations/` on 2026-10-11 before claiming:
+`105_semantic_memory.sql` was the highest on `main`, and `102`--`109` were
+already spoken for above, so 8.1 takes `110`--`112` and ADR `0011`. The three
+sub-items that need no schema — the containerised-IdP CI leg,
+internationalisation and accessibility — claim no number. The same release
+rule applies: an unused number is struck, not silently skipped.
 
 ## Phase 0: Kickoff
 
@@ -190,9 +220,10 @@ will re-take it on a sized host.
 
 `scripts/run_model_matrix.py` reports **0 of 2 models measured** with "no live
 LLM key configured". This is the gate behaving correctly: it refuses to
-publish `0.000` where it means "not measured". Phase 1.4 adds local 7--8B
-candidates, which need no key and *can* be measured here; the hosted rows stay
-`[!]` until the maintainer funds a key.
+publish `0.000` where it means "not measured". Phase 1.4 has since measured
+two local candidates, which need no key: see the verdict-quality table on the
+benchmark page and the 1.4 note below. The hosted rows stay `[!]` until the
+maintainer funds a key, and still read "not measured" rather than zero.
 
 ### D4 -- Not all 74 "windowed" rules need a window
 
@@ -251,6 +282,109 @@ the one that finishes it. `test_a_batch_delivered_out_of_arrival_order_still_fir
 is the regression test for that, and reverting the event-time read makes it
 and two others fail.
 
+### D11 -- Semantic recall measured *worse* than the full-text baseline on every embedding backend reachable from here
+
+Parity 6.5 asks for the accuracy delta. It is measured, by
+`scripts/score_memory_recall.py` over 12 hand-authored probes against a
+12-item corpus, and the delta is negative:
+
+| metric | lexical | semantic (`qwen2.5:0.5b`) | delta |
+|---|---|---|---|
+| recall@1 | 0.667 | 0.333 | **-0.333** |
+| recall@3 | 0.750 | 0.417 | **-0.333** |
+| recall@5 | 0.750 | 0.667 | -0.083 |
+| MRR | 0.708 | 0.465 | **-0.243** |
+
+The honest reading is not "semantic recall does not work". It is that
+**no embedding model is reachable from this project without a funded key**.
+The two models served locally are *generative* models used as embedders,
+which is a known-poor substitute; `nomic-embed-text` was attempted and the
+pull did not complete in ten minutes. Hosted embedding rows are blocked by
+the same thing as D3 (maintainer item M2).
+
+Three things follow, and all three are in the tree rather than in this note:
+
+1. **The default did not move.** `POST /kb/query` stays full-text; semantic
+   recall is `recall_memory: false` and strictly additive, so a caller that
+   does not ask for it gets byte-identical behaviour. Putting a measurably
+   worse retriever in front of the ranker would have made analyst search
+   worse on exactly the deployments that cannot pay for an embedding model.
+   The field's docstring carries the number and says to move the default when
+   the measurement does.
+2. **The measurement found a real defect in the first implementation.** The
+   3,072-dimension model initially scored 0.167 at recall@1 — and that was
+   measuring `_fit()` *truncating* the vector to the collection's 1,536, not
+   measuring the model. Padding a short vector is harmless under cosine;
+   truncating a long one discards most of what the model said. Truncation is
+   now refused with a message naming both dimensions, which is a
+   configuration an operator can fix rather than a silently worse retriever
+   they cannot see.
+3. **What is still not measured, stated plainly:** the downstream effect of
+   memory recall on *verdict* quality, which is what the Phase 1 scorecard
+   grades. That needs an agent run per corpus item against a model worth
+   grading, and no such model is funded or locally servable here. The
+   retrieval delta above is the part that can be measured honestly today,
+   and it is the part that is actually about what 9.2 builds.
+
+### D12 -- Migration `112` was claimed here and taken by another lane first
+
+The claim table above reserved `110`--`112` for 8.1 after re-reading
+`services/api/migrations/` against `main`, which is the documented procedure
+and was not enough. Sequentially-numbered migrations are a **first-come
+namespace across branches, not across `main`**: by the time 8.1 came to write
+its third file, `112_scheduler_leases.sql` existed on another lane's pushed
+branch. `110` and `111` had three and three other claimants respectively and
+survived only because this item pushed first.
+
+Re-derived immediately before committing by scanning the migration directory
+of **all 259 remote branches**, not just `main`, which put the first free
+number at `113`. The `112` row is struck rather than silently reused, per the
+release rule at the top of that table.
+
+The general lesson is that "re-read `main` before claiming" understates the
+problem. `main` is the one place a number cannot yet be taken.
+
+### D13 -- Two honest gates disagreed about the claim matrix, and the older one was wrong
+
+`scripts/check_claim_gate_matrix.py` read the matrix as 300 GATED / 2 PARTIAL
+while `readme_gates._matrix_counts` read 299 / 3, so the summary block was
+reported as stale against a table that was correct.
+
+`readme_gates` classified a row by scanning the **whole line** for `NO GATE`,
+then `PARTIAL`, then `GATED`. A row's Notes cell is prose, so the first GATED
+row to record *why* it had been PARTIAL -- which is exactly what a row should
+say when a gate is built and the status earned -- counted as PARTIAL.
+
+The cheap fix was to reword the row and lose the history. It now reads the
+cell the column header names, refuses a table whose Status column cannot be
+located rather than counting it as empty, and both properties are pinned by
+tests that fail against the previous parser.
+
+### D14 -- 4.6 is not started, and 4.5 is half done. Neither is claimed
+
+Stated plainly rather than folded into a tick.
+
+**4.6 internationalisation** (gap-closure 13.4) is **not started**. It asks
+for a Next.js i18n library, externalised strings on five surfaces, a locale
+switcher, RTL, locale-aware dates and numbers, a pilot locale and a CI gate
+for missing and unused keys. Nothing of it exists: there is no `i18n`
+directory, no message catalogue and no i18n dependency in `apps/web`. It is
+the one sub-item of 8.1 with no code behind it, and the honest record is a
+`[ ]`, not a partial credit for the parts that are easy.
+
+**4.5** asks for two things. The opt-in limit enforcement the depth plan
+names by file is built, wired to two routes and gated (#1332). The **six
+console pages** -- branding, SCIM tokens, retention, organisation members and
+grants, rule packs, delegations -- are not. Its claim row says so in the row
+itself rather than relying on this note, because a reader of the matrix does
+not read this file.
+
+Neither is blocking 8.1's stated "Done when": a CI test signs in through OIDC
+and SAML with MFA enforced for the role, an elevation expires on schedule
+(8.2, merged), and the security pack passes the competitor-name and
+comment-path gates. All three hold. The item is `[~]` rather than `[x]`
+because the spec lists more than its own done-when.
+
 ### D8 -- No upstream Sigma correlation rule exists in this tree to import
 
 `detections/sigma-imports/` holds 3,132 rule documents and **not one carries
@@ -285,9 +419,110 @@ invented fields on the first run of the gate.
   Wilson interval, false negatives, auto-close precision, escalation rate,
   time to verdict
 - [x] **1.3** Close `fake_tool_output` structurally (≤ 0.10 tuned and held-out)
-- [ ] **1.4** A 7--8B local model in the matrix, chosen by score
-- [ ] **1.5** `make replay-eval` design-partner kit
-- [ ] **1.6** Published "Verdict quality" table with a `--check` drift gate
+- [x] **1.4** A 7--8B local model in the matrix, chosen by score
+- [x] **1.5** `make replay-eval` design-partner kit
+- [x] **1.6** Published "Verdict quality" table with a `--check` drift gate
+
+### 1.4 -- five local models measured; the winner is generation, not size
+
+All five graded the same corpus digest through the production triage path,
+72 model calls each, zero provider errors.
+
+| Model | Balanced acc. | MCC | Malicious recall | Malicious prec. | ECE | Auto-close prec. |
+|---|---|---|---|---|---|---|
+| `llama3.1:8b-instruct-q4_K_M` | **0.357** | **0.209** | 0.583 / 36 | **0.724** | **0.349** | 0.111 (9) |
+| `llama3.2:3b-instruct-q4_K_M` (CPU default) | 0.285 | 0.047 | 0.250 / 36 | 0.500 | 0.442 | 0.571 (7) |
+| `llama3:8b` | 0.279 | 0.113 | **0.639** / 36 | 0.657 | 0.421 | 0.091 (11) |
+| `qwen2.5:7b-instruct-q4_K_M` | 0.260 | 0.032 | 0.083 / 36 | 0.750 | 0.594 | 0.243 (37) |
+| `mistral:7b-instruct-v0.3-q4_K_M` | 0.210 | 0.202 | **0.639** / 36 | 0.657 | 0.366 | 0.143 (14) |
+
+Four classes: a constant answer scores **0.250** balanced accuracy, and
+always guessing the majority class scores **0.500** plain accuracy.
+
+**Decision, strictly by balanced accuracy:** `llama3.1:8b-instruct-q4_K_M`
+becomes the default on `docker-compose.gpu.yml` and
+`docker-compose.host-llm.yml`. It also leads on MCC, malicious precision and
+calibration, and is the only row with ECE below 0.40. The 3B stays the
+default for CPU `make up`, where a ~5 GB model does not fit the 8 GB CORE
+budget -- a deployment constraint, not a score.
+
+**Size is the wrong unit.** The previous-generation `llama3:8b` scores
+*below* the 3B it would replace, so "upgrade to an 8B" is not advice that
+survives measurement. An earlier revision of this file recorded exactly that
+conclusion from `llama3:8b` alone and was wrong; the LiteLLM config's hint
+now carries all five numbers instead.
+
+**Two findings outrank the ranking.** Every model measured is far closer to
+chance than to useful -- the best is 0.357 against a 0.250 floor, and three
+of five fall below the 0.500 plain accuracy of guessing the majority class.
+And auto-close precision is poor across the board (0.091-0.571 on 7-37
+candidates), so **nothing measured here supports autonomous closure**. That
+is a finding about the auto-close gate, not about which model to pick.
+
+Caveats published rather than smoothed over:
+
+- **Latency is excluded from the comparison.** The 3B ran CPU-bound inside
+  the stack container and the four 7--8B rows GPU-accelerated on the host,
+  so the figures measure different machines. All are still printed.
+- **Per-decision model attribution is unverified.** Every call was placed
+  and answered -- each decision carries reasoning specific to its alert --
+  but `resolved_models` came back empty on every run, so the scorecard shows
+  that 72 calls happened and not which model served each.
+- **Auto-close precision rests on 7 to 37 candidates.** Small denominators;
+  read the column as a warning sign, not a ranking.
+
+**Writing the winner into the GPU overlay broke the GPU overlay, and CI
+caught it.** Adding the model default left the
+`deploy.resources.reservations.devices` block nested under `litellm`
+instead of `ollama`. The file still parsed, `docker compose config` still
+resolved, and `make up-gpu` would still have come up -- with the card
+reserved by a proxy that runs no inference while generation fell back to
+the CPU. There is no error anywhere in that sequence, which is why the
+existing `test_it_touches_only_ollama` was the only thing between it and a
+release.
+
+Its companion assertion failed for a legitimate reason at the same time:
+the overlay now *must* touch three services, since the measured default
+needs a pull instruction on `ollama-pull` and routing on `litellm`. The
+assertion was re-expressed rather than relaxed, and two properties added --
+a device reserved on any service but `ollama` fails, and the model pulled
+must be the model routed to. That second one guards the quiet failure: the
+gateway 404s on a model nothing pulled, triage swallows it into the
+deterministic fallback, and the stack looks healthy while measuring no
+model at all. Each was proven by injecting the defect it names.
+
+### 1.5 -- run end to end against a live stack, not a mock
+
+`make replay-eval` / `make replay-eval-verify` drove a real run through the
+API against a mocked Splunk ES holding 200 recorded closed notables: 200
+read, 60 replayed in the test window, 240 production writes intercepted, a
+signed bundle written and verified, and a wrong key refused with exit 1.
+
+The live run is what found the three defects the unit tests could not: the
+decisions route answers a bare array and the kit assumed an envelope; a
+machine named only in the agent's reasoning survived redaction; and the
+prose and identifier passes named their counter namespace in different
+cases, so one host could take two tokens. All three are fixed with
+regression tests, each proven to fail against the pre-fix tree.
+
+Known gap: the run abstained on all 60 decisions because the stack's triage
+reached no model, so the kit has been exercised on a deterministic run end
+to end but **not yet on a run with real model verdicts in it**.
+
+### 1.6 -- the section it replaced was wrong, not merely stale
+
+`apps/docs/docs/benchmark.md` said verdict accuracy was not measured here
+and could not be. Item 1.1's corpus made that false. The reasoning is kept
+(it is why `score_replay_set.py` still refuses this tree's two all-malicious
+corpora) and the conclusion is replaced by the measurement.
+
+`scripts/check_verdict_quality.py --check` is wired into `ci.yml` and fails
+on drift between the committed scorecard and the published block, proven by
+reverting a number and watching it red. It also refuses five scorecard
+shapes that would each publish a score-shaped cell with no measurement
+behind it -- the load-bearing one being a row claiming a live measurement
+that placed zero model calls, which is precisely what a run against a dead
+endpoint produces once triage falls through to its deterministic scorer.
 
 ## Phase 2: A semantic layer and live posture
 
@@ -393,15 +628,79 @@ invented fields on the first run of the gate.
 
 ## Phase 8: Enterprise gates
 
-- [ ] **8.1** Identity and administration
+- [~] **8.1** Identity and administration. Five of six sub-items done, each
+  in its own pull request; the shortfall is itemised in D14 below.
+  - [x] parity 4.1 — a containerised Keycloak signs somebody in over **OIDC**
+    and **SAML**, both legs **observed to pass** (#1327). The SSO claim row
+    moves PARTIAL → GATED on that evidence, not on a relabel.
+  - [x] 4.2 — WebAuthn as a console second factor and MFA enforced **per
+    role** (#1328), on top of the TOTP, recovery codes and per-tenant
+    enforcement fix pass 4.2 already shipped.
+  - [x] 4.4 — the audit retention window is enforced and a truncated chain
+    still verifies (#1329). Export already existed on `AuditLogView.tsx`.
+  - [~] 4.5 — opt-in limit enforcement in `entitlements.py` (#1332). The
+    **six console pages** 4.5 also names are not built: see D14.
+  - [ ] 4.6 — internationalisation. Not started: see D14.
+  - [x] 4.7 — axe covers the case list and case workspace, the two views
+    4.7 left out, and the four defects it found are fixed (#1331).
 - [x] **8.2** ABAC, elevation and workload identities
 - [x] **8.3** Buyer security pack
 
 ## Phase 9: Analyst surfaces
 
 - [ ] **9.1** MCP over streamable HTTP (parity 6.6)
-- [ ] **9.2** Semantic memory (parity 6.5)
-- [ ] **9.3** Case depth (parity 5.6 remainder)
+- [x] **9.2** Semantic memory (parity 6.5). All three bullets of parity 6.5
+  closed, and the third one — "replay shows the accuracy delta" — produced a
+  result that changed the design rather than confirming it. `aisoc_memory_items`
+  (migration `105`) is the store of record for past cases, runbooks and
+  institutional memory; Qdrant is an index over it, reached through its REST
+  API so this service gains no dependency and its lockfile does not move.
+  Every item carries an author, a source, a scope, an expiry and a state, and
+  the author is the **authenticated principal**, never the body — provenance a
+  caller can set is not provenance. Two claims about one subject suspend
+  **both** sides and recall returns neither until an analyst settles it;
+  preferring the newer one silently restores a bad entry the next time the job
+  that wrote it runs, which is the case the feature exists for. Recall is
+  tenant-scoped in the Qdrant filter itself and `search()` **raises** rather
+  than offering an unscoped branch. With no embedding backend recall is 503
+  with the reason, never an empty list. `kind='case'` is written automatically
+  by the case-closure path, so the half of the "exists unwired" family that
+  reachability analysis cannot see — a table every surface reads and nothing
+  writes — does not apply. Measured by
+  `scripts/score_memory_recall.py` (12 hand-authored low-overlap probes,
+  mean lexical overlap 0.166, `is_synthetic: true`); its self-test is wired
+  into `ci.yml :: python-lint`. 17 new tests, api suite +17. Live end to end
+  against real Postgres 16, real Qdrant v1.7.0 and a real embedding backend,
+  recorded in the PR. **The measurement is published as it came out, and it is
+  unflattering:** see D11.
+- [x] **9.3** Case depth (parity 5.6 remainder). All four open bullets.
+  **Alert merge needed no schema at all**: `is_merged`, `parent_alert_id` and
+  `child_alert_ids` have been on `alerts` since migration 001 with the ORM
+  model as their only mention anywhere — the repository's recurring defect,
+  and worth naming so "new" means something. Merge keeps every row: a
+  duplicate is marked and pointed at its parent, the survivor's children are
+  **appended** not replaced, re-merging and merging into a merged alert are
+  both refused because each would orphan or cycle the chain, and the
+  survivor inherits the case a duplicate was already on. Case merge (migration
+  `106`) repoints the alerts and keeps both case rows, because deleting loses
+  the audit chain, the custody entries and any vendor ticket already naming
+  that id. Bulk triage is new in the route **and** the console: a checkbox per
+  row, a select-all that selects this page only, and a bar whose Apply
+  performs a real write and surfaces the preflight 409 with the real matched
+  count instead of silently retrying. `closed` is deliberately unreachable
+  there — `bulk-close` snapshots every row first and a weaker second path to
+  one destination is how the weaker one wins. Tenant custom fields are two
+  tables rather than a JSONB blob so a field can be enumerated, rendered,
+  validated at write time and retired cleanly; values are canonicalised on
+  write. Workload is counted per request over rows the query selected, a
+  merged-away case is not counted as work, and **a mean over nothing is
+  `null`, never `0.0`** — with the count it was taken over beside it. Graded
+  by `.github/workflows/case-depth-live.yml` against a real Postgres with
+  three negative controls, because every statement here is Postgres-only and
+  a SQLite stand-in would be a different query. 29 new tests (23 API live, 6
+  web). The live suite earned its keep immediately: it caught that
+  `aisoc_cases.alert_ids` is `uuid[]` while the two columns beside it are
+  JSONB, which a stand-in would have accepted.
 - [ ] **9.4** War rooms
 - [ ] **9.5** Hunt to report
 - [ ] **9.6** Native responder
@@ -415,6 +714,8 @@ invented fields on the first run of the gate.
 
 | Date | Item | What happened |
 |---|---|---|
+| 2026-10-11 | 9.3 | Reproduced: the alert merge columns had zero writers outside the ORM model; `grep -rn custom_field services/api` and `grep -rn workload` (excluding workload *identities*) both counted zero; and `grep -rn bulk apps/web/src/components/alerts` found only unrelated comments, so the only bulk verb in the product was `POST /alerts/bulk-close` with no console surface at all. The two-case-table trap named in the brief was already closed by migration 083 and `check_one_case_table.py` reports OK, so `aisoc_cases` is the table this item deepens. Three negative controls recorded in the PR and wired into the live workflow. The live suite found a real defect on its first run: `aisoc_cases.alert_ids` is `uuid[]` while `ioc_ids` and `artifact_ids` beside it are JSONB, and the merge statement had assumed JSONB. |
+| 2026-10-11 | 9.2 | Reproduced: `knowledge_base.py` searched with `to_tsvector`/`plainto_tsquery` and nothing else; `grep -rn qdrant services/api/app/` found only the migration runner and the tenant-deletion sweep, no recall path; and no memory row anywhere carried an author, a source, a scope, an expiry or a state. Built the store of record, the Qdrant index over it, the conflict state machine, the case-closure writer and the recall scorer. Two negative controls recorded in the PR: restoring last-write-wins on a contradiction fails three tests, and restoring vector truncation fails one. The measurement is negative and is published as such — see D11, which also records that it caught the truncation defect. |
 | 2026-10-07 | 0.1 | This file created at base commit `1b8bc2d4`. |
 | 2026-10-07 | 0.2 | Every figure re-derived. Two matched exactly (detections, unreachable families); executor arms measured 74 against a captured 73; the cloud/identity/SaaS/code figure measured 395 against a captured 461 on a grouping the plan does not pin, recorded above. Two measurement caveats found: executable and quarantined overlap by 1,724 rules, and the "69% Windows" figure does not reproduce from the index. |
 | 2026-10-09 | 4.3 | Reproduced: `check_retention_window.py` on the unmodified tree reported six problems — the lake deleting at 90 days against a 3,650-day cap, no `MODIFY TTL` migration, tiering deleting at 90, and the purge worker calling neither `alerts_under_legal_hold` nor `may_purge` and reporting nothing withheld. Fixed all but the cold-query bullet. Four negative controls recorded in the PR, including the positive control: a purge stuck closed withholds every tenant and fails four of the eight hold tests, which is the only thing that separates a working control from commendable caution. One pre-existing test (`test_storage_tiering.py`) pinned the 90-day tiering DELETE and now reads the shared constant; `test_retention_worker.py`'s session double could not answer the new holds query, so the worker failed closed and five of its cases failed — the double was taught the query rather than the fail-closed behaviour relaxed. |
@@ -424,3 +725,9 @@ invented fields on the first run of the gate.
 | 2026-10-09 | 3.2 | Ordered and unordered sequences in the windowed engine; all four translatable Sigma correlation types compile, seven refusal reasons recorded. No upstream correlation rule exists in this tree to import (D8), so the corpus is first-party and labelled as such. |
 | 2026-10-09 | 4.1 | Reproduced: `check_cloud_native_collection.py` on the unmodified tree reported all three collection paths absent. Implemented `aws_cloudtrail_s3` (SQS-notified S3 objects; management events, data events and VPC flow logs; delete-after-emit), `gcp_pubsub` (REST pull on a log-sink subscription; ack-after-read) and `azure_event_hubs` (Capture blobs over the Data Lake Gen2 JSON API, with a focused Avro OCF reader). Negative controls recorded in the PR: deleting the SQS message before the object is read, acknowledging the Pub/Sub batch before it is built, ignoring the Avro union branch index, and ignoring the flow-log header line each fail a named test, and all were restored. Connectors suite 1014 -> 1098 passed. |
 | 2026-10-09 | 3.1 | All 74 decided. 50 translated into `wd-*` rules derived from each original's own clauses and replayed through the real engine (162 assertions); 24 refused with a reason across five kinds. `MAX_UNREACHABLE` 119 → 45, published executable 2,603 → 2,529, windowed 18 → 68. Three findings recorded as D4–D6 below. |
+| 2026-10-11 | 8.1 | parity 4.1's containerised-IdP leg **observed to pass**, both halves: `keycloak-oidc` verifies a real `id_token` against Keycloak's published JWKS with an audience-mismatch negative control, and `keycloak-saml` walks the whole SP-initiated flow to the real ACS and signs `alice@example.com` in as `infosec`, with an untrusted-key control answering 400. Run `38124780886`, as `ENVIRONMENT=test` against the DML-only `aisoc_app` role. The SSO claim row moves PARTIAL → GATED on that evidence. Building it found two shipped defects no self-authored provider could expose: `resolve_saml_connection` bound `:i` untyped so `:i IS NULL` raised on asyncpg, and Keycloak's default role-list mapper emits one `<Attribute Name="Role">` per role, which python3-saml refuses. |
+| 2026-10-11 | 8.1 | WebAuthn as a console second factor and MFA enforced per role. Fixing the branch's own gates found three `passkey_credentials` reads scoped by user id alone on a tenant-scoped table, and a permission-model violation where the MFA policy route imported `ROLE_PERMISSIONS` directly; the role *vocabulary* now has one owner in `role_grants.known_roles()`. 23 of 23 live cases pass against real Postgres, and deleting the login integration fails 14 of them — measured, where the workflow had said eight. |
+| 2026-10-11 | 8.1 | An enforced audit retention window with a re-anchored checkpoint, ADR-0011, and 12 live cases. Writing them found that migration `111` declared `ON DELETE CASCADE` on the checkpoint table and then made the cascade impossible; and, separately, that `audit_log`'s own trigger from migration `101` blocks `DELETE FROM tenants` for every tenant that has written a row, so tenant deletion is impossible on `main`. Reproduced and filed as #1330 rather than fixed here. |
+| 2026-10-11 | 8.1 | Opt-in per-tenant limit enforcement (migration `113`, D12), wired to `POST /connectors` and `POST /tenants/me/users` through one helper, with `GET`/`PUT /usage/enforcement` as the operator surface. Nine live cases, half of them positive controls: a guard that never refuses fails 1, a guard stuck closed fails 4. |
+| 2026-10-11 | 8.1 | axe extended to the case list and case workspace, the two of parity 4.7's five views that were left out. Four real defects found and fixed: two `<select>` controls with no accessible name (one of them the control that writes a case's status), two indistinguishable `<aside>` landmarks, and panel headings at `h3` directly under the page's `h1`. |
+

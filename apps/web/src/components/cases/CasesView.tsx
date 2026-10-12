@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import { AnalystWorkload } from './AnalystWorkload';
 import useSWR from 'swr';
 import Link from 'next/link';
 import toast from 'react-hot-toast';
@@ -221,6 +222,11 @@ export function CasesView() {
           </span>
         </div>
       </div>
+
+      {/* Depth 9.3 — who is carrying what. Its own fetch, so a workload
+          failure does not blank the case list and a case-list failure does
+          not blank the workload. */}
+      <AnalystWorkload />
 
       {/* Stats */}
       <div className="grid grid-cols-5 gap-3">

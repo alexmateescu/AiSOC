@@ -48,10 +48,16 @@ columns from the same statement the model path does. A meter reading them
 reported a deployment with no model configured at all as 100% AI-triaged.
 
 What does record the path is `investigation_runs.model_used`, which
-auto-triage stamps as `kafka:auto_triage:llm` or
-`kafka:auto_triage:deterministic`. That is what these meters read, and it is
-also what `triages_per_month` counts against your plan limit, so the usage
-screen and the quota screen cannot disagree about the same rows.
+auto-triage stamps as `kafka:auto_triage:<tier>`. There are four tiers and
+only `llm` reaches a model: `deterministic` is the rule path, `memory` is
+institutional-memory suppression, and `cached` is a deduplicated replay of a
+verdict an earlier run already reached. `triages_model` counts the first and
+`triages_deterministic` counts the other three, named individually rather
+than inferred as "not deterministic" — a tier added later would otherwise
+land in the AI count by default, which is how the meter was wrong before.
+
+That is also what `triages_per_month` counts against your plan limit, so the
+usage screen and the quota screen cannot disagree about the same rows.
 
 `active_connectors` and `seats` are point-in-time rather than windowed.
 Counting them per day would report today's value against every historical

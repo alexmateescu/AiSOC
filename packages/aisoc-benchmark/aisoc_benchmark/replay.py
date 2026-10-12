@@ -295,6 +295,18 @@ class ReplayScore:
     mean_latency_ms: float | None = None
     p95_latency_ms: float | None = None
     models: list[str] = field(default_factory=list)
+    #: Model calls the run placed, however they were priced.
+    #:
+    #: Separate from ``models`` because the two answer different questions and
+    #: only one of them is always answerable. ``models`` is what the *gateway*
+    #: said it billed, read off a LiteLLM response header, so it is empty on a
+    #: run that talked straight to a provider -- an air-gapped Ollama, say --
+    #: even though every call was placed and paid for in tokens. Reporting
+    #: that state as "no model call was placed" is a false statement about the
+    #: most important fact in the report, since triage answers from its
+    #: deterministic fallback when a provider is unreachable and a run that
+    #: measured nothing otherwise looks entirely normal.
+    llm_calls: int = 0
 
     # ---- provenance ------------------------------------------------------
     bootstrap_resamples: int = BOOTSTRAP_RESAMPLES
@@ -530,6 +542,7 @@ def score_replay(
     score.time_to_verdict_p50_ms = _percentile(latencies, 0.50)
     score.time_to_verdict_p95_ms = score.p95_latency_ms
     score.models = sorted({str(m) for d in decisions for m in (d.get("resolved_models") or [])})
+    score.llm_calls = sum(int(d.get("llm_calls") or 0) for d in decisions)
 
     if not labelled:
         score.headline_withheld_reason = (
@@ -697,6 +710,22 @@ def _ms(value: float | None) -> str:
     return "not measured" if value is None else f"{value:,.0f} ms"
 
 
+def _models(score: ReplayScore) -> str:
+    """Which model answered, distinguishing the two ways of not knowing.
+
+    "No call was placed" and "calls were placed and the gateway did not say
+    which model took them" are different facts with different remedies, and
+    collapsing them prints the first when the second is true. That reads as
+    a run that measured the deterministic fallback, which is the single most
+    misleading thing this report could say about itself.
+    """
+    if score.models:
+        return ", ".join(score.models)
+    if score.llm_calls:
+        return f"not attributed — {score.llm_calls} call(s) placed, but no gateway named the model that took them"
+    return "none, no model call was placed"
+
+
 def format_replay_report(score: ReplayScore, *, method: dict[str, Any] | None = None) -> str:
     """Render the report as Markdown, malicious recall first.
 
@@ -830,7 +859,8 @@ def format_replay_report(score: ReplayScore, *, method: dict[str, Any] | None = 
         f"calls with no price at all: {score.unpriced_calls})",
         f"{LATENCY_LINE_PREFIX} {'not measured' if score.mean_latency_ms is None else f'{score.mean_latency_ms:.0f} ms'}, "
         f"p95 {'not measured' if score.p95_latency_ms is None else f'{score.p95_latency_ms:.0f} ms'}",
-        f"- Models: {', '.join(score.models) if score.models else 'none, no model call was placed'}",
+        f"- Model calls placed: {score.llm_calls}",
+        f"- Models: {_models(score)}",
         "",
         "## Method",
         "",

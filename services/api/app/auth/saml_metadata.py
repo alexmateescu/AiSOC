@@ -170,6 +170,16 @@ async def resolve_saml_connection(db: AsyncSession, *, issuer: str | None = None
     With more than one and no issuer the answer is `None` rather than a
     guess, because picking an arbitrary identity provider for somebody's
     sign-in is worse than refusing.
+
+    The `CAST(:i AS TEXT)` is load-bearing, not decoration. A bind
+    parameter whose only use is `:i IS NULL` gives Postgres nothing to
+    infer a type from, so asyncpg answers `could not determine data type
+    of parameter $1` — and only on the `None` branch, which is the branch
+    the console takes. The `except` below then turned that into "no
+    enabled SAML connection is configured", so an operator who *had*
+    configured one was sent to configure it again. Depth 8.1 reproduced
+    it against real Postgres; `check_text_bind_casts.py` now refuses the
+    untyped spelling.
     """
     try:
         rows = (
@@ -179,7 +189,7 @@ async def resolve_saml_connection(db: AsyncSession, *, issuer: str | None = None
                     SELECT id, tenant_id, issuer, display_name, metadata_url, metadata_xml
                       FROM aisoc_sso_connections
                      WHERE provider = 'saml' AND enabled = TRUE
-                       AND (:i IS NULL OR issuer = :i)
+                       AND (CAST(:i AS TEXT) IS NULL OR issuer = CAST(:i AS TEXT))
                      ORDER BY created_at
                      LIMIT 2
                 """).bindparams(i=issuer)

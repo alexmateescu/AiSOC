@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import os
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import structlog
@@ -35,7 +36,8 @@ from sqlalchemy import select
 
 from app.db.database import AsyncSessionLocal
 from app.models.report import ReportArtefact, ReportTemplate
-from app.services.smtp_delivery import send_mail
+from app.services.branding.resolver import Branding, resolve_branding
+from app.services.smtp_delivery import SmtpSettings, send_mail
 
 logger = structlog.get_logger(__name__)
 
@@ -137,15 +139,28 @@ def _window(moment: datetime) -> tuple[datetime, datetime]:
     return moment - timedelta(days=7), moment
 
 
-async def _deliver(artefact: ReportArtefact, recipients: list[str], body: bytes) -> None:
-    """Attach and send, recording the outcome on the artefact itself."""
+async def _deliver(artefact: ReportArtefact, recipients: list[str], body: bytes, branding: Branding) -> None:
+    """Attach and send, recording the outcome on the artefact itself.
+
+    The subject and the ``From`` display name come from the tenant's
+    branding. Branding the attached report and leaving ``[AiSOC]`` on the
+    envelope would not be white-labelling: the subject and the sender are
+    what a recipient reads before deciding whether the mail is for them,
+    and a managed customer has never heard of the platform their provider
+    runs.
+
+    The ``From`` **address** is untouched. A display name is not an SPF or
+    DKIM identity, and mail sent from a domain the deployment does not
+    control is mail that lands in a spam folder.
+    """
     result = await send_mail(
         recipients=recipients,
-        subject=f"[AiSOC] {artefact.title}",
+        subject=f"[{branding.product_name}] {artefact.title}",
         text_body=(
             f"{artefact.title}\nPeriod: {artefact.period_start:%Y-%m-%d} to {artefact.period_end:%Y-%m-%d}\n\nThe report is attached."
         ),
         attachment=(f"{artefact.report_type}.{artefact.output_format}", body, "application/octet-stream"),
+        settings=replace(SmtpSettings.from_env(), sender_name=branding.sender_name),
     )
     artefact.delivery_status = result.status
     artefact.delivery_detail = result.detail[:500]
@@ -194,14 +209,20 @@ async def run_once(*, moment: datetime | None = None) -> dict[str, int]:
                 output_format="html",
                 storage_key=f"reports/{template.tenant_id}/{template.id}/{now:%Y%m%dT%H%M}.html",
                 delivered_to=recipients,
-                status="generated",
+                # `migrations/019_board_reports.sql` constrains this column to
+                # pending | generating | completed | failed. "generated" is
+                # not a member, so every sweep raised a CheckViolationError on
+                # commit and no scheduled report has ever been stored on a real
+                # deployment. The ORM model declares no CHECK, so a suite that
+                # builds its tables from the model cannot see this.
+                status="completed",
                 generated_by="scheduler",
             )
             body = _render(template, artefact)
             artefact.body_b64 = base64.b64encode(body).decode("ascii")
             db.add(artefact)
             if recipients:
-                await _deliver(artefact, recipients, body)
+                await _deliver(artefact, recipients, body, await resolve_branding(db, template.tenant_id))
             else:
                 artefact.delivery_status = "skipped"
                 artefact.delivery_detail = "the template names no recipients"

@@ -539,38 +539,68 @@ def _truth_table_executable() -> int | None:
     return int(m.group(1)) if m else None
 
 
-def _matrix_counts() -> tuple[int, int] | None:
-    """(gated, partial) counted from the matrix rows themselves, not its prose."""
+def _matrix_statuses() -> list[str]:
+    """The Status *cell* of every data row, located by its column header.
+
+    This used to classify a row by scanning the whole line for the words
+    `NO GATE`, `PARTIAL` and `GATED`, in that order. A row's Notes cell is
+    prose, so the moment a GATED row explained the history behind its own
+    status -- "this row was PARTIAL because ..." -- it was counted as PARTIAL,
+    and the summary the author had correctly recomputed with
+    `scripts/check_claim_gate_matrix.py` was reported as stale against it.
+
+    Two honest components disagreeing about one table reads as drift rather
+    than as a parser bug, so the cheap fix is to reword the row and lose the
+    history. Reading the cell the column header names costs the same and
+    cannot be fooled by anything written in another column.
+    """
     if not CLAIM_MATRIX.exists():
-        return None
-    gated = partial = 0
-    for line in _read(CLAIM_MATRIX).splitlines():
+        return []
+    lines = _read(CLAIM_MATRIX).splitlines()
+    header_idx = status_col = None
+    for i, line in enumerate(lines):
         if not line.lstrip().startswith("|"):
             continue
-        if "NO GATE" in line:
-            continue
-        if "PARTIAL" in line:
-            partial += 1
-        elif "GATED" in line:
-            gated += 1
+        cells = [c.strip().casefold() for c in line.strip().strip("|").split("|")]
+        if "status" in cells:
+            header_idx, status_col = i, cells.index("status")
+            break
+    if header_idx is None or status_col is None:
+        raise ValueError(
+            f"{_doc_label(CLAIM_MATRIX)} has no Status column; the claim-to-gate "
+            "table header is what every count in this gate is located by."
+        )
+
+    statuses: list[str] = []
+    for line in lines[header_idx + 1 :]:
+        s = line.strip()
+        if not s.startswith("|"):
+            break  # the table ended
+        if re.match(r"^\|[\s:|-]+\|?$", s):
+            continue  # the header separator
+        cells = [c.strip() for c in s.strip("|").split("|")]
+        if len(cells) > status_col:
+            statuses.append(cells[status_col].strip("`* ").upper())
+    return statuses
+
+
+def _matrix_counts() -> tuple[int, int] | None:
+    """(gated, partial) counted from the matrix rows themselves, not its prose."""
+    statuses = _matrix_statuses()
+    gated = sum(1 for s in statuses if s.startswith("GATED"))
+    partial = sum(1 for s in statuses if s.startswith("PARTIAL"))
     return (gated, partial) if (gated or partial) else None
 
 
 def _matrix_row_total() -> int | None:
     """Every data row, `NO GATE` included.
 
-    `_matrix_counts` deliberately skips `NO GATE` rows, so the tally prose —
-    "N rows — G GATED / P PARTIAL / Z NO GATE" — had its *leading* figure
+    `_matrix_counts` deliberately skips `NO GATE` rows, so the tally prose --
+    "N rows — G GATED / P PARTIAL / Z NO GATE" -- had its *leading* figure
     checked by nothing. Returned separately rather than widening that
     function's tuple, which is unpacked as a pair by its tests.
     """
-    if not CLAIM_MATRIX.exists():
-        return None
-    rows = sum(
-        1
-        for line in _read(CLAIM_MATRIX).splitlines()
-        if line.lstrip().startswith("|") and ("NO GATE" in line or "PARTIAL" in line or "GATED" in line)
-    )
+    rows = sum(1 for s in _matrix_statuses() if s.startswith("GATED") or s.startswith("PARTIAL") or s.startswith("NO GATE"))
     return rows or None
 
 

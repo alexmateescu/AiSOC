@@ -20,6 +20,10 @@ The negative control is in the file rather than the workflow because it
 needs the same realm: after the positive check, the same token is
 re-verified against a *different* expected audience and must be refused.
 A verifier that accepted anything would pass the positive check alone.
+
+The realm itself is built by `keycloak_realm.bootstrap`, shared with
+`keycloak_saml_probe.py`. Two copies of one bootstrap in one tree is the
+shape this repository keeps finding on the wrong side of a drift.
 """
 
 from __future__ import annotations
@@ -31,92 +35,24 @@ from pathlib import Path
 
 import httpx
 
+_HERE = Path(__file__).resolve()
+# `services/api` is the import root for `app.*`; this file's own directory
+# is the import root for `keycloak_realm`.
+sys.path.insert(0, str(_HERE.parents[2] / "services" / "api"))
+sys.path.insert(0, str(_HERE.parent))
+
+from keycloak_realm import (  # noqa: E402
+    EMAIL,
+    OIDC_CLIENT_ID,
+    PASSWORD,
+    REALM,
+    USERNAME,
+    bootstrap,
+)
+
+CLIENT_ID = OIDC_CLIENT_ID
+
 KEYCLOAK = os.environ.get("KEYCLOAK_URL", "http://localhost:8080")
-REALM = "aisoc-ci"
-CLIENT_ID = "aisoc-console"
-CLIENT_SECRET = "aisoc-ci-secret"
-USERNAME = "alice"
-PASSWORD = "alice-ci-password"
-EMAIL = "alice@example.com"
-
-# `services/api` is the import root for `app.*`.
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "services" / "api"))
-
-
-def _admin_token() -> str:
-    response = httpx.post(
-        f"{KEYCLOAK}/realms/master/protocol/openid-connect/token",
-        data={"grant_type": "password", "client_id": "admin-cli", "username": "admin", "password": "admin"},
-        timeout=30,
-    )
-    response.raise_for_status()
-    return str(response.json()["access_token"])
-
-
-def bootstrap() -> str:
-    """A realm, a confidential client and a user. Returns the client secret.
-
-    The secret is **read back** rather than assumed. Keycloak generates one
-    when a confidential client is created and does not necessarily honour a
-    `secret` supplied in the creation payload, so sending one and then using
-    it is a coin flip that answers `400 unauthorized_client` — a message
-    about the grant, for a problem in the registration.
-    """
-    headers = {"Authorization": f"Bearer {_admin_token()}"}
-    base = f"{KEYCLOAK}/admin/realms"
-
-    # 409 is success: the workflow may retry a step, and a realm that
-    # already exists is the state this wants.
-    for url, payload in (
-        (base, {"realm": REALM, "enabled": True}),
-        (
-            f"{base}/{REALM}/clients",
-            {
-                "clientId": CLIENT_ID,
-                "secret": CLIENT_SECRET,
-                "publicClient": False,
-                "clientAuthenticatorType": "client-secret",
-                "standardFlowEnabled": True,
-                # The resource-owner grant is how this script obtains a
-                # token without a browser. It is enabled on the CI realm
-                # only and is not something AiSOC asks a deployment for.
-                "directAccessGrantsEnabled": True,
-                "redirectUris": ["http://localhost:8000/auth/oidc/callback"],
-            },
-        ),
-        (
-            f"{base}/{REALM}/users",
-            {
-                "username": USERNAME,
-                "email": EMAIL,
-                "emailVerified": True,
-                "enabled": True,
-                # Keycloak's `VERIFY_PROFILE` required action is on by
-                # default and is evaluated against profile completeness at
-                # token time rather than stored on the user, so the account
-                # reads as `requiredActions: []` and still refuses the
-                # password grant with `invalid_grant: "Account is not fully
-                # set up"`. A name is what it is waiting for; without these
-                # two fields this probe cannot obtain a token at all.
-                "firstName": "Alice",
-                "lastName": "Analyst",
-                "credentials": [{"type": "password", "value": PASSWORD, "temporary": False}],
-            },
-        ),
-    ):
-        response = httpx.post(url, json=payload, headers=headers, timeout=30)
-        if response.status_code not in (201, 204, 409):
-            raise SystemExit(f"Keycloak bootstrap failed at {url}: {response.status_code} {response.text[:400]}")
-
-    listed = httpx.get(f"{base}/{REALM}/clients", params={"clientId": CLIENT_ID}, headers=headers, timeout=30)
-    listed.raise_for_status()
-    entries = listed.json()
-    if not entries:
-        raise SystemExit(f"Keycloak has no client {CLIENT_ID!r} after bootstrap")
-    internal_id = entries[0]["id"]
-    secret = httpx.get(f"{base}/{REALM}/clients/{internal_id}/client-secret", headers=headers, timeout=30)
-    secret.raise_for_status()
-    return str(secret.json().get("value") or CLIENT_SECRET)
 
 
 def issue_id_token(client_secret: str) -> str:
@@ -146,7 +82,7 @@ def issue_id_token(client_secret: str) -> str:
 
 
 async def main() -> int:
-    client_secret = bootstrap()
+    client_secret = bootstrap(KEYCLOAK)["oidc_client_secret"]
     id_token = issue_id_token(client_secret)
     issuer = f"{KEYCLOAK}/realms/{REALM}"
 

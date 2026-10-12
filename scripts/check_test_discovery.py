@@ -854,6 +854,27 @@ def self_test() -> int:
         ("-m is captured, not discarded", _split_args(["tests/", "-m", "not integration"]), (["tests/"], [], "not integration")),
         ("--cov=app is not a path", _split_args(["tests/", "--cov=app"]), (["tests/"], [], "")),
         ("a node id resolves to its file", _split_args(["tests/test_a.py::test_one"]), (["tests/test_a.py::test_one"], [], "")),
+        # Every redirection syntax, not just the one that prompted the fix.
+        # `shlex` tokenises shell syntax as ordinary words, so each of these
+        # was read as a positional argument and reported as an invocation
+        # naming a path that is not in the tree — the gate failing a real
+        # step it had mis-read. A reader that handled only `>/dev/null`
+        # would still mis-read the other six.
+        ("an attached redirection is not a path", _split_args(["tests/", ">/dev/null"]), (["tests/"], [], "")),
+        ("a detached redirection consumes its target", _split_args(["tests/", ">", "/dev/null"]), (["tests/"], [], "")),
+        ("an append redirection is not a path", _split_args(["tests/", ">>log.txt"]), (["tests/"], [], "")),
+        ("a numbered redirection is not a path", _split_args(["tests/", "2>/dev/null"]), (["tests/"], [], "")),
+        ("a descriptor dup is not a path", _split_args(["tests/", "2>&1"]), (["tests/"], [], "")),
+        ("an all-streams redirection is not a path", _split_args(["tests/", "&>/dev/null"]), (["tests/"], [], "")),
+        ("an input redirection consumes its source", _split_args(["tests/", "<", "in.txt"]), (["tests/"], [], "")),
+        # The other direction, which is what stops the clause above from
+        # being a hole: a path is still a path, and a second one after a
+        # redirection is still read.
+        (
+            "a real path after a redirection is still read",
+            _split_args(["tests/a", ">/dev/null", "tests/b"]),
+            (["tests/a", "tests/b"], [], ""),
+        ),
     ]
     for label, got, want in reader:
         correct = got == want

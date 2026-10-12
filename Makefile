@@ -79,7 +79,7 @@ console_url = $(if $(strip $(CONSOLE_URL)),$(strip $(CONSOLE_URL)),http://localh
 
 .PHONY: help install env up up-dev up-full up-gpu up-host-llm _gpu_preflight pull down restart status doctor smoke _anonymous_write_is_refused demo logs clean \
         bootstrap ingest-token api-token test test-unit test-integration test-e2e stats papers \
-        papers-install demo-script
+        papers-install demo-script replay-eval replay-eval-verify
 
 help:
 	@echo ""
@@ -485,6 +485,35 @@ test-e2e: smoke
 # cannot be edited by hand into something the tree does not support.
 stats:
 	@$(PYTHON) scripts/project_stats.py
+
+# ── Replay evaluation: grade AiSOC on your own closed alerts ───────────────
+#
+# Reads a window of closed findings out of your SIEM, replays them through
+# the same triage path a live alert takes, scores the verdicts against what
+# your analysts decided, and writes one signed file.
+#
+# It writes nothing to your deployment: the replay runs in shadow mode and
+# the count of writes it intercepted travels in the bundle, so a replay that
+# quietly stopped replaying can be told from one whose writes were suppressed.
+#
+# Air-gapped by default. If a hosted model answered, the run is refused
+# unless you passed --hosted, and the refusal names the model. The check
+# reads the models that actually answered rather than a config file, because
+# a config file states an intention.
+#
+#   make replay-eval ARGS="--connector-id <uuid>"
+#   make replay-eval ARGS="--connector-id <uuid> --since 2026-07-01T00:00:00Z --until 2026-10-01T00:00:00Z"
+#   make replay-eval ARGS="--connector-id <uuid> --export-items"   # per-decision rows, redacted
+#   make replay-eval-verify ARGS="aisoc-replay-<id>.bundle.json"
+#
+# Credentials: AISOC_API_KEY carries the tenant, so there is no tenant flag.
+# AISOC_REPLAY_SIGNING_KEY (or SECRET_KEY) signs the bundle, so it verifies
+# on this deployment and nowhere else.
+replay-eval:
+	@$(PYTHON) scripts/run_replay_eval.py run $(ARGS)
+
+replay-eval-verify:
+	@$(PYTHON) scripts/run_replay_eval.py verify $(ARGS)
 
 # ── Papers + demo script (pre-existing) ────────────────────────────────────
 

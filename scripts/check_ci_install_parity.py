@@ -524,6 +524,47 @@ def suite_runner(line: str) -> str:
     return f".venv-{match.group('service')}" if match else "default"
 
 
+#: Where pytest's own arguments stop and the shell's resume. Everything from
+#: the first of these onward belongs to a redirection or the next command in
+#: a pipeline, not to pytest.
+_SHELL_BREAK = re.compile(r"^(?:\||\|\||&&|;|\)|>>?|<|&>|[0-9]+>&?[0-9]?)")
+
+
+def _pytest_arguments(args: str) -> list[str]:
+    """The arguments pytest actually receives, stopping at the shell.
+
+    ``python -m pytest tests/isolation/test_white_label_live.py -q 2>&1 |
+    tee /tmp/wl.txt`` credits pytest
+    with six arguments if you simply split on whitespace, and ``/tmp/wl.txt``
+    then satisfies every test for a directory path: it does not start with a
+    dash, does not end in ``.py``, and contains a slash. The gate concluded
+    that a job naming one file ran a service's **whole** suite, and demanded
+    its entire dependency set -- thirteen findings from one ``tee``.
+
+    A redirection target is consumed the same way, whether it is attached
+    (``>/dev/null``) or detached (``> /dev/null``), since a detached target
+    would otherwise read as a path in its own right.
+    """
+    out: list[str] = []
+    tokens = args.split()
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if _SHELL_BREAK.match(token):
+            # A bare operator takes its target with it; an attached one
+            # already carries it.
+            if token in {">", ">>", "<", "&>"} or re.fullmatch(r"[0-9]+>&?", token):
+                index += 1
+            # Anything after a pipe or a separator is a different command.
+            if token.startswith(("|", "&&", ";")) or token == ")":
+                break
+            index += 1
+            continue
+        out.append(token)
+        index += 1
+    return out
+
+
 def whole_suite_targets(run: str, working_directory: str) -> set[str]:
     """Services whose *whole* suite this command collects.
 
@@ -546,7 +587,7 @@ def whole_suite_targets(run: str, working_directory: str) -> set[str]:
             continue
         directories = [
             arg
-            for arg in match.group("args").split()
+            for arg in _pytest_arguments(match.group("args"))
             if not arg.startswith("-") and not arg.endswith(".py") and re.fullmatch(r"[\w./-]+", arg) and ("/" in arg or arg == "tests")
         ]
         if not directories:
@@ -1483,7 +1524,29 @@ def self_test() -> int:
 
     declared_optional = dict(OPTIONAL_BY_OMISSION)
     OPTIONAL_BY_OMISSION.clear()
+    # Argument parsing is a pure function, so it is proved directly rather
+    # than through a whole synthetic tree. The first case is the one that
+    # produced thirteen findings from a single `tee`: everything after the
+    # pipe belongs to the next command, and `/tmp/wl.txt` satisfied every
+    # test for a directory path. The rest keep the fix from going too far —
+    # a real directory argument must still be seen, or the gate stops
+    # detecting the thing it exists for.
+    argument_cases: list[tuple[str, list[str]]] = [
+        ("t/a_test.py -q 2>&1 | tee /tmp/wl.txt", ["t/a_test.py", "-q"]),
+        ("tests/ -q", ["tests/", "-q"]),
+        ("a.py >/dev/null", ["a.py"]),
+        ("a.py > /dev/null", ["a.py"]),
+        ("tests/isolation -v && echo /tmp/x", ["tests/isolation", "-v"]),
+        ("tests/ --cov=app", ["tests/", "--cov=app"]),
+    ]
     failures: list[str] = []
+    for raw, expected in argument_cases:
+        got = _pytest_arguments(raw)
+        ok = got == expected
+        if not ok:
+            failures.append(f"_pytest_arguments({raw!r}) returned {got}, expected {expected}")
+        print(f"  self-test [{'ok' if ok else 'FAIL'}] pytest arguments stop at the shell: {raw!r}")
+
     for name, mutate, expect in cases:
         EXEMPT.clear()
         code, problems = build(mutate)

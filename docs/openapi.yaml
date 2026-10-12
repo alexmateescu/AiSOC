@@ -607,7 +607,29 @@ paths:
 
         match either filter — that''s intentional; analysts who care about
 
-        confidence should only see alerts that actually carry the signal.'
+        confidence should only see alerts that actually carry the signal.
+
+
+        `sort` is `newest` (created_at descending) or `priority` (severity
+
+        descending, then created_at descending). It defaults to `newest`: this
+
+        endpoint has generated SDK clients and "page one is the newest rows" is
+
+        part of what they were built against, so changing the order silently
+
+        would alter what every existing caller reads *without* altering the
+
+        schema — which `openapi-breaking.yml` cannot detect. The console asks for
+
+        `priority`, because a noisy low-severity source emitting faster than an
+
+        analyst pages pushes a critical off page one and keeps it there.
+
+
+        `limit` is an accepted spelling of `page_size`. Supplying both with
+
+        different values is a 400.'
       operationId: list_alerts_api_v1_alerts_get
       security:
       - HTTPBearer: []
@@ -629,6 +651,20 @@ paths:
           minimum: 1
           default: 25
           title: Page Size
+      - name: limit
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: integer
+            maximum: 200
+            minimum: 1
+          - type: 'null'
+          description: Alias for `page_size`, bounded identically. Supplying both
+            with different values is a 400.
+          title: Limit
+        description: Alias for `page_size`, bounded identically. Supplying both with
+          different values is a 400.
       - name: severity
         in: query
         required: false
@@ -686,6 +722,16 @@ paths:
           - type: string
           - type: 'null'
           title: Confidence Label
+      - name: sort
+        in: query
+        required: false
+        schema:
+          enum:
+          - newest
+          - priority
+          type: string
+          default: newest
+          title: Sort
       responses:
         '200':
           description: Successful Response
@@ -833,7 +879,12 @@ paths:
       tags:
       - alerts
       summary: Update Alert
-      description: Update alert status, priority, tags, assignment, or case link.
+      description: 'Update alert status, priority, tags, assignment, or case link.
+
+
+        Emits an `alerts:update` audit event carrying a before/after payload for
+
+        the fields this call changed.'
       operationId: update_alert_api_v1_alerts__alert_id__patch
       security:
       - HTTPBearer: []
@@ -2019,6 +2070,343 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/case-depth/alerts/merge:
+    post:
+      tags:
+      - case-depth
+      summary: Merge Alerts Route
+      description: Fold duplicate alerts into one. Every row survives.
+      operationId: merge_alerts_route_api_v1_case_depth_alerts_merge_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MergeRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MergeResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+      security:
+      - HTTPBearer: []
+  /api/v1/case-depth/cases/merge:
+    post:
+      tags:
+      - case-depth
+      summary: Merge Cases Route
+      description: Fold duplicate cases into one. Alerts follow; both rows survive.
+      operationId: merge_cases_route_api_v1_case_depth_cases_merge_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MergeRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MergeResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+      security:
+      - HTTPBearer: []
+  /api/v1/case-depth/alerts/bulk-triage:
+    post:
+      tags:
+      - case-depth
+      summary: Bulk Triage Route
+      description: 'Apply one triage decision to many alerts, with a preflight count.
+
+
+        A match larger than ``max_count`` is a **409 carrying the real figure**
+
+        and nothing is written — the same contract ``POST /alerts/bulk-close``
+
+        uses, deliberately, because a second bulk path with weaker guarantees is
+
+        how the weaker one becomes the one everybody reaches for.'
+      operationId: bulk_triage_route_api_v1_case_depth_alerts_bulk_triage_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BulkTriageRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BulkTriageResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+      security:
+      - HTTPBearer: []
+  /api/v1/case-depth/custom-fields:
+    get:
+      tags:
+      - case-depth
+      summary: List Custom Fields
+      operationId: list_custom_fields_api_v1_case_depth_custom_fields_get
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: include_inactive
+        in: query
+        required: false
+        schema:
+          type: boolean
+          default: false
+          title: Include Inactive
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/CustomFieldOut'
+                title: Response List Custom Fields Api V1 Case Depth Custom Fields
+                  Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+    post:
+      tags:
+      - case-depth
+      summary: Create Custom Field
+      operationId: create_custom_field_api_v1_case_depth_custom_fields_post
+      security:
+      - HTTPBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CustomFieldIn'
+      responses:
+        '201':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CustomFieldOut'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/case-depth/custom-fields/{field_id}:
+    patch:
+      tags:
+      - case-depth
+      summary: Update Custom Field
+      operationId: update_custom_field_api_v1_case_depth_custom_fields__field_id__patch
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: field_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Field Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CustomFieldPatch'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CustomFieldOut'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+    delete:
+      tags:
+      - case-depth
+      summary: Retire Custom Field
+      description: 'Retire, never delete: values already written stay readable and
+        attributable.'
+      operationId: retire_custom_field_api_v1_case_depth_custom_fields__field_id__delete
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: field_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Field Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CustomFieldOut'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/case-depth/cases/{case_id}/custom-values:
+    get:
+      tags:
+      - case-depth
+      summary: Get Custom Values
+      description: 'Every active field, with this case''s value or an empty one.
+
+
+        Returns the *fields*, not the stored rows, so a field defined after the
+
+        case was created still renders — the alternative is a form that silently
+
+        omits whatever was added last week.'
+      operationId: get_custom_values_api_v1_case_depth_cases__case_id__custom_values_get
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: case_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Case Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/CustomValueOut'
+                title: Response Get Custom Values Api V1 Case Depth Cases  Case Id  Custom
+                  Values Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+    put:
+      tags:
+      - case-depth
+      summary: Set Custom Values
+      operationId: set_custom_values_api_v1_case_depth_cases__case_id__custom_values_put
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: case_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Case Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CustomValuesIn'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/CustomValueOut'
+                title: Response Set Custom Values Api V1 Case Depth Cases  Case Id  Custom
+                  Values Put
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/case-depth/workload:
+    get:
+      tags:
+      - case-depth
+      summary: Workload
+      description: 'Per-analyst open, closed, overdue and mean time to close.
+
+
+        Every number is counted by this request over rows it selected. An analyst
+
+        who has closed nothing gets ``mean_hours_to_close: null`` and the console
+
+        renders that as "no data" — never ``0.0``, which reads as "instant".'
+      operationId: workload_api_v1_case_depth_workload_get
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: days
+        in: query
+        required: false
+        schema:
+          type: integer
+          maximum: 365
+          minimum: 1
+          default: 30
+          title: Days
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Workload Api V1 Case Depth Workload Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /api/v1/cases/{case_id}/attack-chain:
     get:
       tags:
@@ -3189,14 +3577,27 @@ paths:
       tags:
       - detection_rules
       summary: List Rules
-      description: 'List detection rules for the tenant.
+      description: 'List the tenant''s effective detection rules.
 
 
-        Returns the tenant''s own rules, plus optionally platform-wide built-in
+        Three sources, merged: the compiled corpus the fusion engine loads, the
 
-        rules and rules sourced from MSSP-assigned rule packs (with excluded
+        tenant''s own rules, and rules from MSSP-assigned packs (with excluded
 
-        overrides removed).'
+        overrides removed). Before #1273 only the last two were read, and since
+
+        nothing in production has ever written a built-in row, a default install
+
+        answered with an empty list while the engine ran 2,586 rules.
+
+
+        ``X-Total-Count`` carries the number matching the filters, which is not
+
+        the number returned: the response stays a bare array so existing callers
+
+        are unaffected, and the page bound exists because serialising the whole
+
+        library is several megabytes.'
       operationId: list_rules_api_v1_rules_get
       security:
       - HTTPBearer: []
@@ -3231,6 +3632,54 @@ paths:
           type: boolean
           default: true
           title: Include Packs
+      - name: search
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+            maxLength: 200
+          - type: 'null'
+          description: Case-insensitive match on name, id, category, tags and techniques.
+          title: Search
+        description: Case-insensitive match on name, id, category, tags and techniques.
+      - name: severity
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Severity
+      - name: mitre
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: MITRE ATT&CK technique id, e.g. T1059.001
+          title: Mitre
+        description: MITRE ATT&CK technique id, e.g. T1059.001
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          maximum: 2000
+          minimum: 1
+          description: Maximum rules returned. The full library is several MB.
+          default: 200
+          title: Limit
+        description: Maximum rules returned. The full library is several MB.
+      - name: offset
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 0
+          default: 0
+          title: Offset
       responses:
         '200':
           description: Successful Response
@@ -3279,7 +3728,8 @@ paths:
       tags:
       - detection_rules
       summary: Get Rule
-      description: Get a detection rule by ID.
+      description: Get a detection rule by ID, stored row first and compiled corpus
+        second.
       operationId: get_rule_api_v1_rules__rule_id__get
       security:
       - HTTPBearer: []
@@ -3308,7 +3758,20 @@ paths:
       tags:
       - detection_rules
       summary: Update Rule
-      description: Update a detection rule (only tenant-owned rules).
+      description: 'Update a tenant-owned rule, or record a tuning decision on a built-in.
+
+
+        A built-in materialises its tenant row on first write, under the rule''s
+
+        own id and carrying ``provenance.source_id`` — the key fusion''s tenant
+
+        overlay joins on — so a status change here reaches the engine within one
+
+        overlay reload. ``rule_body`` is refused on a built-in: the engine loads
+
+        the compiled artefact, so a stored edit would be displayed as applied and
+
+        never run.'
       operationId: update_rule_api_v1_rules__rule_id__patch
       security:
       - HTTPBearer: []
@@ -3482,9 +3945,94 @@ paths:
       tags:
       - detection_rules
       summary: List Rules Compat
-      description: List detection rules visible to the current tenant (built-ins +
-        tenant-owned).
+      description: 'The tenant''s effective rule library: the compiled corpus plus
+        its tuning.
+
+
+        This used to read ``detection_rules`` alone and therefore answered with an
+
+        empty list on every install, while fusion loaded and fired 2,586 rules
+
+        (#1273). The filters and the page bound are not cosmetic: the whole
+
+        library serialised is several megabytes, so an unbounded list would have
+
+        traded an empty page for an unusable one.'
       operationId: list_rules_compat_api_v1_detection_rules_get
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: search
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+            maxLength: 200
+          - type: 'null'
+          title: Search
+      - name: severity
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Severity
+      - name: category
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Category
+      - name: mitre
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: MITRE ATT&CK technique id, e.g. T1059.001
+          title: Mitre
+        description: MITRE ATT&CK technique id, e.g. T1059.001
+      - name: enabled
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Enabled
+      - name: source
+        in: query
+        required: false
+        schema:
+          enum:
+          - all
+          - builtin
+          - custom
+          type: string
+          default: all
+          title: Source
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          maximum: 1000
+          minimum: 1
+          default: 100
+          title: Limit
+      - name: offset
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 0
+          default: 0
+          title: Offset
       responses:
         '200':
           description: Successful Response
@@ -3492,20 +4040,26 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ListResponse'
-      security:
-      - HTTPBearer: []
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
     post:
       tags:
       - detection_rules
       summary: Create Rule Compat
       description: Create a tenant-owned detection rule using the frontend shape.
       operationId: create_rule_compat_api_v1_detection_rules_post
+      security:
+      - HTTPBearer: []
       requestBody:
+        required: true
         content:
           application/json:
             schema:
               $ref: '#/components/schemas/CreateBody'
-        required: true
       responses:
         '201':
           description: Successful Response
@@ -3519,14 +4073,21 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
-      security:
-      - HTTPBearer: []
   /api/v1/detection/rules/{rule_id}:
     get:
       tags:
       - detection_rules
       summary: Get Rule Compat
-      description: Fetch a single rule by ID in the frontend shape.
+      description: 'Fetch a single rule by ID in the frontend shape.
+
+
+        Resolves a stored row first and the compiled catalogue second, so a
+
+        built-in''s detail page opens without a row having to exist for it. The
+
+        read never creates one: a GET that materialised would put 2,586 rows per
+
+        tenant in a table meant to hold decisions.'
       operationId: get_rule_compat_api_v1_detection_rules__rule_id__get
       security:
       - HTTPBearer: []
@@ -3555,7 +4116,27 @@ paths:
       tags:
       - detection_rules
       summary: Update Rule Compat
-      description: Update a tenant-owned rule using the frontend shape.
+      description: 'Update a tenant-owned rule, or record a tuning decision on a built-in.
+
+
+        A built-in has no row until this point. The first write creates one under
+
+        the rule''s own id, carrying ``provenance.source_id`` — the key fusion''s
+
+        tenant overlay joins on — so disabling a rule in the console stops the
+
+        engine firing it rather than setting a flag nothing reads. Before #1273
+
+        this route answered 404 for every rule the engine was actually running.
+
+
+        The compiled logic itself is not editable here: ``rule_body``,
+
+        ``language`` and ``mitre`` are refused on a built-in rather than silently
+
+        stored, because the engine loads the artefact and would ignore the edit
+
+        while the console displayed it as applied.'
       operationId: update_rule_compat_api_v1_detection_rules__rule_id__patch
       security:
       - HTTPBearer: []
@@ -3658,7 +4239,18 @@ paths:
 
         from *alerts* — this one is what an analyst opens before a tuning
 
-        sprint to answer "which techniques is my rule library blind to?".'
+        sprint to answer "which techniques is my rule library blind to?".
+
+
+        Reads the whole effective library, built-ins included. It previously read
+
+        the ``detection_rules`` table alone and therefore drew an empty heatmap
+
+        over a product shipping ATT&CK mappings for 2,586 loaded rules — the
+
+        strongest possible version of the "blind to everything" answer, and
+
+        wrong.'
       operationId: get_detection_coverage_api_v1_detection_coverage_get
       responses:
         '200':
@@ -3674,14 +4266,25 @@ paths:
       tags:
       - detection_rules
       summary: Bulk Toggle Rules
-      description: 'Enable or disable many tenant-owned rules in one round-trip.
+      description: 'Enable or disable many rules in one round-trip, built-ins included.
 
 
-        Built-in / cross-tenant rules are silently skipped (returned in
+        Built-ins used to be "silently skipped", which on a default install meant
 
-        ``skipped``) so an MSSP analyst toggling a whole category from the UI
+        every rule in the library was skipped: there were no other rules. A
 
-        doesn''t get a 403 just because one of the rules is platform-provided.'
+        built-in now materialises a tenant tuning row on first toggle, exactly as
+
+        the single-rule PATCH does, so selecting a noisy category and turning it
+
+        off reaches the engine.
+
+
+        Ids that match nothing at all are still reported in ``skipped``, because
+
+        an operator who selected forty rules and had one quietly dropped would
+
+        have no way to find out which.'
       operationId: bulk_toggle_rules_api_v1_detection_rules_bulk_toggle_post
       requestBody:
         content:
@@ -3718,7 +4321,12 @@ paths:
 
         on the Detections page so analysts have a single queue to work
 
-        instead of paginating the full library hunting for noise.'
+        instead of paginating the full library hunting for noise.
+
+
+        Built-ins are counted in ``summary.unscored`` rather than judged: none of
+
+        the three heuristics has an input for them.'
       operationId: get_detection_drift_api_v1_detection_drift_get
       responses:
         '200':
@@ -3750,7 +4358,16 @@ paths:
 
         the current confidence/FP-rate columns set by the rule engine and
 
-        operator review on every match.'
+        operator review on every match.
+
+
+        Rules with no recorded confidence are reported as ``summary.unscored``
+
+        and left out of every average, so the histogram describes the rules an
+
+        operator has actually scored rather than being flattened by a library of
+
+        placeholders.'
       operationId: get_detection_confidence_api_v1_detection_confidence_get
       responses:
         '200':
@@ -6755,6 +7372,246 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/memory/items:
+    post:
+      tags:
+      - semantic-memory
+      summary: Ingest Item
+      operationId: ingest_item_api_v1_memory_items_post
+      security:
+      - HTTPBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MemoryItemIn'
+      responses:
+        '201':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MemoryIngestResult'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+    get:
+      tags:
+      - semantic-memory
+      summary: List Items
+      operationId: list_items_api_v1_memory_items_get
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: kind
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Kind
+      - name: state
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: State
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          maximum: 500
+          minimum: 1
+          default: 100
+          title: Limit
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/MemoryItemOut'
+                title: Response List Items Api V1 Memory Items Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/memory/items/{item_id}:
+    delete:
+      tags:
+      - semantic-memory
+      summary: Retire Item
+      description: Retire, never hard-delete. 'What did the agent know' must stay
+        answerable.
+      operationId: retire_item_api_v1_memory_items__item_id__delete
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: item_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Item Id
+      - name: reason
+        in: query
+        required: false
+        schema:
+          type: string
+          default: ''
+          title: Reason
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MemoryItemOut'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/memory/recall:
+    post:
+      tags:
+      - semantic-memory
+      summary: Recall
+      description: 'Vector recall over this tenant''s memory. Every hit carries its
+        provenance.
+
+
+        ``knowledge_base:read`` is the right permission and it already exists:
+
+        ``POST /kb/query`` uses it for the full-text half of the same corpus,
+
+        and every role that triages holds it. Reusing it rather than minting a
+
+        ``memory:read`` keeps one answer to "may this principal search what the
+
+        organisation knows" — two permissions over one corpus is two answers
+
+        that can disagree, and the disagreement surfaces on the day somebody
+
+        narrows a role.'
+      operationId: recall_api_v1_memory_recall_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MemoryRecallIn'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                items:
+                  $ref: '#/components/schemas/MemoryRecallHit'
+                type: array
+                title: Response Recall Api V1 Memory Recall Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+      security:
+      - HTTPBearer: []
+  /api/v1/memory/conflicts:
+    get:
+      tags:
+      - semantic-memory
+      summary: List Conflicts
+      operationId: list_conflicts_api_v1_memory_conflicts_get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                items:
+                  $ref: '#/components/schemas/MemoryConflictOut'
+                type: array
+                title: Response List Conflicts Api V1 Memory Conflicts Get
+      security:
+      - HTTPBearer: []
+  /api/v1/memory/conflicts/{item_id}/resolve:
+    post:
+      tags:
+      - semantic-memory
+      summary: Resolve Conflict
+      description: Settle a conflict by naming which side survives. The other is retired.
+      operationId: resolve_conflict_api_v1_memory_conflicts__item_id__resolve_post
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: item_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Item Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MemoryConflictResolution'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MemoryConflictOut'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/memory/status:
+    get:
+      tags:
+      - semantic-memory
+      summary: Recall Status
+      description: 'Can this deployment recall at all, and over how much.
+
+
+        Every count here is computed from rows this request counted, not read
+
+        from a cached figure, and an unknown stays ``null`` rather than becoming
+
+        a confident zero.'
+      operationId: recall_status_api_v1_memory_status_get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+                title: Response Recall Status Api V1 Memory Status Get
+      security:
+      - HTTPBearer: []
   /api/v1/tenant-skills:
     get:
       tags:
@@ -14163,7 +15020,22 @@ paths:
 
         overrides), the hard-coded defaults, and an ``overridden`` flag the UI
 
-        uses to render a "modified from default" badge.'
+        uses to render a "modified from default" badge.
+
+
+        Every action also carries whether it would *actually* execute without a
+
+        human, resolved from the tenant''s maturity tier and the verb''s capability
+
+        contract by ``app/services/autonomy_effective.py``. The thresholds and
+
+        that answer are different facts, and the console previously derived the
+
+        second from the first: a threshold below 1.0 was read as "auto-executes",
+
+        which on stock defaults made nineteen of nineteen actions autonomous and
+
+        put an Autopilot badge on a deployment that queues all of them.'
       operationId: get_autonomy_policy_api_v1_autonomy_policy_get
       responses:
         '200':
@@ -16000,6 +16872,22 @@ paths:
       tags:
       - threat-intel
       summary: List Iocs
+      description: '**This tenant''s own** IOCs, from Postgres `threat_intel_iocs`.
+
+
+        Not the platform''s feed intelligence, and the distinction is the whole
+
+        content of issue #1278: this route and `/indicators` sit next to each
+
+        other and read different stores. `/indicators` serves the CISA KEV
+
+        catalogue out of Qdrant — about 1,700 entries on a stock CORE install.
+
+        This table is written **only** by `POST /threat-intel/iocs`, so it is
+
+        empty until somebody submits to it, and an empty response here is not
+
+        evidence that the KEV feed failed.'
       operationId: list_iocs_api_v1_threat_intel_iocs_get
       security:
       - HTTPBearer: []
@@ -16219,6 +17107,26 @@ paths:
       tags:
       - threat-intel
       summary: List Feeds
+      description: '**Feeds this tenant has registered**, from Postgres `threat_intel_feeds`.
+
+
+        Written only by `POST /threat-intel/feeds`, so it is empty until an
+
+        operator adds one. It deliberately does **not** list the platform''s
+
+        built-in feeds: the CISA KEV poller is an in-process job in
+
+        `services/threatintel` and owns no row here, which is why a stock CORE
+
+        install sees `[]` here while `/indicators` serves the catalogue that
+
+        poller fetched (issue #1278). Listing the built-in poller here would
+
+        mean synthesising an id and a `tenant_id` for a row that does not
+
+        exist, which is the fabrication pattern this project has paid for
+
+        before; `/indicators` is where its output is observable.'
       operationId: list_feeds_api_v1_threat_intel_feeds_get
       responses:
         '200':
@@ -19560,6 +20468,29 @@ components:
           - type: string
           - type: 'null'
           title: Last Reason
+        capability:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Capability
+        executable:
+          type: boolean
+          title: Executable
+          default: false
+        effective_auto_execute:
+          type: boolean
+          title: Effective Auto Execute
+          default: false
+        auto_executes_at_any_tier:
+          type: boolean
+          title: Auto Executes At Any Tier
+          default: false
+        effective_tier:
+          type: string
+          title: Effective Tier
+        effective_reason:
+          type: string
+          title: Effective Reason
       type: object
       required:
       - action
@@ -19567,6 +20498,8 @@ components:
       - thresholds
       - default_thresholds
       - overridden
+      - effective_tier
+      - effective_reason
       title: ActionPolicy
     AddAlertsRequest:
       properties:
@@ -20332,6 +21265,39 @@ components:
         \ from the case timeline and the audit log.\n* ``recommended_actions`` — normalised\
         \ structured actions from\n  the ResponderAgent (or the legacy list-of-strings\
         \ shape)."
+    AlertFacetCounts:
+      properties:
+        by_severity:
+          additionalProperties:
+            type: integer
+          type: object
+          title: By Severity
+        by_status:
+          additionalProperties:
+            type: integer
+          type: object
+          title: By Status
+        unresolved:
+          type: integer
+          title: Unresolved
+          default: 0
+      type: object
+      title: AlertFacetCounts
+      description: 'Counts over the whole filtered result set, not the returned page.
+
+
+        The console''s Critical / High / Unresolved tiles used to be
+
+        `alerts.filter(...)` over the 25 rows it had loaded, rendered beside a
+
+        server-side `total` in the hundreds — so the tiles were arithmetically
+
+        capped at the page size and changed when the analyst paged.
+
+
+        Computed from the same `WHERE` clause as `total` rather than over the
+
+        whole tenant, so all four numbers on that strip describe one set of rows.'
     AlertLinkCreate:
       properties:
         alert_id:
@@ -20411,6 +21377,8 @@ components:
         pages:
           type: integer
           title: Pages
+        facets:
+          $ref: '#/components/schemas/AlertFacetCounts'
       type: object
       required:
       - items
@@ -20850,6 +21818,7 @@ components:
             format: uuid
           - type: 'null'
           title: Case Id
+      additionalProperties: false
       type: object
       title: AlertUpdateRequest
     ApiKeyOut:
@@ -21770,10 +22739,13 @@ components:
             $ref: '#/components/schemas/ActionPolicy'
           type: array
           title: Actions
+        effective:
+          $ref: '#/components/schemas/EffectiveAutonomy'
       type: object
       required:
       - tenant_id
       - actions
+      - effective
       title: AutonomyPolicyResponse
     AvailableTools:
       properties:
@@ -22132,6 +23104,69 @@ components:
       - updated
       - skipped
       title: BulkToggleResponse
+    BulkTriageRequest:
+      properties:
+        alert_ids:
+          items:
+            type: string
+            format: uuid
+          type: array
+          maxItems: 5000
+          minItems: 1
+          title: Alert Ids
+        set_status:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Set Status
+        set_severity:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Set Severity
+        assign_to:
+          anyOf:
+          - type: string
+            format: uuid
+          - type: 'null'
+          title: Assign To
+        unassign:
+          type: boolean
+          title: Unassign
+          default: false
+        max_count:
+          type: integer
+          maximum: 5000.0
+          minimum: 1.0
+          title: Max Count
+          default: 100
+        comment:
+          type: string
+          maxLength: 500
+          title: Comment
+          default: ''
+      type: object
+      required:
+      - alert_ids
+      title: BulkTriageRequest
+    BulkTriageResponse:
+      properties:
+        matched_count:
+          type: integer
+          title: Matched Count
+        updated_count:
+          type: integer
+          title: Updated Count
+        changes:
+          additionalProperties: true
+          type: object
+          title: Changes
+      type: object
+      required:
+      - matched_count
+      - updated_count
+      - changes
+      title: BulkTriageResponse
     BundleJob:
       properties:
         job_id:
@@ -23026,6 +24061,10 @@ components:
         lowConfidence:
           type: integer
           title: Lowconfidence
+        unscored:
+          type: integer
+          title: Unscored
+          default: 0
       type: object
       required:
       - totalRules
@@ -24436,6 +25475,180 @@ components:
       - summary
       - evidence
       title: CspmScanResponse
+    CustomFieldIn:
+      properties:
+        key:
+          type: string
+          maxLength: 64
+          minLength: 1
+          pattern: ^[a-z][a-z0-9_]*$
+          title: Key
+        label:
+          type: string
+          maxLength: 120
+          minLength: 1
+          title: Label
+        field_type:
+          type: string
+          title: Field Type
+        help_text:
+          type: string
+          maxLength: 400
+          title: Help Text
+          default: ''
+        choices:
+          items:
+            type: string
+          type: array
+          maxItems: 50
+          title: Choices
+        required:
+          type: boolean
+          title: Required
+          default: false
+        position:
+          type: integer
+          maximum: 999.0
+          minimum: 0.0
+          title: Position
+          default: 0
+      type: object
+      required:
+      - key
+      - label
+      - field_type
+      title: CustomFieldIn
+    CustomFieldOut:
+      properties:
+        id:
+          type: string
+          title: Id
+        key:
+          type: string
+          title: Key
+        label:
+          type: string
+          title: Label
+        help_text:
+          type: string
+          title: Help Text
+        field_type:
+          type: string
+          title: Field Type
+        choices:
+          items:
+            type: string
+          type: array
+          title: Choices
+        required:
+          type: boolean
+          title: Required
+        position:
+          type: integer
+          title: Position
+        active:
+          type: boolean
+          title: Active
+      type: object
+      required:
+      - id
+      - key
+      - label
+      - help_text
+      - field_type
+      - choices
+      - required
+      - position
+      - active
+      title: CustomFieldOut
+    CustomFieldPatch:
+      properties:
+        label:
+          anyOf:
+          - type: string
+            maxLength: 120
+          - type: 'null'
+          title: Label
+        help_text:
+          anyOf:
+          - type: string
+            maxLength: 400
+          - type: 'null'
+          title: Help Text
+        choices:
+          anyOf:
+          - items:
+              type: string
+            type: array
+            maxItems: 50
+          - type: 'null'
+          title: Choices
+        required:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Required
+        position:
+          anyOf:
+          - type: integer
+            maximum: 999.0
+            minimum: 0.0
+          - type: 'null'
+          title: Position
+        active:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Active
+      type: object
+      title: CustomFieldPatch
+    CustomValueOut:
+      properties:
+        key:
+          type: string
+          title: Key
+        label:
+          type: string
+          title: Label
+        field_type:
+          type: string
+          title: Field Type
+        value:
+          type: string
+          title: Value
+        required:
+          type: boolean
+          title: Required
+        updated_by:
+          type: string
+          title: Updated By
+        updated_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Updated At
+      type: object
+      required:
+      - key
+      - label
+      - field_type
+      - value
+      - required
+      - updated_by
+      - updated_at
+      title: CustomValueOut
+    CustomValuesIn:
+      properties:
+        values:
+          additionalProperties:
+            type: string
+          type: object
+          title: Values
+      type: object
+      required:
+      - values
+      title: CustomValuesIn
     DashboardMetrics:
       properties:
         period:
@@ -24788,6 +26001,23 @@ components:
           type: string
           format: date-time
           title: Updated At
+        source_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Source Id
+        confidence_measured:
+          type: boolean
+          title: Confidence Measured
+          default: true
+        tuned:
+          type: boolean
+          title: Tuned
+          default: true
+        engine:
+          type: string
+          title: Engine
+          default: custom
       type: object
       required:
       - id
@@ -24811,6 +26041,21 @@ components:
       - created_at
       - updated_at
       title: DetectionRuleResponse
+      description: "A rule in the tenant's effective library.\n\nFour fields exist\
+        \ to keep a compiled built-in legible without inventing\ndata the compiled\
+        \ corpus does not hold:\n\n``source_id``\n    The engine's own rule id — ``det-cloud-063``,\n\
+        \    ``sigmahq-sigma-002bdb95-…`` — which is what an alert carries and\n \
+        \   therefore what an analyst searches for. ``None`` for a tenant's own\n\
+        \    rule, which the engine does not load.\n``confidence_measured``\n    ``False``\
+        \ when ``confidence`` is a placeholder rather than a\n    measurement. The\
+        \ compiled artefacts record a rule's logic, severity\n    and ATT&CK mapping\
+        \ and nothing operational, so an untuned built-in\n    has no confidence,\
+        \ no FP rate and no trigger history. The two panels\n    that average those\
+        \ columns exclude such rules and publish the count.\n``tuned``\n    Whether\
+        \ this tenant has stored any decision about the rule.\n``engine``\n    ``aisoc-engine``\
+        \ when fusion loads and evaluates this rule,\n    ``custom`` when it does\
+        \ not. Disabling the two means different\n    things and a reader has to be\
+        \ able to tell them apart."
     DisableRequest:
       properties:
         code:
@@ -25011,6 +26256,10 @@ components:
         stale:
           type: integer
           title: Stale
+        unscored:
+          type: integer
+          title: Unscored
+          default: 0
       type: object
       required:
       - total
@@ -25102,6 +26351,57 @@ components:
       - valid_from
       - created_at
       title: EdgeOut
+    EffectiveAutonomy:
+      properties:
+        tier:
+          type: string
+          title: Tier
+        tier_label:
+          type: string
+          title: Tier Label
+        tier_source:
+          type: string
+          title: Tier Source
+        max_automatic_impact:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Max Automatic Impact
+        auto_executing_actions:
+          items:
+            type: string
+          type: array
+          title: Auto Executing Actions
+        high_blast_auto_executing:
+          items:
+            type: string
+          type: array
+          title: High Blast Auto Executing
+        unimplemented_actions:
+          items:
+            type: string
+          type: array
+          title: Unimplemented Actions
+        thresholds_are_advisory:
+          type: boolean
+          title: Thresholds Are Advisory
+        advisory_note:
+          type: string
+          title: Advisory Note
+      type: object
+      required:
+      - tier
+      - tier_label
+      - tier_source
+      - max_automatic_impact
+      - auto_executing_actions
+      - high_blast_auto_executing
+      - unimplemented_actions
+      - thresholds_are_advisory
+      - advisory_note
+      title: EffectiveAutonomy
+      description: The control that actually gates execution, as the console must
+        show it.
     EffectiveRuleCountOut:
       properties:
         total:
@@ -26703,6 +28003,23 @@ components:
           type: integer
           title: Hitcount
           default: 0
+        isBuiltin:
+          type: boolean
+          title: Isbuiltin
+          default: false
+        sourceId:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Sourceid
+        tuned:
+          type: boolean
+          title: Tuned
+          default: false
+        timestampsFromArtefact:
+          type: boolean
+          title: Timestampsfromartefact
+          default: false
       type: object
       required:
       - id
@@ -28630,6 +29947,36 @@ components:
         total:
           type: integer
           title: Total
+        builtinTotal:
+          type: integer
+          title: Builtintotal
+          default: 0
+        customTotal:
+          type: integer
+          title: Customtotal
+          default: 0
+        returned:
+          type: integer
+          title: Returned
+          default: 0
+        offset:
+          type: integer
+          title: Offset
+          default: 0
+        limit:
+          type: integer
+          title: Limit
+          default: 0
+        catalogError:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Catalogerror
+        missingArtefacts:
+          items:
+            type: string
+          type: array
+          title: Missingartefacts
       type: object
       required:
       - rules
@@ -29217,6 +30564,314 @@ components:
       required:
       - user_id
       title: MemberUpsert
+    MemoryConflictOut:
+      properties:
+        left:
+          $ref: '#/components/schemas/MemoryItemOut'
+        right:
+          anyOf:
+          - $ref: '#/components/schemas/MemoryItemOut'
+          - type: 'null'
+      type: object
+      required:
+      - left
+      - right
+      title: MemoryConflictOut
+    MemoryConflictResolution:
+      properties:
+        keep:
+          type: string
+          title: Keep
+        note:
+          type: string
+          maxLength: 500
+          title: Note
+          default: ''
+      type: object
+      required:
+      - keep
+      title: MemoryConflictResolution
+    MemoryIngestResult:
+      properties:
+        item:
+          $ref: '#/components/schemas/MemoryItemOut'
+        outcome:
+          type: string
+          title: Outcome
+        indexed:
+          type: boolean
+          title: Indexed
+        index_error:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Index Error
+      type: object
+      required:
+      - item
+      - outcome
+      - indexed
+      title: MemoryIngestResult
+    MemoryItemIn:
+      properties:
+        kind:
+          type: string
+          title: Kind
+          description: case | runbook | memory
+        subject:
+          type: string
+          maxLength: 400
+          minLength: 1
+          title: Subject
+        content:
+          type: string
+          maxLength: 200000
+          minLength: 1
+          title: Content
+        title:
+          type: string
+          maxLength: 400
+          title: Title
+          default: ''
+        source_ref:
+          type: string
+          maxLength: 400
+          title: Source Ref
+          default: ''
+        source:
+          type: string
+          maxLength: 60
+          title: Source
+          default: analyst
+        scope:
+          type: string
+          title: Scope
+          default: tenant
+        expires_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Expires At
+      type: object
+      required:
+      - kind
+      - subject
+      - content
+      title: MemoryItemIn
+    MemoryItemOut:
+      properties:
+        id:
+          type: string
+          title: Id
+        kind:
+          type: string
+          title: Kind
+        subject:
+          type: string
+          title: Subject
+        title:
+          type: string
+          title: Title
+        content:
+          type: string
+          title: Content
+        source_ref:
+          type: string
+          title: Source Ref
+        author:
+          type: string
+          title: Author
+        source:
+          type: string
+          title: Source
+        scope:
+          type: string
+          title: Scope
+        state:
+          type: string
+          title: State
+        state_reason:
+          type: string
+          title: State Reason
+        conflicts_with:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Conflicts With
+        expires_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Expires At
+        embedding_model:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Embedding Model
+        embedded_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Embedded At
+        created_at:
+          type: string
+          format: date-time
+          title: Created At
+        updated_at:
+          type: string
+          format: date-time
+          title: Updated At
+      type: object
+      required:
+      - id
+      - kind
+      - subject
+      - title
+      - content
+      - source_ref
+      - author
+      - source
+      - scope
+      - state
+      - state_reason
+      - conflicts_with
+      - expires_at
+      - embedding_model
+      - embedded_at
+      - created_at
+      - updated_at
+      title: MemoryItemOut
+    MemoryRecallChunk:
+      properties:
+        item_id:
+          type: string
+          format: uuid
+          title: Item Id
+        kind:
+          type: string
+          title: Kind
+        subject:
+          type: string
+          title: Subject
+        title:
+          type: string
+          title: Title
+        content:
+          type: string
+          title: Content
+        score:
+          type: number
+          title: Score
+        author:
+          type: string
+          title: Author
+        source:
+          type: string
+          title: Source
+      type: object
+      required:
+      - item_id
+      - kind
+      - subject
+      - title
+      - content
+      - score
+      - author
+      - source
+      title: MemoryRecallChunk
+      description: 'One semantically recalled memory item, with the provenance to
+        weigh it.
+
+
+        A separate type from ``KBChunk`` on purpose. These come from a different
+
+        store, by a different retrieval, with an author and a source attached,
+
+        and flattening them into the same list would let a reader take a
+
+        similarity hit for a full-text match.'
+    MemoryRecallHit:
+      properties:
+        item:
+          $ref: '#/components/schemas/MemoryItemOut'
+        score:
+          type: number
+          title: Score
+      type: object
+      required:
+      - item
+      - score
+      title: MemoryRecallHit
+    MemoryRecallIn:
+      properties:
+        query:
+          type: string
+          maxLength: 4000
+          minLength: 1
+          title: Query
+        kinds:
+          items:
+            type: string
+          type: array
+          title: Kinds
+        limit:
+          type: integer
+          maximum: 50.0
+          minimum: 1.0
+          title: Limit
+          default: 5
+      type: object
+      required:
+      - query
+      title: MemoryRecallIn
+    MergeRequest:
+      properties:
+        primary_id:
+          type: string
+          format: uuid
+          title: Primary Id
+        duplicate_ids:
+          items:
+            type: string
+            format: uuid
+          type: array
+          maxItems: 200
+          minItems: 1
+          title: Duplicate Ids
+        reason:
+          type: string
+          maxLength: 500
+          title: Reason
+          default: ''
+      type: object
+      required:
+      - primary_id
+      - duplicate_ids
+      title: MergeRequest
+    MergeResponse:
+      properties:
+        primary_id:
+          type: string
+          title: Primary Id
+        merged_ids:
+          items:
+            type: string
+          type: array
+          title: Merged Ids
+        case_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Case Id
+      type: object
+      required:
+      - primary_id
+      - merged_ids
+      - case_id
+      title: MergeResponse
     MetricsOut:
       properties:
         tenant_id:
@@ -31924,6 +33579,12 @@ components:
           title: Synthesise
           description: Use LLM to synthesise an answer from retrieved chunks.
           default: true
+        recall_memory:
+          type: boolean
+          title: Recall Memory
+          description: Append semantically recalled memory items to the result. Never
+            reorders the full-text chunks. Off by default; see scripts/score_memory_recall.py.
+          default: false
       type: object
       required:
       - question
@@ -31948,6 +33609,16 @@ components:
             type: string
           type: array
           title: Sources
+        memory:
+          items:
+            $ref: '#/components/schemas/MemoryRecallChunk'
+          type: array
+          title: Memory
+        memory_unavailable:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Memory Unavailable
       type: object
       required:
       - question

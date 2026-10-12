@@ -60,15 +60,36 @@ from app.db.clickhouse import LakeQueryError, LakeQueryNotConfiguredError, execu
 logger = logging.getLogger("aisoc.usage_metering")
 
 #: What `services/agents` stamps into `investigation_runs.model_used` for a
-#: run the Kafka auto-triage worker started: `kafka:auto_triage:<tier>`,
-#: where the tier is `llm` or `deterministic`
+#: run the Kafka auto-triage worker started: `kafka:auto_triage:<tier>`
 #: (`services/agents/app/investigator/ledger.py`, `persist_auto_triage`).
 #:
 #: Pinned against that producer by
 #: `TestTheProducerStillWritesWhatTheseMetersRead`, because the two services
 #: both name their top-level package `app` and cannot import each other.
 AUTO_TRIAGE_PREFIX: Final[str] = "kafka:auto_triage:"
-DETERMINISTIC_RUN: Final[str] = f"{AUTO_TRIAGE_PREFIX}deterministic"
+
+#: The tiers on which a model answered. One, today.
+MODEL_TIERS: Final[tuple[str, ...]] = ("llm",)
+
+#: The tiers that answered without placing a model call, enumerated rather
+#: than inferred as "everything else".
+#:
+#: Inferring was the first version of this fix and it reproduced the defect
+#: it was closing. `model_used <> 'kafka:auto_triage:deterministic'` reads
+#: as "the model path" only if `deterministic` is the sole non-model tier,
+#: and the worker has four: it also answers from the dedup cache and from
+#: institutional memory, neither of which places a call. Both would have
+#: been counted as AI triages — on a deployment with no model configured at
+#: all, which is the exact sentence this item exists to make false.
+#:
+#: `cached` is a deduplicated replay of a verdict some earlier run reached.
+#: It is counted here because the meter answers "what did this run spend",
+#: and a replay spent nothing; charging a tenant's AI-triage quota for it
+#: would bill them twice for one verdict.
+NON_MODEL_TIERS: Final[tuple[str, ...]] = ("cached", "deterministic", "memory")
+
+MODEL_RUNS: Final[tuple[str, ...]] = tuple(f"{AUTO_TRIAGE_PREFIX}{tier}" for tier in MODEL_TIERS)
+NON_MODEL_RUNS: Final[tuple[str, ...]] = tuple(f"{AUTO_TRIAGE_PREFIX}{tier}" for tier in NON_MODEL_TIERS)
 
 #: The approval tier `services/actions` grades a submission at, recorded on
 #: the action row at submit time. `automatic` is the only value that means
@@ -132,18 +153,17 @@ METERS: Final[tuple[Meter, ...]] = (
         "investigation_runs",
         (
             "SELECT count(*) FROM investigation_runs WHERE tenant_id = :tenant_id "
-            "AND created_at >= :start AND created_at < :end "
-            "AND model_used LIKE :auto_triage_prefix || '%' AND model_used <> :deterministic_run"
+            "AND created_at >= :start AND created_at < :end AND model_used IN :model_runs"
         ),
     ),
     Meter(
         "triages_deterministic",
         "Deterministic triages",
-        "Auto-triage runs answered without a model: rule verdicts and institutional-memory suppression.",
+        "Auto-triage runs answered without a model: rule verdicts, institutional-memory suppression, and deduplicated replays.",
         "investigation_runs",
         (
             "SELECT count(*) FROM investigation_runs WHERE tenant_id = :tenant_id "
-            "AND created_at >= :start AND created_at < :end AND model_used = :deterministic_run"
+            "AND created_at >= :start AND created_at < :end AND model_used IN :non_model_runs"
         ),
     ),
     Meter(
@@ -421,19 +441,24 @@ _BIND_TYPES: Final[dict[str, Any]] = {
     # meter whose discriminator is a string literal in SQL is one a reader
     # has to diff against the producer by eye.
     "auto_triage_prefix": String(),
-    "deterministic_run": String(),
     "automatic_tier": String(),
     "executed_status": String(),
 }
 
+#: Parameters bound as a list rather than a scalar. `IN :model_runs` names
+#: the tiers it counts, so the set a meter discriminates on is readable in
+#: one place instead of being the complement of a literal somewhere else.
+_EXPANDING: Final[tuple[str, ...]] = ("model_runs", "non_model_runs")
+
 #: Every discriminator the windowed meters bind, beside the tenant and the
 #: window. Constant per deployment, so they are assembled once here rather
 #: than threaded through each call site.
-_DISCRIMINATORS: Final[dict[str, str]] = {
+_DISCRIMINATORS: Final[dict[str, Any]] = {
     "auto_triage_prefix": AUTO_TRIAGE_PREFIX,
-    "deterministic_run": DETERMINISTIC_RUN,
     "automatic_tier": AUTOMATIC_TIER,
     "executed_status": EXECUTED_STATUS,
+    "model_runs": list(MODEL_RUNS),
+    "non_model_runs": list(NON_MODEL_RUNS),
 }
 
 
@@ -441,6 +466,7 @@ def _statement(sql: str) -> Any:
     """A ``text()`` clause with every parameter it uses explicitly typed."""
     clause = text(sql)
     present = [bindparam(name, type_=kind) for name, kind in _BIND_TYPES.items() if f":{name}" in sql]
+    present += [bindparam(name, expanding=True) for name in _EXPANDING if f":{name}" in sql]
     return clause.bindparams(*present) if present else clause
 
 

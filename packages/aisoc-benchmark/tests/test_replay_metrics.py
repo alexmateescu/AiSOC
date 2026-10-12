@@ -392,3 +392,58 @@ def test_the_latency_fields_named_for_the_json_export_exist_on_the_score() -> No
 
     for field in LATENCY_FIELDS:
         assert field in score
+
+
+# --------------------------------------------------------------------------
+# Which model answered, and the two different ways of not knowing
+#
+# Depth plan 1.4. `models` is read off a LiteLLM response header, so a run
+# that talked straight to a provider leaves it empty while placing every
+# call. The renderer used to print "none, no model call was placed" for that
+# state, which is a false statement about the one fact that decides whether
+# the rest of the report means anything: triage answers from its
+# deterministic fallback when a provider is unreachable, so a run that
+# measured nothing otherwise looks entirely normal.
+# --------------------------------------------------------------------------
+
+
+def _with_calls(row: dict[str, Any], calls: int, models: list[str] | None = None) -> dict[str, Any]:
+    row["llm_calls"] = calls
+    row["resolved_models"] = models or []
+    return row
+
+
+def test_calls_with_no_gateway_attribution_do_not_read_as_no_calls() -> None:
+    rows = [_with_calls(d, 1) for d in _corpus(MIN_MALICIOUS_FOR_HEADLINE, 10)]
+    score = score_replay(rows)
+
+    assert score.llm_calls == len(rows)
+    assert score.models == []
+
+    report = format_replay_report(score)
+    assert "none, no model call was placed" not in report
+    assert f"{len(rows)} call(s) placed" in report
+
+
+def test_a_run_that_placed_no_call_still_says_so() -> None:
+    rows = [_with_calls(d, 0) for d in _corpus(MIN_MALICIOUS_FOR_HEADLINE, 10)]
+    score = score_replay(rows)
+
+    assert score.llm_calls == 0
+    assert "none, no model call was placed" in format_replay_report(score)
+
+
+def test_a_named_model_is_reported_as_itself() -> None:
+    rows = [_with_calls(d, 1, ["ollama/llama3.1:8b"]) for d in _corpus(MIN_MALICIOUS_FOR_HEADLINE, 10)]
+    report = format_replay_report(score_replay(rows))
+
+    assert "ollama/llama3.1:8b" in report
+    assert "not attributed" not in report
+
+
+def test_the_call_count_is_published_beside_the_models() -> None:
+    """A reader must not have to infer "this measured nothing" from an absence."""
+    rows = [_with_calls(d, 2) for d in _corpus(MIN_MALICIOUS_FOR_HEADLINE, 10)]
+    report = format_replay_report(score_replay(rows))
+
+    assert f"- Model calls placed: {2 * len(rows)}" in report

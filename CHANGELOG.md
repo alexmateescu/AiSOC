@@ -7,6 +7,245 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### BREAKING
+
+- **`PATCH /api/v1/alerts/{id}` now refuses a field it cannot apply.** The
+  request model set no `extra=`, so pydantic v2's default `extra="ignore"`
+  dropped anything outside `status`, `priority`, `tags`, `assignee` and
+  `case_id` and still answered **200** with the unchanged row — a success
+  response for a write that did not happen (#1280). The dropped fields were
+  not nonsense: `disposition`, `severity`, `confidence` and `snoozed_until`
+  are all real `alerts` columns and three of them are writable elsewhere,
+  which is why callers sent them. A caller closing an alert with a
+  disposition got a 200 and no disposition.
+
+  The endpoint now answers **422**, naming the field *and* the route that
+  does apply it — `POST /feedback/alert-override` for a disposition,
+  `POST /alerts/{id}/escalate` for severity, `POST /alerts/{id}/snooze` for
+  a snooze. The accepted surface is unchanged, including the `assignee`
+  alias the queue releases alerts with; only previously-ignored fields are
+  affected. The published spec gains `additionalProperties: false` on
+  `AlertUpdateRequest`, and `alertsApi.update` in the console is typed to
+  the five fields rather than `Partial<Alert>`, so a rejected call now fails
+  to compile instead of failing at runtime.
+
+### Fixed
+
+- **A fix pass closed the gap between what the enterprise-identity surfaces
+  claimed and what they did.** Six items, each reproduced before it was
+  fixed. **White-label** reached the surfaces the docs listed: both report
+  workers resolve branding (and neither could store an artefact on real
+  Postgres at all — a status-vocabulary mismatch the test double could not
+  show), `send_approval_email` gained the caller it had never had, and the
+  Slack and Teams prompts carry the tenant's product name through a
+  read-only lookup in `services/actions`. Two surfaces were **narrowed
+  rather than built**, with the reason recorded: the sign-in page resolves
+  branding from a credential it does not yet have, and nothing maps a
+  hostname to an organisation, so baking one name in would be wrong for
+  every organisation but one *while looking configured*.
+
+  **Usage metering** counts the path that answered rather than a column
+  both paths write — a deployment with no model had been reporting 100% AI
+  triage — and now classifies all four tiers the worker stamps, not just
+  the deterministic one, with an AST pin that fails on any tier no meter
+  classifies. **SCIM** gained PATCH, group membership and deprovisioning
+  against live Postgres through the real app, and the console
+  token-minting the documentation had promised.
+
+  **The maturity table's evidence was audited and the gate that graded it
+  was wrong.** One row covered three capabilities — SCIM, white-label and
+  metering — citing a single SCIM test, and the gate reported OK on it for
+  four releases, because it matches a row on a prefix and the first
+  capability's evidence was real. Three rows now, three live suites, and
+  metering's cited evidence had been wrong as well as missing: it runs on
+  ClickHouse, not Postgres. `bundles_several_capabilities()` refuses the
+  shape, distinguishing a list from a subordinate clause, with a self-test
+  asserting both directions.
+
+- **Two gates read the shell as if it were pytest's argument list.**
+  `check_ci_install_parity` treated the `tee` target in
+  `pytest … 2>&1 | tee /tmp/wl.txt` as a directory argument, concluding a
+  job that named one file ran a whole service suite and demanding its
+  entire dependency set — thirteen findings from one `tee`. Arguments now
+  stop at the first shell operator, with a redirection consuming its
+  target whether attached or detached. Proven in both directions: a
+  genuine `pytest tests/` still produces all thirteen findings.
+
+- **The copilot stopped inventing investigations, and stopped blaming a
+  missing API key for a model that timed out** (#1275). The template
+  fallback returned one of five rotating paragraphs asserting findings
+  about an estate it had never read — "this IP was seen in 3 other alerts",
+  "the attacker dwell time appears short (< 2 hours)" — and ignored the
+  question entirely, so a ransomware alert came back described as
+  "credential-access activity ... LOLBin pattern". That text is gone. The
+  two fallback conditions are also now distinguished: "no model is
+  configured" and "the configured model did not answer" used to produce one
+  message ending "Configure an LLM key", which is the wrong instruction on a
+  deployment running the bundled local model, where the usual cause is
+  contention with the auto-triage backlog. `CopilotChatResponse` carries an
+  additive `template_reason`; `source` is unchanged.
+- **Auto-triage records the prompt behind its verdict** (#1276). The path
+  that handles every fused alert wrote a verdict and nothing to check it
+  against: its hardcoded `INSERT` named neither `input_hash` nor
+  `output_hash`, `duration_ms` was the literal `0`, and no prompt was kept
+  anywhere — so the most common AI decision in the platform was the one that
+  could not be replayed, while `aisoc_explain_step` is documented as
+  returning "the prompt, response, and tools used". The model call is now a
+  `llm_call` event at seq 0 carrying both hashes and its measured duration,
+  with the literal prompt and response attached to the verdict event as
+  artifacts, which is what `/investigations/{run}/explain` inlines.
+  `graph_step` rows carry a measured duration instead of a hardcoded zero.
+- **The MCP `aisoc_run_hunt` tool works on a default install** (#1274). It
+  declared `tenant_id: z.string().uuid()`, and zod 4 enforces RFC 4122
+  version and variant bits that `00000000-0000-0000-0000-000000000001` —
+  the tenant every `make up` creates — does not set, so the tool was
+  uncallable on a stock deployment. The parameter is removed rather than
+  loosened: the tenant comes from the authenticated principal, and the API
+  handler was already dropping the field, so the isolation had been an
+  accident of schema strictness rather than a control.
+
+### Fixed
+
+- **Seven shipped Okta identity rules can fire for the first time** (#1279).
+  Okta carries its result inside an `outcome` *object*, and
+  `OktaConnector.normalize()` read `outcome["result"]` only to pick a
+  severity before discarding it. The detection engine flattens `raw_event`
+  exactly one level, so the matcher saw `outcome` as
+  `{"result": "FAILURE", ...}` and compared a dict to the string
+  `"FAILURE"` — `wd-brute-force-login` and `wd-okta-password-spray` could
+  never match a failed Okta login, and four native identity rules clausing
+  on `SUCCESS` were equally unreachable. That is why a default install
+  reads as having no identity detections rather than unreachable ones.
+  Fixed in the connector, following the Windows `CommandLine`/`Image`
+  precedent: the matcher and both engines are byte-identical, so the blast
+  radius is one connector and is provable by replay. The vendor object is
+  still preserved verbatim under `raw_event`.
+
+- **A threat-intel batch that stored correctly no longer reports zero**
+  (#1278). `ingest_iocs` returned `indexed`, which was the OpenSearch
+  bulk-index count and nothing else. OpenSearch is a `full`-profile store
+  and `threatintel` runs in CORE, so on a stock install the call raises,
+  `indexed` keeps its `0` initialiser, and the Qdrant write on the next
+  line succeeds — printing `indexed: 0` for ~1,700 CISA KEV entries that
+  landed fine. Each sink now reports itself and `None` means "unreachable"
+  rather than "stored nothing". Two false claims in the tree are corrected
+  alongside: `ioc_match.py` asserted CORE's KEV feed fills
+  `threat_intel_iocs` (it has no Postgres leg at all), and
+  `vuln_promotion_sql.py` named a "093 KEV seed worker" that does not
+  exist. `/threat-intel/iocs` and `/feeds` now state which store they read,
+  so an empty response is distinguishable from a broken feed.
+- **The autonomy settings page announced an autopilot posture no deployment
+  has** ([#1243](https://github.com/beenuar/AiSOC/issues/1243)). On a fresh
+  install, Settings → Autonomy guardrails rendered **"Autopilot · 7 high-blast
+  actions auto-execute"** with ACTIONS 19 / AUTO-EXEC 19. None of it was true,
+  and the two halves of why are worth separating.
+
+  *It was a display defect, not a posture defect.* The console decided an
+  action auto-executed from the confidence threshold beside it —
+  `thresholds.auto < 1` in `AutonomyScorecard.tsx` — and the highest threshold
+  in the shipped table is `0.95`, so all nineteen qualified and the seven
+  high- and critical-blast rows flipped the badge. What actually gates a
+  response verb is the tenant's L0–L4 maturity tier and the verb's capability
+  contract, both in `services/actions`. The deployment default is **L1**,
+  which auto-executes nothing above a read, and every containment verb
+  declares `analyst` approval — so the dispatcher queued all seven, exactly as
+  `README.md` says it does. A security product telling an operator their
+  estate is unattended when it is not is the defect, whichever direction the
+  error runs.
+
+  *The table the page edits has no production reader.* `aisoc_autonomy_thresholds`
+  is read by `services/agents/app/policy/guardrails.py`, which nothing on a
+  production path imports. The page now says so, rather than leaving a column
+  of editable sliders to imply otherwise.
+
+  `GET /api/v1/autonomy-policy` now returns an `effective` block (the resolved
+  tier, where it came from, what it may execute without a human, and which
+  verbs actually do) plus a per-action verdict. Those verdicts come from
+  `evaluate_contract` — the same function both dispatch doors call — reached
+  through a byte-identical mirror at
+  `services/api/app/_vendor/action_contracts/`, with
+  `scripts/sync_vendored_action_contracts.py --check` wired into CI. A second
+  implementation would drift, and the drift is the bug.
+
+  Three smaller things fall out of it. `delete_object` is rendered as **no
+  executor** rather than as a critical-blast verb running unattended: it is not
+  an `ActionType`, has no capability contract and has no executor anywhere in
+  the tree — it was a string in two threshold tables. The card now names the
+  tier the badge was derived from, so the claim has a stated basis. And an
+  absent verdict counts as *not* auto-executing, because inferring one from
+  whatever else is on the row is how this happened the first time.
+
+- **Rule management showed 0 rules while the detection engine ran 2,586 of
+  them** ([#1273](https://github.com/beenuar/AiSOC/issues/1273)). `/detection`
+  rendered "No detection rules yet", `GET /api/v1/rules` answered `[]`,
+  `GET /api/v1/detection/rules` answered `{"rules":[],"total":0}` and the MCP
+  tool `aisoc_query_detections` returned nothing — on a stack that was loading
+  741 + 1,770 stateless rules, 73 windowed rules and 2 sequence rules and
+  firing them at the operator. Every one of those readers queries the Postgres
+  `detection_rules` table, and **nothing in production has ever written a
+  built-in row into it**; `tenant_id` is `NOT NULL` in every migration since
+  `001_init.sql`, so the platform-wide row they look for cannot be inserted at
+  all. The rules that were alerting could not be viewed, disabled or tuned.
+
+  Two halves, and fixing either alone leaves the surface broken:
+
+  - **Packaging.** The compiled artefacts live under
+    `services/fusion/app/data/`, and the API image is built with
+    `services/api` as its Docker context — so no handler could read them in a
+    container however it was written. This is the defect discussion #374
+    reported for `marketplace/index.json`, and it takes the same fix:
+    `scripts/sync_packaged_detection_rulesets.py` writes byte-identical copies
+    into `services/api/app/data/detections/` and `--check` holds them
+    identical in both directions, wired into `ci.yml` and
+    `validate-detections.yml`. Three windowed rules are declared in fusion's
+    Python rather than in any artefact — which is why the engine runs 73
+    windowed rules against a file holding 72 — and are exported alongside by
+    reading the declaration with `ast`, so the published corpus counts are
+    untouched.
+  - **Reading and acting.** `app/services/builtin_rules.py` resolves the
+    corpus and `app/services/detection_catalogue.py` merges it with the
+    tenant's stored tuning, which is what both list routes, both detail
+    routes and `/detection/coverage` now read. Built-ins are **not** seeded
+    into Postgres: the artefact stays the single source of truth for what
+    runs. A built-in materialises a tenant row on first write, under a
+    deterministic UUIDv5 of its engine id and carrying
+    `provenance.source_id` — the key `services/fusion/.../tenant_overlay.py`
+    already joins on — so disabling a rule in the console stops the engine
+    firing it within one 30-second overlay reload. Bulk toggle no longer
+    "silently skips built-ins", which on a default install meant skipping
+    every rule in the product.
+
+  Three honesty consequences, each tested: a built-in's compiled body is
+  read-only and the API refuses an edit to it with 409 rather than storing a
+  change the engine will not run; `confidence`, false-positive rate and hit
+  history are absent from the artefacts, so they travel with
+  `confidence_measured: false` and the Confidence and Drift panels report
+  `summary.unscored` instead of averaging a placeholder across 2,586 rules;
+  and an unreadable corpus renders as a failure naming the paths, never as
+  "no detection rules yet".
+
+  Measured before and after on the same tree: `GET /api/v1/detection/rules`
+  `total` 0 → 2,586, equal to the union of ids returned by fusion's own
+  `_load_ruleset()`, `load_window_rules()` and `load_sequence_rules()` run in
+  a subprocess.
+
+### Added
+
+- `services/api/app/models/detection_rule.py` maps the `author` column, which
+  has existed since `001_init.sql` and was mapped by nothing — while fusion's
+  tenant overlay reads it on every reload to say *who* silenced a rule when it
+  explains a suppressed match.
+- `DetectionRuleResponse` gains `source_id`, `confidence_measured`, `tuned`
+  and `engine`; `FrontendDetectionRule` gains `isBuiltin`, `sourceId`,
+  `tuned` and `timestampsFromArtefact`; `DriftSummary` and `ConfidenceSummary`
+  gain `unscored`. All additive.
+- `GET /api/v1/rules` and `GET /api/v1/detection/rules` take `search`,
+  `severity`, `mitre`, `limit` and `offset` (plus `category`, `enabled` and
+  `source` on the latter). The canonical route stays a bare array and reports
+  the matching count in `X-Total-Count`. A page bound exists because the whole
+  library serialised is several megabytes.
+- `apps/docs/docs/console/rule-library.md`.
+
 ## [18.0.0] - 2026-10-09
 
 ### BREAKING

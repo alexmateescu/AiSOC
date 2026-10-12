@@ -79,8 +79,6 @@ right if you connect a source through the API. The spec is
 [`docs/openapi.yaml`](docs/openapi.yaml) — interactive docs are off in this production-class stack.
 Stuck? `make doctor`, which on a host where you have not run `make up` yet says exactly that.
 
-## Try it without connecting anything
-
 Press **Load sample data** in the wizard. Five scenarios take the same ingest path a real connector uses — not inserted rows — so watching them become alerts means watching the pipeline work. They span low to critical on purpose, because a first run where everything is a crisis teaches you nothing about how triage separates signal from routine. They are attributed to `AiSOC` in the source column, refuse to load into a tenant that already has real alerts, and do **not** mark setup complete. ([what each step proves](https://beenuar.github.io/AiSOC/docs/console/getting-started)) For the larger fixed corpus used by demos and evals, `make demo` loads a **synthetic** dataset — the pipeline shape, never a benchmark, a customer or an incident. Every row is `is_synthetic = true` and labelled in the console.
 
 ## Connect real data
@@ -200,7 +198,9 @@ Agents triage alerts and investigate incidents. What they can and cannot do:
 | Event lake + hunting (ClickHouse) | Stable | Live ClickHouse on the shipped DDL, with a negative control | Yes, `full` profile |
 | Retro-hunts when new intel arrives | Stable | Live ClickHouse + Kafka with the flag on, with a negative control | Opt-in, `full` profile |
 | 68-hunt YAML library, compiled against tenant events in the lake | Stable | Live ClickHouse: scheduled hunts read tenant data and refuse to fall back to the fixture; all 114 field names the corpus filters on compile, via a lake column or the stored payload | Yes, `full` profile |
-| SCIM 2.0, white-label, usage metering | Stable | Live Postgres through the real app, with a negative control | Yes |
+| SCIM 2.0 provisioning | Stable | Live Postgres through the real app: PATCH in both providers' dialects, group membership, deprovisioning proved by its consequences, with a negative control | Yes |
+| White-label branding | Stable | Live Postgres: the scheduled report and its covering email carry the organisation's brand, with two negative controls | Yes |
+| Usage metering | Stable | Live ClickHouse on the shipped DDL, with a negative control that makes an unscoped meter fail | Yes |
 | Entity graph (Neo4j) | Stable | Live Neo4j against the production reader, with a negative control | Yes, `full` profile |
 | Governed response actions | Stable | Live socket: permits, refuses, never leaks a refusal, with a negative control | Human-approved only |
 | Alert-triggered playbooks, with a durable approval pause | Stable | Live Postgres: suspend, restart, resume, expiry, with a negative control | Yes — three opt-ins deep, preview by default |

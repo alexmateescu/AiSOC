@@ -59,6 +59,14 @@ SQLA_BIND_RE = re.compile(r"(?<![:\w\x5c]):(\w+)(?!:)")
 # a column, say) is not reported.
 CAST_ADJACENT_RE = re.compile(r"(?<![:\w\\]):(\w+)::")
 
+# A bind parameter tested directly for NULL: `:name IS NULL`, or the negated
+# form. Postgres has nothing to infer the parameter's type from, so asyncpg
+# answers `could not determine data type of parameter $N` — and only when the
+# value bound is actually `None`, which is why this survives every test that
+# supplies a value. A `CAST(:name AS TEXT) IS NULL` is already typed and is
+# not matched.
+UNTYPED_NULL_TEST_RE = re.compile(r"(?<![:\w\\]):(\w+)\s+IS\s+(?:NOT\s+)?NULL", re.IGNORECASE)
+
 # The historical prototype subtree is reference-only and is `paths-ignore`d by
 # CodeQL for the same reason.
 SKIP_PREFIXES = ("plans/",)
@@ -112,7 +120,14 @@ def _is_text_call(node: ast.Call) -> bool:
 
 
 def violations(source: str, rel: str) -> list[str]:
-    """Report every `:name::type` inside a `text()` statement in ``source``."""
+    """Report every bind parameter inside a `text()` that needs a cast.
+
+    Two signatures, one family and one fix. `:name::type` declares a
+    different, shorter parameter name and raises on `.bindparams()`;
+    `:name IS NULL` declares the right name and raises on the connection,
+    but only when the value bound is `None`. Both are written
+    `CAST(:name AS <type>)`.
+    """
     try:
         tree = ast.parse(source)
     except SyntaxError as exc:
@@ -137,6 +152,13 @@ def violations(source: str, rel: str) -> list[str]:
             found.append(
                 f"{rel}:{node.lineno}: `:{intended}::` declares `{truncated}`, so `.bindparams({intended}=...)` raises. "
                 f"Write `CAST(:{intended} AS <type>)`."
+            )
+        for match in UNTYPED_NULL_TEST_RE.finditer(statement):
+            name = match.group(1)
+            found.append(
+                f"{rel}:{node.lineno}: `:{name} IS NULL` gives Postgres no type to infer, so asyncpg raises "
+                f"`could not determine data type` whenever `{name}` is bound to None — the branch a test that "
+                f"always supplies a value never reaches. Write `CAST(:{name} AS <type>) IS NULL`."
             )
     return found
 
@@ -166,13 +188,16 @@ def main() -> int:
         problems.extend(violations(source, str(path.relative_to(root))))
 
     if problems:
-        print("A bind parameter is followed by a `::` cast, so SQLAlchemy declares a different name:\n", file=sys.stderr)
+        print("A bind parameter inside a text() statement needs an explicit cast:\n", file=sys.stderr)
         for problem in problems:
             print(f"  {problem}", file=sys.stderr)
-        print(f"\n{len(problems)} statement(s) would raise before reaching a connection.", file=sys.stderr)
+        print(f"\n{len(problems)} statement(s) would raise rather than run.", file=sys.stderr)
         return 1
 
-    print(f"OK: {len(files)} tracked Python file(s) scanned ({len(services)} under services/), no `:name::type` inside a text() statement")
+    print(
+        f"OK: {len(files)} tracked Python file(s) scanned ({len(services)} under services/), "
+        "no `:name::type` and no untyped `:name IS NULL` inside a text() statement"
+    )
     return 0
 
 
@@ -181,6 +206,16 @@ _BROKEN = 'q = text("INSERT INTO t (a, b) VALUES (:payload::jsonb, :other)").bin
 _NOT_SQL = 'if ":iam::" in resource_id and ":policy/" in resource_id:\n    kind = "policy"'
 _CONCAT = 'q = text("SELECT * FROM t" " WHERE k = ANY(:kinds::text[])")'
 
+# The second signature. `_NULL_BROKEN` is the exact statement depth 8.1
+# found in `resolve_saml_connection`; `_NULL_CLEAN` is its fix. The
+# `NOT NULL` case is here because the same inference failure applies, and
+# `_NULL_COLUMN` is the shape that must keep passing — a *column* tested
+# for NULL is ordinary SQL and carries no parameter at all.
+_NULL_BROKEN = 'q = text("SELECT id FROM c WHERE (:i IS NULL OR issuer = :i)").bindparams(i=issuer)'
+_NULL_CLEAN = 'q = text("SELECT id FROM c WHERE (CAST(:i AS TEXT) IS NULL OR issuer = CAST(:i AS TEXT))")'
+_NULL_NEGATED = 'q = text("SELECT id FROM c WHERE :since IS NOT NULL")'
+_NULL_COLUMN = 'q = text("SELECT id FROM c WHERE deleted_at IS NULL AND issuer = :i")'
+
 
 def _rule_self_test() -> list[tuple[str, bool]]:
     return [
@@ -188,6 +223,10 @@ def _rule_self_test() -> list[tuple[str, bool]]:
         ("an injected `:payload::jsonb` is reported", any("payloa" in v for v in violations(_BROKEN, "f.py"))),
         ("an ARN literal outside a text() call is not reported", not violations(_NOT_SQL, "f.py")),
         ("a `::` cast in a concatenated statement is reported", any(":kinds::" in v for v in violations(_CONCAT, "f.py"))),
+        ("an untyped `:i IS NULL` is reported", any(":i IS NULL" in v for v in violations(_NULL_BROKEN, "f.py"))),
+        ("`CAST(:i AS TEXT) IS NULL` is not reported", not violations(_NULL_CLEAN, "f.py")),
+        ("an untyped `:since IS NOT NULL` is reported", any(":since IS NULL" in v for v in violations(_NULL_NEGATED, "f.py"))),
+        ("a column tested for NULL is not reported", not violations(_NULL_COLUMN, "f.py")),
     ]
 
 
