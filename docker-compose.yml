@@ -1223,6 +1223,10 @@ services:
       TAXII_URL: ${TAXII_URL:-}
       TAXII_USERNAME: ${TAXII_USERNAME:-}
       TAXII_PASSWORD: ${TAXII_PASSWORD:-}
+      OPENCTI_URL: ${OPENCTI_URL:-}
+      OPENCTI_TOKEN: ${OPENCTI_TOKEN:-}
+      OPENCTI_VERIFY_SSL: ${OPENCTI_VERIFY_SSL:-true}
+      OPENCTI_POLL_INTERVAL: ${OPENCTI_POLL_INTERVAL:-1800}
     networks:
       - aisoc
     restart: unless-stopped
