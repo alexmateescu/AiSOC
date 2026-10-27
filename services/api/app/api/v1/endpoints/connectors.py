@@ -36,6 +36,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import socket
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -71,6 +72,7 @@ from fastapi import APIRouter, Depends, HTTPException, status  # noqa: E402
 from pydantic import BaseModel, Field  # noqa: E402
 from sqlalchemy import select, update  # noqa: E402
 
+from app._vendor.ssrf_guard import SSRFError, validate_outbound_url  # noqa: E402
 from app.api.v1.deps import AuthUser, DBSession, require_permission  # noqa: E402
 from app.api.v1.limits import refuse_if_over_limit  # noqa: E402
 from app.core import connectors_auth  # noqa: E402
@@ -780,6 +782,37 @@ async def list_connectors(
     return [_build_connector_response(c) for c in connectors]
 
 
+def _refuse_internal_destinations(*configs: dict[str, Any] | None) -> None:
+    """Refuse connector config whose URL-shaped values point inside the deployment.
+
+    Registration-time feedback for GHSA-cq4g-g6wp-4m2w. The connectors
+    service enforces the same rule at every construction site (test, resource
+    reads, scheduled polls), so this is the early 422 in the wizard rather
+    than the security boundary — but a destination that can never be polled
+    should be refused before it is vault-encrypted and stored. Matches on the
+    value's shape, not the key name, for the same reason the connectors-side
+    helper does: ``base_url`` is one of a dozen spellings. A hostname that
+    merely fails to resolve passes through — the connector's own "DNS lookup
+    failed" is the right wizard message — while metadata, loopback and
+    private ranges (without ``AISOC_SSRF_ALLOW_PRIVATE``) are refused.
+    """
+    for config in configs:
+        for field_name, value in (config or {}).items():
+            items = value if isinstance(value, list) else [value]
+            for item in items:
+                if not isinstance(item, str) or not item.startswith(("http://", "https://")):
+                    continue
+                try:
+                    validate_outbound_url(item)
+                except SSRFError as exc:
+                    if isinstance(exc.__cause__, socket.gaierror):
+                        continue
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail=f"{field_name}: destination refused: {exc}",
+                    ) from exc
+
+
 @router.post("", response_model=ConnectorResponse, status_code=status.HTTP_201_CREATED)
 async def create_connector(
     request: CreateConnectorRequest,
@@ -798,6 +831,12 @@ async def create_connector(
     # row exists is not a ceiling, and the vault call below is the expensive
     # part of this handler.
     await refuse_if_over_limit(db, current_user.tenant_id, "connectors")
+
+    # Before encryption and storage: a destination inside the deployment can
+    # never be polled (the connectors service refuses it at every
+    # construction site), so saving it would only manufacture a permanently
+    # unhealthy instance (GHSA-cq4g-g6wp-4m2w).
+    _refuse_internal_destinations(request.auth_config, request.connector_config)
 
     catalog_entry = await _validate_connector_type(request.connector_type, current_user.tenant_id)
     category = request.category or catalog_entry.get("category") or "uncategorized"
@@ -868,6 +907,10 @@ async def update_connector(
     connector = result.scalar_one_or_none()
     if connector is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Connector not found")
+
+    # Same rule as create: a saved destination edited to point inside the
+    # deployment is the update-model half of GHSA-cq4g-g6wp-4m2w.
+    _refuse_internal_destinations(request.auth_config, request.connector_config)
 
     updates: dict[str, Any] = {}
     for field in ("name", "is_enabled", "auth_config", "connector_config", "tags"):

@@ -67,6 +67,39 @@ ONE_SHOT: frozenset[str] = frozenset({"ollama-pull"})
 #: number. Deliberately a list of exact sites rather than a search for any
 #: integer near the word "services": a gate that guesses which numbers are
 #: claims would either miss the one that matters or flag prose forever.
+# Prose in this repository writes small counts as words as often as digits
+# ("the sixteen CORE containers"), and a gate that could only read digits
+# could not watch those sentences at all — which is how
+# `apps/docs/docs/installation.md` sat at "fourteen" while every registered
+# digit site was correct. The range covers the profile counts plus headroom;
+# anything outside it is reported rather than silently skipped.
+_NUMBER_WORDS: dict[str, int] = {
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+    "thirteen": 13,
+    "fourteen": 14,
+    "fifteen": 15,
+    "sixteen": 16,
+    "seventeen": 17,
+    "eighteen": 18,
+    "nineteen": 19,
+    "twenty": 20,
+    "twenty-one": 21,
+    "twenty-two": 22,
+    "twenty-three": 23,
+    "twenty-four": 24,
+}
+
+
+def _as_count(raw: str) -> int | None:
+    """A captured claim as an integer, whether written in digits or words."""
+    text = raw.strip().lower()
+    if text.isdigit():
+        return int(text)
+    return _NUMBER_WORDS.get(text)
+
+
 CLAIM_SITES: tuple[tuple[str, str, str], ...] = (
     # Three figures that had drifted to 10, fifteen and fifteen against a
     # compose file supporting neither. Registered rather than merely
@@ -78,6 +111,17 @@ CLAIM_SITES: tuple[tuple[str, str, str], ...] = (
     ("AGENTS.md", "core", r"CORE profile: (\d+) long-running services"),
     ("AGENTS.md", "prod:full", r"adds the rest \((\d+) services"),
     ("install.sh", "core", r"Starting the (\d+)-service CORE stack"),
+    # The installation page's Requirements table, where the memory figure is
+    # justified *by* the container count ("steady-state RSS across the N CORE
+    # containers"). It read "fourteen" for as long as connectors and actions
+    # had been in CORE: written as a word, so neither the digit-based claim
+    # sites nor the unregistered-figure sweep below could see it. This is the
+    # entry that makes the word form watchable.
+    (
+        "apps/docs/docs/installation.md",
+        "core",
+        r"Steady-state RSS across the ([a-z-]+|\d+) CORE containers",
+    ),
     ("apps/docs/docs/deployment/walkthrough.mdx", "core", r"starts the (\d+) CORE services"),
     ("Makefile", "core", r"`missing` on all (\d+) first-party services"),
     # The production deployment page. `prod:full` is a separate figure from
@@ -399,7 +443,12 @@ def scan() -> tuple[dict[str, int], dict[str, set[str]], list[str]]:
                 f"CLAIM_SITES, or it was deleted and the entry is stale."
             )
             continue
-        published = int(found.group(1))
+        published = _as_count(found.group(1))
+        if published is None:
+            errors.append(
+                f"{rel}: matched {found.group(1)!r} for the {profile!r} count, which is neither a number nor a number word this gate knows"
+            )
+            continue
         if published != counts[profile]:
             errors.append(
                 f"{rel}: publishes {published} services for the {profile!r} profile; "

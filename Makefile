@@ -133,7 +133,12 @@ env:
 # process holding the port nor what to do about it. Half the stack is running
 # by then, so the error also arrives after a minute of unrelated output.
 up: env _ports _refresh
-	$(COMPOSE) up -d
+	@# UP_FLAGS is the documented way to pass compose's own flags through
+	@# without a second code path for starting the stack. install.sh's
+	@# --rebuild uses it (`make up UP_FLAGS=--build`), which is how that
+	@# flag reaches compose on the Unix side while install.ps1 appends
+	@# --build to its own invocation. Empty by default.
+	$(COMPOSE) up -d $(UP_FLAGS)
 	@echo ""
 	@echo "Waiting for services to become healthy…"
 	@$(MAKE) --no-print-directory _wait

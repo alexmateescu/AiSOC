@@ -9,10 +9,14 @@ processed an event:
 
 ```bash
 git clone https://github.com/beenuar/AiSOC.git && cd AiSOC
-cp .env.example .env
 make up
 make smoke
 ```
+
+There is deliberately no `cp .env.example .env` step. `make up` creates
+`.env` itself and **generates the fifteen secrets in it** — copying the
+template by hand leaves those empty, and the API refuses to start in
+production on empty secrets.
 
 `make up` starts the CORE stack and finishes by creating an administrator.
 `make smoke` posts one real event to the ingest API and follows it through
@@ -40,10 +44,10 @@ idempotently on Linux, macOS and Windows and then runs Path A for you.
 | Requirement | Minimum | Needed for |
 |---|---|---|
 | Docker + Compose v2 | v2.x | everything |
-| RAM available to Docker | **6.5 GB** (CORE) · 12 GB (`full`) | `make up` · `make up-full` |
-| Free Docker disk | **~18 GB** | `make up` |
-| `bash` | any | `make up` — its pre-flight port check is a shell script |
-| `python3` | 3.11+ | `make smoke`, `make stats`, the eval harness |
+| RAM available to Docker | **8 GB** (CORE) · 12 GB (`full`) | `make up` · `make up-full` |
+| Free Docker disk | **20 GB** | `make up` |
+| `bash` | any | every script under `scripts/` has a bash shebang |
+| `python3` | 3.9+ | `make up` (`.env` secrets, port resolution), `make smoke`, `make stats`, the eval harness |
 | Node.js | 22 LTS | `install.sh` / `install.ps1`, and building the web console |
 | pnpm | ≥ 8 | as above |
 | Go | 1.25+ | only if you are hacking on the Go services or plugins |
@@ -51,11 +55,17 @@ idempotently on Linux, macOS and Windows and then runs Path A for you.
 Three of those are easy to miss, because nothing names them until the command
 that needs them fails:
 
-- **`bash`.** `make up` runs `scripts/doctor.sh --ports-only` before it calls
-  compose, so a port conflict is reported against the process holding the
-  port rather than as a `Bind for 0.0.0.0:5432 failed` against whichever
-  container lost the race. It is a hard gate: no bash, no `make up`.
-- **`python3` on the host**, not just in the containers. `make smoke` runs
+- **`bash`.** Every script `make up` reaches for has a bash shebang. It is a
+  hard gate: no bash, no `make up`.
+- **A port already in use does not stop the install.** `make up` runs
+  `scripts/resolve_port_conflicts.py` before it calls compose, which
+  *republishes* AiSOC's side of any taken port into
+  `docker-compose.ports.yml` and names what held the old one — rather than
+  leaving you a `Bind for 0.0.0.0:5432 failed` against whichever container
+  lost the race. Only the published side moves; traffic inside the compose
+  network is unaffected.
+- **`python3` on the host**, not just in the containers. It creates `.env`
+  and generates its secrets, resolves those ports, and `make smoke` runs
   `tests/e2e/golden_pipeline/run_golden_pipeline.py` on your machine, against
   the stack's published ports. Without it you can start AiSOC but you cannot
   prove it works.
@@ -75,37 +85,43 @@ Windows has no `make`. `install.ps1` runs the same steps natively — see
 ```bash
 git clone https://github.com/beenuar/AiSOC.git
 cd AiSOC
-cp .env.example .env
 ```
 
-`.env.example` ships a working `POSTGRES_PASSWORD` (`aisoc_dev_secret`), so
-the database comes up without you touching anything.
+That is the whole of it — there is no file to copy and nothing to edit.
+`make up` runs `scripts/ensure_env.py`, which creates `.env` from the
+template and fills its **fifteen** generated secrets with real random
+values: the credential vault key, the session signing key, five
+service-to-service credentials, the realtime and metrics tokens, and four
+datastore passwords. `make env` does only that step, if you want to look
+before you start.
 
-**It does not ship a usable `AISOC_CREDENTIAL_KEY`.** The line you copy is:
+The history here is the reason the step is gone rather than merely
+optional. `.env.example` used to ship:
 
 ```bash
 AISOC_CREDENTIAL_KEY=replace-me-with-a-freshly-generated-fernet-key
 ```
 
-That placeholder is not a Fernet key, and it is worse than leaving the
+That placeholder was not a Fernet key, and it was worse than leaving the
 variable empty: an unset key makes the API generate an ephemeral one and warn,
 while a malformed key makes the credential vault raise, so the first request
-that touches a connector secret returns HTTP 500. Generate a real one and
-paste it in before you go near the Connectors page:
+that touches a connector secret returned HTTP 500 — minutes after the copy,
+with nothing connecting the two. The template now ships these **empty** and
+the generator fills them, so following the documented path and skipping it
+both end up with a working vault. If you ever need to mint one by hand:
 
 ```bash
 python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
-Nothing in Path A needs it — the pipeline proof below does not touch the
-vault — so you can also come back to this when you connect your first source.
 Full threat model and rotation procedure:
 [Operations: Credentials](./operations/credentials).
 
-AI triage additionally needs a provider key (`OPENAI_API_KEY` or
-`ANTHROPIC_API_KEY`). Without one the stack still boots and every alert is
-triaged by the deterministic path, and the console labels it as such —
-nothing pretends the AI ran.
+AI triage needs no key either: the stack ships a local model and runs triage
+with no credentials. Pointing it at a hosted provider (`OPENAI_API_KEY` or
+`ANTHROPIC_API_KEY`) is an upgrade, not a prerequisite — and when no model is
+reachable at all, every alert is triaged by the deterministic path and the
+console labels it as such. Nothing pretends the AI ran.
 
 ### 2. Start the stack
 
@@ -120,8 +136,12 @@ it, so `make up` returning 0 means the services are actually up.
 
 ```
   Console:  http://localhost:3000
-  API:      http://localhost:8000/api/docs
+  API:      http://localhost:8000  (spec: docs/openapi.yaml; interactive
+            docs are off in this production-class stack)
 ```
+
+If a port was taken, the console address printed here is the one AiSOC
+moved to — use what the command prints rather than the line above.
 
 ### 3. Prove the pipeline works
 
@@ -426,15 +446,16 @@ The same services as Path A and B, driven through `aisoc <verb>` instead of
 ```bash
 git clone https://github.com/beenuar/AiSOC.git
 cd AiSOC
-cp .env.example .env
+make env      # creates .env and generates its fifteen secrets
 
 python -m venv .venv && source .venv/bin/activate
 pip install -e packages/aisoc-cli
 ```
 
-Set `AISOC_CREDENTIAL_KEY` to a generated Fernet key as described in
-[Clone and configure](#1-clone-and-configure), and add at least one AI
-provider key (`OPENAI_API_KEY` or `ANTHROPIC_API_KEY`) if you want AI triage.
+`make env` is the same step `make up` runs, so if you have already started
+the stack there is nothing to do here. Add a hosted provider key
+(`OPENAI_API_KEY` or `ANTHROPIC_API_KEY`) only if you want triage to run
+against one instead of the bundled local model.
 
 Confirm the CLI is on PATH:
 

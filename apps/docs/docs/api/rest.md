@@ -43,13 +43,18 @@ API keys are created via `POST /api/v1/api-keys` and can be scoped to specific p
 
 ## Interactive Docs
 
-When running locally, interactive Swagger UI is available at:
+**`make up` does not serve them, and that is deliberate.** It starts a
+production-class stack with the interactive docs disabled, so
+`/api/docs` there answers 404 — pointing you at it would be pointing you at
+nothing. Read the committed spec instead:
+[`docs/openapi.yaml`](https://github.com/beenuar/AiSOC/blob/main/docs/openapi.yaml).
 
-- **Swagger UI**: [http://localhost:8000/api/docs](http://localhost:8000/api/docs)
-- **ReDoc**: [http://localhost:8000/api/redoc](http://localhost:8000/api/redoc)
-- **OpenAPI JSON**: [http://localhost:8000/api/openapi.json](http://localhost:8000/api/openapi.json)
+They are served by the development overlay (`make up-dev`), which is the
+only documented local path that enables them:
 
-The full spec is also committed at [`docs/openapi.yaml`](https://github.com/beenuar/AiSOC/blob/main/docs/openapi.yaml).
+- **Swagger UI**: `http://localhost:8000/api/docs`
+- **ReDoc**: `http://localhost:8000/api/redoc`
+- **OpenAPI JSON**: `http://localhost:8000/api/openapi.json`
 
 ## Endpoint Groups
 
@@ -188,6 +193,24 @@ Re-keying on `(tenant_id, natural_key)` is the proper fix and needs a migration.
 | `POST` | `/playbooks/{id}/execute` | Execute a playbook |
 | `GET` | `/playbooks/{id}/runs` | Execution history |
 | `POST` | `/actions/dry-run` | Simulate an action |
+
+Every `GET` route in the cases family requires the **`cases:read`**
+permission (v20.0.0, [GHSA-wwq7-2xvh-qgq6](https://github.com/beenuar/AiSOC/security/advisories/GHSA-wwq7-2xvh-qgq6)).
+Role-based users are unaffected — every shipped role that can see the console
+case list already carries it — but an **API key** minted with only
+`alerts:read` can no longer list cases or read their comments, timeline and
+evidence chain. If a narrowly-scoped integration key breaks on a cases `GET`
+after upgrading, add `cases:read` to its scopes.
+
+**Breaking in v20.0.0:** `POST /cases/{id}/comments` no longer accepts
+`is_system` in the request body
+([GHSA-9mc5-hqgh-j6wf](https://github.com/beenuar/AiSOC/security/advisories/GHSA-9mc5-hqgh-j6wf)).
+The field let any `cases:write` holder author a comment the console renders as
+an unattributed "System note", so it could not be preserved — system notes are
+written by the server itself. The server **ignores** the field rather than
+refusing the request, so an existing client that still sends it keeps
+succeeding; only generated SDK request types lose the property. Responses
+still carry `is_system`, now always server-assigned.
 
 `PATCH` is **forward-only**. The case state machine
 (`new → triaged → investigating → contained → resolved → closed`) has no

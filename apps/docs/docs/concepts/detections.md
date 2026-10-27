@@ -27,7 +27,7 @@ coverage page all do now, and it is why they agree.
 
 :::
 
-The library holds **6,991 ATT&CK-mapped rules on disk, of which 2,511 are
+The library holds **7,015 ATT&CK-mapped rules on disk, of which 2,535 are
 executable** — the count the detection engine actually loads. Those two numbers
 travel together everywhere, because a library figure presented on its own reads
 as coverage and is not.

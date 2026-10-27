@@ -61,7 +61,6 @@ AiSOC/
 │   ├── fly/              # Fly.io machines + deploy script (one recipe among several;
 │   │                     # no hosted demo is operated from here)
 │   ├── railway/          # Railway template (railway.toml)
-│   ├── render/           # Render blueprint (render.yaml at repo root)
 │   ├── terraform/        # AWS (VPC, EKS, RDS, ElastiCache, MSK) + GCP + Azure skeletons
 │   └── helm/             # Kubernetes Helm chart (HPA, PDB, Ingress per service)
 ├── docs/

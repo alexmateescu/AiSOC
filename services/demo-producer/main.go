@@ -236,6 +236,7 @@ type stats struct {
 	rejected  atomic.Int64 // events ingest parsed and refused
 	refused   atomic.Int64 // events in batches answered with a non-2xx
 	transport atomic.Int64 // events in batches that never got an answer
+	bodyBytes atomic.Int64 // request-body bytes actually marshalled and sent
 
 	mu       sync.Mutex
 	statuses map[int]int64
@@ -277,6 +278,11 @@ func postBatch(ctx context.Context, client *http.Client, opts options, payload i
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)
 	}
+	// Counted at the marshal, not estimated afterwards: `payload_bytes` is
+	// required reproduction context for the published ingest rate
+	// (scripts/perf/throughput_claims.py), and a size written down anywhere
+	// else would be a guess that looks like a measurement.
+	st.bodyBytes.Add(int64(len(body)))
 	req, err := http.NewRequestWithContext(ctx, "POST", opts.ingestURL, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("%w for %q: %v", errFatalRequest, opts.ingestURL, err)
@@ -581,6 +587,12 @@ type loadSummary struct {
 	StatusCounts    map[string]int64 `json:"http_status_counts"`
 	SeqLow          int64            `json:"seq_low"`
 	SeqHigh         int64            `json:"seq_high"`
+	// The load's byte shape, so a published events/s figure carries the
+	// payload size it was measured at. Total request-body bytes sent, and
+	// the per-event mean over attempted events (batch envelope included,
+	// deliberately: it is what the wire carried).
+	PayloadBytesTotal    int64   `json:"payload_bytes_total"`
+	PayloadBytesPerEvent float64 `json:"payload_bytes_per_event"`
 }
 
 // runLoad saturates or paces ingest with `total` attributable events and
@@ -685,31 +697,39 @@ func runLoad(ctx context.Context, opts options) loadSummary {
 		high = 0
 	}
 	return loadSummary{
-		RunID:           opts.runID,
-		Mode:            "load",
-		MarkerPrefix:    MarkerPrefix,
-		BenignPrefix:    BenignMarkerPrefix,
-		AlertEvery:      opts.alertEvery,
-		AlertingSent:    alertingSent.Load(),
-		BenignSent:      benignSent.Load(),
-		IngestURL:       opts.ingestURL,
-		Tenant:          opts.tenant,
-		StartedAt:       started.UTC().Format(time.RFC3339Nano),
-		EndedAt:         started.Add(elapsed).UTC().Format(time.RFC3339Nano),
-		WallSeconds:     elapsed.Seconds(),
-		Workers:         opts.workers,
-		BatchSize:       opts.batch,
-		TargetEPS:       opts.targetEPS,
-		Requested:       opts.total,
-		Attempted:       st.attempted.Load(),
-		Accepted:        accepted,
-		Rejected:        st.rejected.Load(),
-		Refused:         st.refused.Load(),
-		TransportErrors: st.transport.Load(),
-		AcceptedEPS:     eps,
-		StatusCounts:    st.statusCounts(),
-		SeqLow:          0,
-		SeqHigh:         high,
+		RunID:             opts.runID,
+		Mode:              "load",
+		MarkerPrefix:      MarkerPrefix,
+		BenignPrefix:      BenignMarkerPrefix,
+		AlertEvery:        opts.alertEvery,
+		AlertingSent:      alertingSent.Load(),
+		BenignSent:        benignSent.Load(),
+		IngestURL:         opts.ingestURL,
+		Tenant:            opts.tenant,
+		StartedAt:         started.UTC().Format(time.RFC3339Nano),
+		EndedAt:           started.Add(elapsed).UTC().Format(time.RFC3339Nano),
+		WallSeconds:       elapsed.Seconds(),
+		Workers:           opts.workers,
+		BatchSize:         opts.batch,
+		TargetEPS:         opts.targetEPS,
+		Requested:         opts.total,
+		Attempted:         st.attempted.Load(),
+		Accepted:          accepted,
+		Rejected:          st.rejected.Load(),
+		Refused:           st.refused.Load(),
+		TransportErrors:   st.transport.Load(),
+		AcceptedEPS:       eps,
+		StatusCounts:      st.statusCounts(),
+		SeqLow:            0,
+		SeqHigh:           high,
+		PayloadBytesTotal: st.bodyBytes.Load(),
+		PayloadBytesPerEvent: func() float64 {
+			attempted := st.attempted.Load()
+			if attempted <= 0 {
+				return 0
+			}
+			return float64(st.bodyBytes.Load()) / float64(attempted)
+		}(),
 	}
 }
 

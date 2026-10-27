@@ -7,6 +7,349 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The Jira connector pulls issues from `GET /rest/api/3/search/jql`. Jira
+  Cloud removed `GET /rest/api/3/search` (it now answers 410 Gone), which left
+  the connector's alert pull failing on every poll. The request already names
+  the fields `normalize()` reads, so the issue shape it receives is unchanged.
+- **The image `stable` channel guard read the registry through a buildx
+  template, and when the runner's buildx stopped resolving it the guard
+  failed open** — the read returned empty with stderr discarded, "empty" was
+  read as "first release", and the v20.0.0 and v20.1.0 publishes each carried
+  image `stable` across the v19 → v20 application major the guard exists to
+  refuse, silently, under green runs. The read now goes through the registry
+  HTTP API (manifest → config blob → version label), exactly as the chart
+  half always did — which is why the chart channel held while the image
+  channel crossed. Three states instead of two: a 404 is the ordinary
+  first-release state and the channel may be taken; a tag that is **present
+  but unreadable blocks the channel** for that release, because refusing is
+  recoverable and a wrong crossing is not; only the deliberate
+  `promote_stable` dispatch may move a blocked channel.
+  `tests/test_release_channel_tags.py` pins both (the blocked-channel test
+  fails against the pre-fix block). `image-channel.yml` is the image half of
+  the chart's repair tool: a dispatch re-points every image's `stable` at a
+  named published release, byte-identical, with before/after evidence per
+  image — and was dispatched to restore the channel to v19.0.0, the recorded
+  owner decision.
+- The nightly reproducible-builds aggregator accepts the lock-only
+  matrix's **designed** skip — its own condition skips it when every
+  service ships an image, which has been true since the last image-less
+  service gained a Dockerfile, and the aggregator had read that intended
+  no-op as "not every service was proved", failing every scheduled run
+  since 2026-10-15 while the push runs stayed green behind their path
+  filters. The skip is accepted exactly when the discovered lock-only set
+  is empty; a skip while lock-only services exist is still lost coverage,
+  and a failed or cancelled leg on either matrix still fails.
+
+### Fixed — a fresh Windows install could not boot, and nothing could see it
+
+- **`install.ps1` now generates `.env`'s secrets instead of copying the
+  template.** `Initialize-EnvFile` was a plain `Copy-Item .env.example .env`;
+  that template ships `ENVIRONMENT=production` with `SECRET_KEY`,
+  `JWT_SECRET`, `METRICS_TOKEN` and `AISOC_CREDENTIAL_KEY` empty, and
+  `enforce_secure_defaults` refuses to start the API in production on exactly
+  those values — so the install ended at "These services are not running:
+  api" with nothing pointing back at the copy. It now runs the same
+  `scripts/ensure_env.py` that `make env` runs, and Python 3 joins Git,
+  Docker, Node and pnpm as a winget-installed prerequisite because three
+  steps of the install are Python programs. `compose-smoke.yml` had already
+  worked around this for itself, with a comment noting that a bare copy "has
+  provisioned an environment no real deployment would boot".
+- **A port already in use no longer stops the install on Windows.**
+  `Test-CorePortsFree` exited 3 and told the operator to edit
+  `docker-compose.yml` by hand, on the two conditions most likely in this
+  audience's environment — an existing Postgres on 5432, an Ollama on 11434 —
+  while `README.md` promised the opposite. It now runs the same
+  `scripts/resolve_port_conflicts.py` that `make up` runs, and every compose
+  call in the installer goes through one helper so a remapped stack is
+  addressed consistently. The closing banner reads the moved console address
+  from `.env` rather than printing a hardcoded `localhost:3000`.
+- `--no-pull` and `--rebuild` in `install.sh` were parsed into an array that
+  nothing read once the demo handoff was removed, so both were accepted and
+  silently ignored while `--help` documented them. They now set
+  `AISOC_PULL_POLICY=never` and `make up UP_FLAGS=--build` respectively, and
+  the script's header describes the flow it actually runs.
+- Both installers linked an issue template that did not exist, under two
+  different names, at the moment a failing install asks for help.
+  `.github/ISSUE_TEMPLATE/installer-failure.yml` now exists and both point
+  at it.
+
+### Changed — one way in, and no on-ramp that cannot prove itself
+
+- **The devcontainer and the sandbox README no longer send people to
+  `pnpm aisoc:demo`.** That compose file has no ingest service, no fusion
+  service and Kafka disabled — its own header says not to use it to evaluate
+  whether AiSOC works — and both installers were rewritten to remove the
+  handoff, but a fresh Codespace's attach banner and the sandbox's "when
+  you're ready for the real stack" line were still pointing at it. Both now
+  say `make up`. A parity-gate check covers all eight on-ramp surfaces at
+  once, exempting blockquotes and `:::caution` admonitions so the warnings
+  that keep evaluators *away* from that stack can stay.
+- **`render.yaml` and `infra/render/` are removed.** The blueprint's header
+  claimed a "Deploy to Render" button in `README.md` that has never existed,
+  and what it deployed was a ~$63/month stack with `AISOC_DISABLE_KAFKA` set
+  on three services and no ingest or fusion at all — a paid one-click path to
+  a populated console that cannot answer whether the pipeline works. Its
+  path filters in `isolation.yml` and its two `.gitleaksignore` exemptions go
+  with it. The Fly, Railway and Coolify recipes are untouched and deploy the
+  same lean shape; they deserve the same scrutiny.
+- The README's quick start now names all four on-ramps — `make up`, the
+  Windows and Unix one-liners, `pip install aisoc-sandbox`, and Codespaces —
+  where previously a Windows reader met only `make up`, a command their OS
+  does not have. Still inside the 250-line cap, paid for by reflowing.
+
+### Fixed — install documentation that described a different product
+
+- `apps/docs/docs/quickstart.md` advertised a machine 1.5 GB smaller than the
+  measured requirement (6.5 GB / ~18 GB / py3.11+ against the measured 8 GB /
+  20 GB / 3.9+), re-introduced the `cp .env.example .env` step the Makefile
+  eliminated, described `.env.example` as shipping secrets it no longer
+  ships, and attributed the port check to a script that does not perform it.
+- `apps/docs/docs/installation.md` said "fourteen CORE containers" (sixteen)
+  and told Windows users to run PowerShell as Administrator, which
+  `install.ps1`'s own guidance contradicts. `.env.example`'s header said
+  "the four generated secrets" (fifteen).
+- Four surfaces still advertised Swagger at `http://localhost:8000/api/docs`,
+  which the production-class stack `make up` starts answers 404 on:
+  `docs/QUICK_INSTALL.md`, `scripts/lab.sh`'s banner, and the `make up`
+  transcripts in `quickstart.md` and `deployment/walkthrough.mdx`.
+  `apps/docs/docs/api/rest.md` now says plainly that `make up` does not serve
+  them and names `make up-dev`, which does.
+- The sandbox README's badge said "not yet published" and its install section
+  said the upload was blocked on credentials, while PyPI has been serving
+  `aisoc-sandbox` 0.1.0; it also claimed the production stack needs an LLM
+  API key, which has not been true since the bundled local model shipped.
+
+### Added — gates, so none of the above drifts back
+
+- `tests/test_installer_parity_gate.py` asserts that both installers generate
+  the `.env` secrets and that `install.ps1` resolves port conflicts and
+  passes the port overlay to every compose call — the two holes that let the
+  Windows breakers ship for as long as they existed. Three existing
+  assertions were matching the installer's `-NoLaunch` *help text* rather
+  than its invocations, so they now read action lines with the output
+  cmdlets removed.
+- `installer-smoke.yml` gains a `windows-latest` job that dot-sources the
+  installer's own `Initialize-EnvFile` and fails if any generated secret
+  comes out empty. The existing Windows jobs run `-Diagnose` only, which
+  makes no changes, and a full install needs Docker Desktop — this needs
+  neither.
+- `scripts/check_profile_service_counts.py` reads number words as well as
+  digits and registers the installation page's requirements table, which is
+  where "fourteen" survived every digit-based check.
+## [20.1.0] - 2026-10-22
+
+### Security
+
+- `@vitest/mocker` moves to 4.1.12 in all three npm lockfiles (root
+  workspaces, `services/realtime`, `services/mcp/cursor-extension`), closing
+  CVE-2026-112949 and CVE-2026-112950 (#1468). The bump rode the Oct-22
+  Dependabot wave rather than waiting for it to be noticed as a security
+  item.
+- The complete 2026-10 Pillow advisory set — published to OSV in waves across
+  the day, 28 CVEs against 12.3.0 at last count, every fix 13.0.0-only
+  (verified per-CVE via OSV) — is recorded against `services/threatintel`'s
+  known fastembed-capped lock with one expiring justification: fastembed
+  ≤ 0.9.0 caps `pillow <13`, the service's only fastembed use is text-only
+  `TextEmbedding`, and all 28 suppressions are re-checked for a lifting
+  release by 2027-01-15. `agents` and `api` already carry the patched 13.0.0
+  and are unaffected.
+
+### Added
+
+- The API answers unauthenticated `GET /api/v1/health` (liveness: the process
+  serves HTTP, nothing else claimed) and `GET /api/v1/health/ready`
+  (readiness: can it do its job, named per dependency) (#1471, part of
+  #1446). `database` is a **block** dependency — without Postgres the status
+  goes 503 and a load balancer should stop sending traffic — while `cache` is
+  **degrade**: Redis loss is reported (`cache: false`) at status 200, because
+  failing readiness over a cache would pull the API out of the balancer to
+  fix a cache. Every probe is hard-capped well inside a prober's budget, so
+  "down and we say so" cannot decay into "down and we say nothing".
+  `services/threatintel`'s `/health` now names its Qdrant leg the same way
+  (`vector_store`, degrade).
+- The chart `stable` channel is guarded by **two version lines, and a
+  dispatchable repair tool exists** (#1469, closing #1440). v20.0.0 — chart
+  7.9.0, not a chart major — carried chart `stable` across an *application*
+  major while every image `stable` tag correctly stayed on v19, because the
+  chart guard read only the chart's own line; the decision now also compares
+  the channel's `appVersion` major, read from the registry, and fails closed
+  when the incoming chart's appVersion cannot be read.
+  `.github/workflows/chart-channel.yml` is the operator decision the guard
+  points at: it re-points `stable` at a named, already-published chart
+  version, byte-identical, in either direction — it was dispatched to roll
+  the channel back to 7.8.0 (appVersion v19.0.0), where it stays until a
+  deliberate promotion. `tests/test_release_channel_tags.py` replays whole
+  release ladders over the lifted decision blocks for both lines.
+
+### Fixed
+
+- **A connector checkpoint no longer advances past events ingest rejected**
+  (#1441, closing #1438; contributed by
+  [meshreyy](https://github.com/meshreyy)). Ingest deliberately reports
+  per-event normalization failures as HTTP 200 with `accepted`/`rejected`
+  counts, so HTTP success alone never proved advancing was safe: a poll whose
+  batch was partially rejected moved the cursor anyway, and the rejected
+  events were lost permanently — a data-loss class, invisible because the
+  poll reported success. The scheduler now persists the staged cursor only
+  when every submitted event was accepted, withholds it otherwise with a
+  warning naming the counts, and re-fetches the page on the next overlapping
+  poll, where the sink deduplicates what was already accepted.
+- The live-agent eval dispatches every incident on **one event loop**, and an
+  incident whose investigation fails outright scores **0 with the reason
+  recorded** (#1472, closing #1466). Per-incident `asyncio.run` left
+  langchain-openai's cached async HTTP client bound to a dead loop, so
+  recon's model call failed on every incident after the first and the agent
+  silently ran its deterministic heuristics — while failed incidents were
+  dropped from the sample, inflating the mean and shrinking the sample below
+  the gate's own size requirement. Failures now participate as 0 in the mean
+  with reasons in the report's `groundedness.zero_scored` block, so the
+  sample always equals the dispatched prefix. The floor was re-derived under
+  the fixed harness and **stays 0.40**, below the lowest fixed-harness run
+  (0.44) with a deliberately thinner margin: one failed investigation costs
+  the mean about 0.05 under zero-fill, so a model failing three or more of
+  ten investigations dips below the floor and reds the job — which is the
+  signal that outcome should produce. The pre-fix runs stay recorded in
+  `live_agent_floor.json` for provenance, labelled as pre-fix.
+- The chaos store-outage legs grade **real behaviour instead of artifacts of
+  their own probe contract** (#1471, part 1 of #1446). The previous shape
+  probed one API URL for all six stores: `/api/v1/health/ready` did not exist
+  (404 → every key "reads None"), the ingest URL pointed at the enrichment
+  service's port, the recovery poll re-read the same 404 forever, and the
+  ClickHouse/Neo4j legs graded containers the `core` profile never started.
+  Each leg now names the readiness surface that owns the store and the
+  dependents the expectation declares; the redis and qdrant legs pass
+  end-to-end. The postgres leg stays red **by design** — fusion and ingest do
+  not yet export the store keys the contract reads — with the finding naming
+  the service; the follow-ups live on #1446, which stays open.
+- The perf harness records the payload bytes the producer actually sent,
+  closing 17 days of scheduled `perf.yml` failures in which
+  `throughput_claims.py --check` required `payload_bytes` as context for
+  `ingest_eps` and nothing had ever written it (#1444).
+- `react-native-screens` is held at the version Expo SDK 54's compatibility
+  table names, and Dependabot is taught the hold so it stops re-proposing the
+  incompatible major (#1443).
+- The monthly adoption snapshot lands on the unprotected `adoption-data`
+  branch, needing no owner credential (#1470, closing #1445): `main` is
+  branch-protected with no bypass actors, so the workflow's direct push
+  failed (GH006) and a `GITHUB_TOKEN` PR can never merge because events that
+  token creates do not trigger the required `pull_request` checks.
+  `docs/adoption/README.md` on `main` is now a pointer; the ledger and its
+  full history live in `snapshot.json` on the data branch.
+- Three CI legs stopped failing for reasons that were never about the code
+  under test: the eval matrix's non-floor leg passes the checker's own
+  deliberate-comparison flag instead of tripping its different-model refusal
+  (#1465); jobs that start PostgreSQL fall back between the two official
+  registries when one throttles (#1434, contributed by
+  [meshreyy](https://github.com/meshreyy)); and the nightly/live suites seed
+  the state the product actually requires — `scripts/ensure_env.py` writes
+  the `.env` the stack reads, and the scheduler live suite admits its stub
+  vendor through the documented `AISOC_SSRF_ALLOW_HOSTS` path rather than a
+  test-only bypass (#1432).
+
+### Changed
+
+- `fastapi` moves to 0.146.0 repo-wide — every one of the 32 declaration
+  sites and all 13 poetry locks in one move, so the version CI tests is the
+  version every image ships (#1473).
+- The Oct-22 Dependabot waves are folded: python (`sqlalchemy` 2.1.6,
+  `strawberry-graphql` 0.336.2, `pydantic-settings` 2.16.1, `langchain-core`
+  1.6.13, `langgraph-sdk` 0.4.8, `tenacity` 9.2.1 across api, actions and
+  agents, #1467) and npm (root workspaces, realtime and the MCP cursor
+  extension, #1468).
+
+## [20.0.0] - 2026-10-21
+
+### BREAKING
+
+- `POST /api/v1/cases/{case_id}/comments` no longer accepts `is_system` in the
+  request body (GHSA-9mc5-hqgh-j6wf). The field let any `cases:write` holder
+  author rows the case summary renders as an unattributed "System note" and the
+  post-mortem drops from the analyst record, so it could not be preserved —
+  system notes are written by the server itself. A client that still sends the
+  field is ignored rather than refused, so existing requests keep succeeding;
+  only generated SDK request types lose the property.
+
+### Security
+
+- Every GET route in `cases.py` now requires `cases:read`, so an API key minted
+  with only `alerts:read` can no longer list cases or read their comments,
+  timeline and evidence chain (GHSA-wwq7-2xvh-qgq6). Role users are unaffected.
+- Outbound webhooks work and are SSRF-hardened (GHSA-898c-wxrw-hx6c): all eight
+  routes open tenant-scoped sessions (registration previously 500ed against the
+  table's row-level security for every tenant), and destinations are validated
+  through the platform SSRF guard at create, update and delivery time.
+- The kill switch can actually be engaged and TAXII collections actually be
+  created: both wrote strict-RLS tables through sessions that never set the
+  tenant, and 500ed on every deployment (siblings of GHSA-898c, found by sweep).
+- The connectors service adopts the platform SSRF guard on every construction
+  path — the stateless test route, resource reads and scheduled polls — so a
+  tenant-controlled `base_url` can no longer reach cloud metadata, loopback or
+  internal services (GHSA-cq4g-g6wp-4m2w). The API refuses the same
+  destinations at connector create/update, before they are encrypted and
+  stored. `AISOC_SSRF_ALLOW_PRIVATE=1` re-admits on-prem SIEMs on private
+  ranges and `AISOC_SSRF_ALLOW_HOSTS` admits exact named hosts; the
+  cloud-metadata blocklist holds regardless of either, and compose delivers
+  both knobs to every service that runs the guard (api, connectors, agents)
+  from one `.env` value — they had shipped reaching only the agents service,
+  so the documented re-admit path changed nothing in the processes that
+  actually refuse the connection.
+- The Oct-21 advisory wave is cleared across every lockfile (#1417): `certifi`
+  ≥ 2026.10.19 (GHSA-6q48-6c7w-9gw2, critical) in all 13 poetry locks,
+  `aiohttp` 3.14.5 in agents/slack-bot/threatintel, `pillow` 13.0.0 in
+  `services/api`, `@modelcontextprotocol/sdk` 1.32.x in `services/mcp`, and
+  `follow-redirects` / `launch-editor` / `vite` 8.3.4 floors in the npm
+  workspaces. `services/agents` then also reached `pillow` 13.0.0 by dropping
+  the unused `fastembed` extra of `qdrant-client` (#1420) — nothing in agents
+  imports PIL or calls the fastembed convenience API. One recorded exception
+  remains: `services/threatintel` genuinely embeds through fastembed, whose
+  every release (≤ 0.9.0) caps `pillow <13`, so its lock stays on 12.3.0 under
+  nine expiring suppressions in `scripts/security_audit_ignores.txt` (text-only
+  embedding input, no PIL import; re-checked for a lifting release until
+  2027-01-15).
+- The semgrep rule packs the scanner ratchet's ceiling was measured with are
+  vendored under `.security/semgrep/` (#1379): the scan reads the committed
+  packs rather than fetching registry heads, `scripts/vendor_semgrep_packs.py
+  --check` verifies them offline, and the ratchet gains a rules-digest arm so
+  the ceiling is bound to the exact pack bytes it was measured against — a
+  registry pack changing under the ceiling now fails instead of silently
+  re-grading the tree.
+
+### Added
+
+- OpenCTI threat-intelligence feed client (#1375, contributed by
+  [alexmateescu](https://github.com/alexmateescu)): an authenticated GraphQL
+  client pages `stixCoreObjects` indicators by `updated_at`, normalises them
+  and extracts IOCs from indicator patterns, wired into the feed scheduler
+  behind `OPENCTI_URL` / `OPENCTI_TOKEN` (disabled by default; fails closed
+  when unconfigured). Validated against a live OpenCTI 7.x platform with the
+  exact request/response pair pinned as fixtures.
+
+### Fixed
+
+- Four connectors preserved a vendor's own top severity instead of collapsing
+  it into `high`: Lacework (#1374), Tines (#1377), Datadog (#1409) and
+  PagerDuty (#1411) now map their native critical tier to `critical`, and
+  Datadog's `emergency` and `alert` levels — which outrank `critical` in its
+  ladder — map to `critical` too (#1427). All four contributed by
+  [meshreyy](https://github.com/meshreyy).
+- The LLM gateway image is pinned to `ghcr.io/berriai/litellm:v1.102.1` in both
+  the root compose file and the Helm chart. Upstream deleted the floating
+  `main-stable` tag those files referenced, so every cold-cache `docker compose
+  up` and fresh Helm install failed with `manifest unknown`; v1.102.1 is the
+  version `main-stable` served when this stack was measured against it.
+
+### Changed
+
+- `fastapi` moves to 0.143.x repo-wide with the open Python bumps folded in
+  (#1419); the thirty mergeable Dependabot bumps of 2026-10-13 land as one
+  integrated tree (#1371); the root npm workspaces (#1423), `services/realtime`
+  (`express` 5.3.0, `pino` 10.4.0, `typescript-eslint` 8.72.0, #1424), the Go
+  services (`go-chi` 5.5.0 in ingest and enrichment, #1425) and the workflow
+  actions plus the mobile screens package (#1426) take their open dependency
+  bumps. The Dependabot queue is at zero.
+
 ## [19.0.0] - 2026-10-12
 
 ### BREAKING

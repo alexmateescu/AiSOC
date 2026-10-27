@@ -2,7 +2,11 @@
 
 This file mirrors what used to live in the "What's new" section of [`README.md`](README.md). The complete, machine-readable inventory (with file paths, env-var diffs, and per-release test counts) lives in [`CHANGELOG.md`](CHANGELOG.md).
 
-> **TL;DR for first-time visitors:** AiSOC is on `v19.0.0`, released 2026-10-12. **The release that finished the depth plan's analyst, collection and governance phases.** Nineteen workstreams landed as one verified tree. A session now has **one producer and three stores** that cannot disagree about which session an event belongs to; a real security **posture is collected and versioned** so a detection reads the posture that was true when an event happened; behavioural **baselines moved into CORE** as a fusion module. Collection meets an estate the way it emits — an **OTLP logs receiver, a Kafka input** for customer topics, and a **real TAXII 2.1 server** over the tenant IOC store — and a **cold-tier lake query reports a cost estimate and a progress state** instead of timing out silently. The **Helm chart installs CORE** with exactly one scheduler replica leading through a Postgres lease. A playbook can **ask the person who signed in, then their manager, and branch on the signed answer**; AiSOC's own **MCP server speaks streamable HTTP**, authorized and audited per call; a case opens a **war room** that syncs decisions back; a **hunt that finds something becomes a cited report**; the **responder app is an installable build** with real APNs and FCM delivery. Governance closed the 8.1 clauses: **WebAuthn** as a console second factor enforceable per role, an **enforced audit retention window** that leaves the surviving chain verifiable, **axe accessibility** on the case workspace and alert list, and a tenant's **entitlement limit that can refuse work** when the tenant opts in. **This is the breaking change:** `PATCH /api/v1/alerts/{id}` used to answer **200 while silently dropping** any field outside its five writable ones — a success for a write that did not happen — and now answers **422** naming the field and the route that applies it. If you call that endpoint with `disposition`, `severity`, `confidence` or `snoozed_until`, read the BREAKING section before upgrading. **67 defects were fixed across this release and the two before it** (11 here, 16 in v18.0.0, 40 in v17.1.0), including **tenant deletion**, which had been impossible on any database holding audit rows because the audit immutability trigger refused the cascade its own foreign key declares. The chart publishes as **`7.8.0`**. Everything below describes v18.0.0 and earlier, which this release does not change.
+> **TL;DR for first-time visitors:** AiSOC is on `v20.1.0`, released 2026-10-22. **The harness-honesty release: the measurements and safety nets around the product were made as truthful as the product itself, and one real data-loss defect in every connector's poll loop is closed.** The data-loss fix is externally contributed ([meshreyy](https://github.com/meshreyy)): ingest reports per-event normalization failures as HTTP 200 with accepted/rejected counts, and the connector scheduler advanced its checkpoint on HTTP success alone — so a partially rejected batch moved the cursor past events that were never stored, permanently and silently. The cursor now advances only when every submitted event was accepted; a rejected page is re-fetched on the next overlapping poll and deduplicated by the sink. The live-agent eval was flattering itself two ways — per-incident `asyncio.run` left the model client on a dead event loop so most incidents silently ran heuristics, and failed incidents were dropped from the sample — it now runs one loop per run, scores failures as **0 with the reason recorded**, and the 0.40 groundedness floor was re-derived under the fixed harness (it holds, now 0.04 below the lowest honest run rather than 0.13 below a flattered one). The weekly chaos store-outage legs grade real behaviour instead of artifacts of their own probe contract, which is also why the API gained unauthenticated **`GET /api/v1/health` and `GET /api/v1/health/ready`** probes (database blocks at 503, cache degrades at 200) — the redis and qdrant legs pass end to end; the postgres leg stays red **by design**, naming the services that do not yet export the store keys the contract reads ([#1446](https://github.com/beenuar/AiSOC/issues/1446) stays open). The chart `stable` channel is now guarded by **both version lines** — v20.0.0 (chart 7.9.0, not a chart major) had carried chart `stable` across an application major while every image `stable` tag correctly held at v19 — and a dispatchable repair workflow exists and was used to roll the channel back to 7.8.0, where it stays until a deliberate promotion; **this release moves neither `stable` channel**. `fastapi` moves to 0.146.0 across all 32 declaration sites and 13 locks in one change, the Oct-22 Dependabot waves are folded, and `@vitest/mocker` 4.1.12 closes CVE-2026-112949/112950 in all three npm lockfiles. **11 defects were fixed in this release, 34 across it and the two before** (11 here, 12 in v20.0.0, 11 in v19.0.0 — counting distinct product or CI defects named in each release's Fixed and Security sections, dependency-version advisories excluded). The chart publishes as **`7.10.0`**. Everything below describes v20.0.0 and earlier, which this release does not change.
+>
+> **Previously:** AiSOC was on `v20.0.0`, released 2026-10-21. **The security-response release: four published advisories, the SSRF guard on every connector egress path, and the dependency queue worked to zero.** Four vulnerability reports were each reproduced against a production-mode stack, fixed, and published as advisories: [GHSA-wwq7-2xvh-qgq6](https://github.com/beenuar/AiSOC/security/advisories/GHSA-wwq7-2xvh-qgq6) (cases GET routes enforced no `cases:read`, so an API key minted with only `alerts:read` could list cases and read their comments, timeline and evidence chain), [GHSA-9mc5-hqgh-j6wf](https://github.com/beenuar/AiSOC/security/advisories/GHSA-9mc5-hqgh-j6wf) (any `cases:write` holder could author a comment the console renders as an unattributed "System note"), [GHSA-898c-wxrw-hx6c](https://github.com/beenuar/AiSOC/security/advisories/GHSA-898c-wxrw-hx6c) (outbound webhooks: registration 500ed against row-level security for every tenant, and destinations were never SSRF-validated), and [GHSA-cq4g-g6wp-4m2w](https://github.com/beenuar/AiSOC/security/advisories/GHSA-cq4g-g6wp-4m2w) (a tenant-controlled connector `base_url` could reach cloud metadata, loopback and internal services from the stateless test route, resource reads and scheduled polls — the guard now sits on every construction path, and the API refuses those destinations before they are stored). **This is the breaking change:** `POST /api/v1/cases/{case_id}/comments` no longer accepts `is_system` in the request body — the server ignores the field rather than refusing the request, so existing clients keep succeeding and only generated SDK request types lose the property; system notes are written by the server itself. Supply-chain pinning tightened in both directions: the semgrep rule packs the scanner ratchet was measured with are vendored into the tree with a rules-digest arm, and the Oct-21 advisory wave (a critical `certifi`, `aiohttp`, `pillow`, the MCP SDK, and the npm floors) is cleared across every lockfile — with one recorded, expiring exception where upstream `fastembed` still caps `pillow` below the fixed version in `services/threatintel`. Four connectors (Lacework, Tines, Datadog, PagerDuty) stopped collapsing their vendor's own top severity into `high`, an OpenCTI feed client validated against a live platform joins threat intel, and the LLM gateway image is pinned to the exact version the stack was measured against after upstream deleted the floating tag it referenced. **39 defects were fixed across this release and the two before it** (12 here, 11 in v19.0.0, 16 in v18.0.0). The chart publishes as **`7.9.0`**. Everything below describes v19.0.0 and earlier, which this release does not change.
+>
+> **Previously:** AiSOC was on `v19.0.0`, released 2026-10-12. **The release that finished the depth plan's analyst, collection and governance phases.** Nineteen workstreams landed as one verified tree. A session now has **one producer and three stores** that cannot disagree about which session an event belongs to; a real security **posture is collected and versioned** so a detection reads the posture that was true when an event happened; behavioural **baselines moved into CORE** as a fusion module. Collection meets an estate the way it emits — an **OTLP logs receiver, a Kafka input** for customer topics, and a **real TAXII 2.1 server** over the tenant IOC store — and a **cold-tier lake query reports a cost estimate and a progress state** instead of timing out silently. The **Helm chart installs CORE** with exactly one scheduler replica leading through a Postgres lease. A playbook can **ask the person who signed in, then their manager, and branch on the signed answer**; AiSOC's own **MCP server speaks streamable HTTP**, authorized and audited per call; a case opens a **war room** that syncs decisions back; a **hunt that finds something becomes a cited report**; the **responder app is an installable build** with real APNs and FCM delivery. Governance closed the 8.1 clauses: **WebAuthn** as a console second factor enforceable per role, an **enforced audit retention window** that leaves the surviving chain verifiable, **axe accessibility** on the case workspace and alert list, and a tenant's **entitlement limit that can refuse work** when the tenant opts in. **This is the breaking change:** `PATCH /api/v1/alerts/{id}` used to answer **200 while silently dropping** any field outside its five writable ones — a success for a write that did not happen — and now answers **422** naming the field and the route that applies it. If you call that endpoint with `disposition`, `severity`, `confidence` or `snoozed_until`, read the BREAKING section before upgrading. **67 defects were fixed across this release and the two before it** (11 here, 16 in v18.0.0, 40 in v17.1.0), including **tenant deletion**, which had been impossible on any database holding audit rows because the audit immutability trigger refused the cascade its own foreign key declares. The chart publishes as **`7.8.0`**. Everything below describes v18.0.0 and earlier, which this release does not change.
 >
 > **Previously:** AiSOC was on `v18.0.0`, released 2026-10-09. **The release where the platform learned what it is looking at.** Until now every event from 78 of 87 connector types arrived as a generic OCSF Security Finding, and fusion promotes that class unconditionally — so a permitted DNS lookup, an allowed proxy request and a routine Windows event each became an alert indistinguishable from a real one. Ingest now carries a recorded decision for **every one of the 87 connector types**: the class its stream actually is, or the reason it stays a finding. **This is the breaking change**: `permission_conditions`, `privilege_grants` and `workload_identities` shipped as tables with no reader, and now change authorization outcomes in both directions — a condition that was inert begins denying, and an approved grant that was inert begins conferring. If you wrote rows into those tables directly, read the BREAKING section before upgrading. **Everything else is new capability.** Every event carries an activity projection — who acted, what kind of actor they were, what they did, to which resource, from where, with what outcome — with `actor.kind` derived from each vendor's own documented field rather than guessed. A 44-type event catalogue across ten sources classifies vendor event types by sensitivity, and deliberately changes neither severity nor promotion, so a one-line data edit cannot flood a queue. Detection gained a **72-rule windowed corpus** with ordered and unordered sequences and Sigma correlations: the 74 rules that needed a sliding window are all decided, 50 translated with their thresholds derived from each original's own clauses, 24 refused with a recorded reason. Rules that cannot fire fell from **119 to 2**. Collection now meets an estate the way it actually emits — an organisation CloudTrail over S3 and SQS, GCP Pub/Sub, Azure Event Hubs, and a syslog listener for appliances that speak nothing else. Playbooks gained `wait`, `parallel` and `loop` with idempotency keys, and `notify` and `osquery_live_query` became governed verbs — which is also how we found that every dry run had been reporting a completed send. Retention is the window the tenant chooses up to a 400-day ceiling, and a legal hold now outranks it in the worker rather than only in a function nothing called. Console MFA ships: TOTP against RFC 6238's own vectors, single-use recovery codes, enforceable per tenant. **64 defects were fixed across this release and the two before it** (8 in v17.0.0, 40 in v17.1.0, 16 here). The published executable-rule figure moves **down**, 2,603 to 2,511, and that is the correction rather than a regression: rules that could not fire stopped being counted as capable of it. The chart publishes as **`7.6.0`**. Everything below describes v17.1.0 and earlier, which this release does not change.
 >
@@ -20,22 +24,62 @@ This file mirrors what used to live in the "What's new" section of [`README.md`]
 
 ## What's new
 
-`VERSION` is `19.0.0`. The **v19.0.0** release (2026-10-12) finishes the
-depth plan's analyst, collection and governance phases, landing nineteen
-workstreams as one verified tree: sessions with one producer and three
-stores, versioned security posture read at event time, behavioural
-baselines in CORE, an OTLP/Kafka/TAXII collection surface, cost-estimated
-cold-lake queries, a Helm chart that installs CORE with one scheduler
-leading, a verification playbook that asks the user then their manager,
-AiSOC's own MCP server over streamable HTTP, case war rooms, hunt-to-report,
-an installable responder app, and the 8.1 governance clauses — WebAuthn,
-enforced audit retention, accessibility, and opt-in entitlement limits. It
-carries one breaking change: `PATCH /api/v1/alerts/{id}` now answers 422 on
-a field it cannot apply instead of 200 on a silent no-op. 67 defects were
-fixed across this release and the two before it (11 here), including tenant
-deletion, impossible until now on any database holding audit rows. See the
-TL;DR above and the `[19.0.0]` section of
+`VERSION` is `20.1.0`. The **v20.1.0** release (2026-10-22) closes a
+data-loss defect in every connector's poll loop (an externally
+contributed fix: the checkpoint advanced past events ingest rejected,
+and now advances only when every submitted event was accepted), makes
+the measurement harnesses as honest as what they measure (the live-agent
+eval runs one event loop per run and scores failed investigations as 0
+with reasons, with the 0.40 groundedness floor re-derived under the
+fixed harness; the chaos store-outage legs grade real behaviour, with
+the redis and qdrant legs passing end to end and the postgres leg red
+by design on #1446), adds unauthenticated liveness and readiness probes
+to the API (`GET /api/v1/health`, `GET /api/v1/health/ready` — database
+blocks, cache degrades), guards the chart `stable` channel on both
+version lines with a dispatchable repair workflow, and moves `fastapi`
+to 0.146.0 across every declaration site and lock in one change, with
+the Oct-22 Dependabot waves folded and `@vitest/mocker` 4.1.12 closing
+CVE-2026-112949/112950. No breaking changes, and **neither `stable`
+channel moves**. 11 defects were fixed (34 across this release and the
+two before it). See the TL;DR above and the `[20.1.0]` section of
 [`CHANGELOG.md`](CHANGELOG.md) for the full inventory.
+
+### Previously: v20.0.0
+
+The **v20.0.0** release (2026-10-21) is the
+security-response release: four vulnerability reports reproduced,
+fixed and published as advisories (cases read-scope, system-note
+spoofing, webhook RLS + SSRF, and the SSRF guard adopted on every
+connector egress path), the semgrep rule packs vendored so the scanner
+ratchet's ceiling is bound to the exact pack bytes it was measured with,
+the Oct-21 dependency-advisory wave cleared across every lockfile with
+one recorded expiring exception, four connectors preserving their
+vendor's own top severity instead of collapsing it into `high`, a
+community-contributed OpenCTI feed client validated against a live
+platform, and the LLM gateway image pinned to the exact version the
+stack was measured against after upstream deleted the floating tag. It
+carries one breaking change: `POST /api/v1/cases/{case_id}/comments` no
+longer accepts `is_system` in the request body (the field is ignored,
+not refused, so existing requests keep succeeding). 39 defects were
+fixed across this release and the two before it (12 here). See the
+TL;DR above and the `[20.0.0]` section of
+[`CHANGELOG.md`](CHANGELOG.md) for the full inventory.
+
+### Previously: v19.0.0
+
+The **v19.0.0** release (2026-10-12) finished the depth plan's analyst,
+collection and governance phases, landing nineteen workstreams as one
+verified tree: sessions with one producer and three stores, versioned
+security posture read at event time, behavioural baselines in CORE, an
+OTLP/Kafka/TAXII collection surface, cost-estimated cold-lake queries, a
+Helm chart that installs CORE with one scheduler leading, a verification
+playbook that asks the user then their manager, AiSOC's own MCP server
+over streamable HTTP, case war rooms, hunt-to-report, an installable
+responder app, and the 8.1 governance clauses — WebAuthn, enforced audit
+retention, accessibility, and opt-in entitlement limits. It carried one
+breaking change: `PATCH /api/v1/alerts/{id}` now answers 422 on a field
+it cannot apply instead of 200 on a silent no-op. The chart published as
+`7.8.0`.
 
 ### Previously: v18.0.0
 

@@ -40,6 +40,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import AuthUser, require_permission
 from app.db.database import get_db
+from app.db.rls import TenantDBSession
 from app.models.taxii import TaxiiCollection
 from app.models.threat_intel import ThreatIntelIOC
 from app.services.taxii import (
@@ -528,7 +529,12 @@ async def list_managed_collections(
 async def create_managed_collection(
     payload: CollectionCreate,
     current_user: AuthUser,
-    db: Annotated[AsyncSession, Depends(get_db)],
+    # Tenant-scoped on purpose: taxii_collections carries the strict RLS
+    # policy `WITH CHECK (tenant_id = current_tenant_id())`, so an INSERT
+    # through a session that never sets app.current_tenant_id is refused for
+    # every tenant (HTTP 500) — the same defect GHSA-898c-wxrw-hx6c reported
+    # on outbound webhooks, reproduced live here too.
+    db: TenantDBSession,
     _: Annotated[None, Depends(require_permission("threat_intel:write"))] = None,
 ) -> CollectionOut:
     try:

@@ -27,7 +27,42 @@ class Settings(BaseSettings):
     event_promotion_enabled: bool = Field(default=True, alias="AISOC_EVENT_PROMOTION_ENABLED")
     # Phase 3.1 spine bridge — persist fused (non-duplicate) alerts to the
     # Postgres alert store (app/services/alert_sink.py). Fail-soft by design.
+    #
+    # Disabling this also disables the durable DLQ (main.py wires PostgresDLQ
+    # only when the sink exists) and the session store. The worker then runs
+    # in an explicitly persistence-free mode: alerts stream over Kafka but no
+    # row is written, and a refused event is only logged. Do not read a
+    # committed Kafka offset in that mode as proof of durable capture.
     alert_sink_enabled: bool = Field(default=True, alias="AISOC_ALERT_SINK_ENABLED")
+    # Bounded time for one insert/duplicate-verification. A hung connection
+    # must surface as a retryable outcome, not stall the partition forever.
+    alert_sink_operation_timeout_seconds: float = Field(default=10.0, alias="AISOC_ALERT_SINK_OPERATION_TIMEOUT_SECONDS")
+
+    # Consumer durability. Transient persistence/publish failures are retried
+    # with exponential backoff + jitter and the Kafka offset is not committed
+    # until the message is durable (or captured by the DLQ). The recovery
+    # interval is the long, capped delay used when the primary store *and*
+    # the DLQ are both unreachable: the message is held, not dropped.
+    consumer_max_retries: int = Field(default=8, alias="AISOC_CONSUMER_MAX_RETRIES")
+    consumer_retry_base_seconds: float = Field(default=0.5, alias="AISOC_CONSUMER_RETRY_BASE_SECONDS")
+    consumer_retry_max_seconds: float = Field(default=30.0, alias="AISOC_CONSUMER_RETRY_MAX_SECONDS")
+    consumer_recovery_retry_seconds: float = Field(default=10.0, alias="AISOC_CONSUMER_RECOVERY_RETRY_SECONDS")
+    # End-to-end deadline for one fused-alert delivery: the enqueue *and* the
+    # broker acknowledgement. It used to bound the enqueue alone, which is a
+    # local memory append and effectively never times out.
+    kafka_send_timeout_seconds: float = Field(default=30.0, alias="AISOC_KAFKA_SEND_TIMEOUT_SECONDS")
+    # Recovery journal for an alert that is durable in Postgres but whose
+    # notification never reached the broker (app/services/alert_outbox.py).
+    # The grace period is the head start the consumer's own inline retries
+    # get: set it above the retry budget or the relay competes with a retry
+    # that is still running and publishes avoidable duplicates.
+    alert_outbox_enabled: bool = Field(default=True, alias="AISOC_ALERT_OUTBOX_ENABLED")
+    outbox_relay_interval_seconds: float = Field(default=15.0, alias="AISOC_OUTBOX_RELAY_INTERVAL_SECONDS")
+    outbox_relay_batch_size: int = Field(default=50, alias="AISOC_OUTBOX_RELAY_BATCH_SIZE")
+    outbox_relay_grace_seconds: float = Field(default=120.0, alias="AISOC_OUTBOX_RELAY_GRACE_SECONDS")
+    # How long stop() waits for the in-flight message before closing clients.
+    # Work that does not finish is left uncommitted, so it is re-delivered.
+    shutdown_grace_seconds: float = Field(default=15.0, alias="AISOC_SHUTDOWN_GRACE_SECONDS")
 
     # Phase A1 — archive every normalized OCSF event into the ClickHouse event
     # lake (app/services/lake_writer.py). Independent of promotion: an event
@@ -41,6 +76,40 @@ class Settings(BaseSettings):
     clickhouse_password: str = Field(default="", alias="CLICKHOUSE_PASSWORD")
     lake_batch_size: int = Field(default=100, alias="AISOC_LAKE_BATCH_SIZE")
     lake_batch_max_age_seconds: float = Field(default=2.0, alias="AISOC_LAKE_BATCH_MAX_AGE_SECONDS")
+    # A failed ClickHouse batch is retained and retried, not dropped. These
+    # bound that retention: when the cap is reached the oldest rows are
+    # discarded with an explicit counter/log, never silently.
+    lake_max_buffer_rows: int = Field(default=10000, alias="AISOC_LAKE_MAX_BUFFER_ROWS")
+    # Archival's own durable boundary (app/services/lake_spool.py). A row is
+    # on this spool before `write_event` returns True, so the consumer's
+    # offset commit no longer rides on an in-memory list.
+    #
+    # Relative by default so a first run needs no provisioning, but it is
+    # only as durable as the filesystem under it: in a container, mount a
+    # volume here or a destroyed container loses rows whose Kafka offsets
+    # were already committed.
+    lake_spool_dir: str = Field(default=".aisoc/lake-spool", alias="AISOC_LAKE_SPOOL_DIR")
+    # Back-pressure threshold, not a discard threshold. At the cap the writer
+    # refuses events and the consumer holds its Kafka offset, so Kafka's
+    # retention becomes the buffer. Raising it is not a durability fix.
+    lake_max_spool_bytes: int = Field(default=512 * 1024 * 1024, alias="AISOC_LAKE_MAX_SPOOL_BYTES")
+    # Off by default: an un-synced append already survives a process kill,
+    # SIGKILL and a container stop, because the bytes are in the kernel page
+    # cache. Turn it on to also survive a power loss, at a disk round trip
+    # per batch.
+    lake_spool_fsync: bool = Field(default=False, alias="AISOC_LAKE_SPOOL_FSYNC")
+    # Whether an event that could not be spooled holds the Kafka offset.
+    # On (the default) an unusable or full spool applies back-pressure
+    # instead of losing the archive silently. Turning it off restores
+    # best-effort archival, where a refused event is counted as a reported
+    # gap and the alert pipeline keeps moving.
+    lake_archive_required: bool = Field(default=True, alias="AISOC_LAKE_ARCHIVE_REQUIRED")
+    lake_reconnect_base_seconds: float = Field(default=0.5, alias="AISOC_LAKE_RECONNECT_BASE_SECONDS")
+    lake_reconnect_max_seconds: float = Field(default=30.0, alias="AISOC_LAKE_RECONNECT_MAX_SECONDS")
+    # A server-side/data error is retried this many times, then the batch is
+    # dropped explicitly. Connection errors keep the batch (bounded above)
+    # because the store being down is not evidence that the rows are bad.
+    lake_max_data_failures: int = Field(default=5, alias="AISOC_LAKE_MAX_DATA_FAILURES")
 
     # Phase A2 — evaluate the executable native detection corpus against the
     # live event stream (app/services/detection_engine.py). Each firing rule
@@ -62,8 +131,12 @@ class Settings(BaseSettings):
     attack_chain_grouping_enabled: bool = Field(default=True, alias="AISOC_ATTACK_CHAIN_GROUPING_ENABLED")
     attack_chain_window_seconds: int = Field(default=3600, alias="AISOC_ATTACK_CHAIN_WINDOW_SECONDS")
 
-    # Redis
+    # Redis. Dedup/correlation are hints, not the source of truth (Postgres is),
+    # so a Redis outage must degrade rather than raise. Short socket timeouts
+    # keep a black-holed Redis from stalling the alert path.
     redis_url: str = Field(default="redis://localhost:6379/2", alias="REDIS_URL")
+    redis_socket_timeout_seconds: float = Field(default=5.0, alias="AISOC_REDIS_SOCKET_TIMEOUT_SECONDS")
+    redis_connect_timeout_seconds: float = Field(default=5.0, alias="AISOC_REDIS_CONNECT_TIMEOUT_SECONDS")
     dedup_window_seconds: int = Field(default=300, alias="DEDUP_WINDOW_SECONDS")
     correlation_window_seconds: int = Field(default=3600, alias="CORRELATION_WINDOW_SECONDS")
 

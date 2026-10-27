@@ -27,8 +27,8 @@ API (EDR, SIEM, cloud, IAM, SaaS, VCS, network) and pushes normalized OCSF
 records into the ingest spine. See the [connector catalog](./connectors).
 
 **Detection rule** — A query (Sigma / YARA / KQL / EQL) that fires an
-alert when matching events are seen. AiSOC's library holds 6,991 rules on
-disk, of which 2,511 are **executable** (see below) — 833 native and 1,770
+alert when matching events are seen. AiSOC's library holds 7,015 rules on
+disk, of which 2,535 are **executable** (see below) — 765 native and 1,770
 translated from SigmaHQ. Every imported rule is tagged with provenance.
 
 **Investigation Ledger** — Append-only, replayable record of every

@@ -183,3 +183,48 @@ class TestTheInvestigationRunReadIsScoped:
         assert proxy.await_args is not None, "the handler never reached the proxy"
         path = proxy.await_args.args[1]
         assert "../" not in path and "?" not in path, path
+
+
+class TestEveryReadRouteRequiresCasesRead:
+    """GHSA-wwq7-2xvh-qgq6: every GET here took a bare AuthUser.
+
+    Role users all hold `cases:read`, but an API key's scopes are enforced
+    only through `require_permission`, so a key minted with nothing but
+    `alerts:read` listed cases and read their comments, timeline and evidence
+    chain (reproduced live: 200 on all three against real Postgres, while
+    `GET /api/v1/investigations` — which does enforce — answered 403 to the
+    same key).
+    """
+
+    def _read_routes(self) -> list[Any]:
+        return [r for r in cases.router.routes if "GET" in set(getattr(r, "methods", set()))]
+
+    def test_there_are_read_routes_to_check(self) -> None:
+        assert len(self._read_routes()) >= 14
+
+    def test_every_read_route_requires_cases_read(self) -> None:
+        missing = [r.path for r in self._read_routes() if "cases:read" not in _permissions_on(r)]
+        assert not missing, f"read routes without cases:read (a narrow API key reads them): {missing}"
+
+
+class TestCallersCannotAuthorSystemNotes:
+    """GHSA-9mc5-hqgh-j6wf: `AddCommentRequest.is_system` was client-settable.
+
+    `case_summary.py` renders an `is_system` row as an unattributed "System
+    note" and `case_postmortem.py` drops it from the analyst record, so any
+    `cases:write` holder could author text the incident report presents as
+    the platform's own (reproduced live: the flag round-tripped to storage).
+    Server-written system notes use author "aisoc"; no legitimate caller sets
+    the flag through this endpoint.
+    """
+
+    def test_the_request_model_does_not_carry_the_flag(self) -> None:
+        assert "is_system" not in cases.AddCommentRequest.model_fields, (
+            "AddCommentRequest accepts is_system from callers again; any cases:write "
+            "holder can author unattributed 'System note' rows the post-mortem omits"
+        )
+
+    def test_a_client_still_sending_it_is_ignored_not_refused(self) -> None:
+        body = cases.AddCommentRequest.model_validate({"body": "[AUTOMATION] Containment verified.", "is_system": True})
+        assert not hasattr(body, "is_system")
+        assert body.body.startswith("[AUTOMATION]")

@@ -68,6 +68,13 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/cases", tags=["cases"])
 
+# Every read route here took a bare AuthUser: authenticated, never authorized
+# (GHSA-wwq7-2xvh-qgq6). Role users all hold `cases:read`, so nothing changes
+# for them, but an API key's scopes are enforced only through
+# `require_permission`, so a key minted with nothing but `alerts:read` could
+# list cases and read their comments, timeline and evidence chain.
+CaseReader = Annotated[AuthUser, Depends(require_permission("cases:read"))]
+
 # The agents service owns the actual investigation orchestrator (Pillar-1).
 # We keep the route surface on `/cases/{id}/investigate` and
 # `/cases/{id}/investigations/{run_id}` for the web console and proxy through
@@ -240,7 +247,13 @@ class UpdateObservablesRequest(BaseModel):
 
 class AddCommentRequest(BaseModel):
     body: str = Field(..., min_length=1)
-    is_system: bool = False
+    # `is_system` is no longer accepted from callers (GHSA-9mc5-hqgh-j6wf).
+    # It was, and `case_summary` renders such a row as an unattributed
+    # "System note" while the post-mortem drops it from the analyst record,
+    # so any `cases:write` holder could author text the incident report
+    # presents as the platform's own. System notes are written by the server
+    # itself (author "aisoc"); a client still sending the field is ignored,
+    # not refused.
 
 
 class CaseResponse(BaseModel):
@@ -487,7 +500,7 @@ async def _resolve_case_id(case_id: str, db: Any, tenant_id: uuid.UUID) -> uuid.
 @router.get("", response_model=list[CaseResponse], summary="List cases")
 async def list_cases(
     db: DBSession,
-    user: AuthUser,
+    user: CaseReader,
     status_filter: str | None = Query(None, alias="status"),
     severity: str | None = Query(None),
     assignee: str | None = Query(None),
@@ -605,7 +618,7 @@ async def create_case(
 
 
 @router.get("/{case_id}", response_model=CaseResponse, summary="Get case")
-async def get_case(case_id: str, db: DBSession, user: AuthUser) -> CaseResponse:
+async def get_case(case_id: str, db: DBSession, user: CaseReader) -> CaseResponse:
     cid = await _resolve_case_id(case_id, db, user.tenant_id)
     row = (
         await db.execute(
@@ -1092,7 +1105,7 @@ async def add_comment(
         tenant_id=user.tenant_id,
         author=getattr(user, "email", None) or "system",
         body=body.body,
-        sys=body.is_system,
+        sys=False,
         now=now,
     )
     try:
@@ -1115,7 +1128,7 @@ async def add_comment(
 
 
 @router.get("/{case_id}/comments", response_model=list[CommentResponse], summary="List case comments")
-async def list_comments(case_id: str, db: DBSession, user: AuthUser) -> list[CommentResponse]:
+async def list_comments(case_id: str, db: DBSession, user: CaseReader) -> list[CommentResponse]:
     cid = await _resolve_case_id(case_id, db, user.tenant_id)
     rows = (
         await db.execute(
@@ -1135,7 +1148,7 @@ async def list_comments(case_id: str, db: DBSession, user: AuthUser) -> list[Com
 # avoids a behavior change for any existing integration that already speaks
 # `/comments`.
 @router.get("/{case_id}/notes", response_model=list[CommentResponse], summary="List case notes (alias of /comments)")
-async def list_notes(case_id: str, db: DBSession, user: AuthUser) -> list[CommentResponse]:
+async def list_notes(case_id: str, db: DBSession, user: CaseReader) -> list[CommentResponse]:
     return await list_comments(case_id, db, user)
 
 
@@ -1147,7 +1160,7 @@ async def add_note(
 
 
 @router.get("/{case_id}/evidence", response_model=EvidenceReport, summary="Export evidence chain report")
-async def evidence_report(case_id: str, db: DBSession, user: AuthUser) -> EvidenceReport:
+async def evidence_report(case_id: str, db: DBSession, user: CaseReader) -> EvidenceReport:
     cid = await _resolve_case_id(case_id, db, user.tenant_id)
     row = (
         await db.execute(
@@ -1180,7 +1193,7 @@ async def evidence_report(case_id: str, db: DBSession, user: AuthUser) -> Eviden
 
 
 @router.get("/{case_id}/timeline", response_model=TimelineResponse, summary="Case activity timeline")
-async def case_timeline(case_id: str, db: DBSession, user: AuthUser) -> TimelineResponse:
+async def case_timeline(case_id: str, db: DBSession, user: CaseReader) -> TimelineResponse:
     cid = await _resolve_case_id(case_id, db, user.tenant_id)
     case_row = (
         await db.execute(
@@ -1308,7 +1321,7 @@ async def case_timeline(case_id: str, db: DBSession, user: AuthUser) -> Timeline
 
 
 @router.get("/{case_id}/tasks", response_model=list[TaskResponse], summary="List case tasks")
-async def list_tasks(case_id: str, db: DBSession, user: AuthUser) -> list[TaskResponse]:
+async def list_tasks(case_id: str, db: DBSession, user: CaseReader) -> list[TaskResponse]:
     cid = await _resolve_case_id(case_id, db, user.tenant_id)
     exists = (
         await db.execute(
@@ -1723,7 +1736,7 @@ async def case_investigate(
 async def list_case_investigations(
     case_id: str,
     db: DBSession,
-    user: AuthUser,
+    user: CaseReader,
 ) -> dict[str, Any]:
     """List all investigation runs for a case.
 
@@ -1781,7 +1794,7 @@ async def case_investigation_run(
     case_id: str,
     run_id: str,
     db: DBSession,
-    user: AuthUser,
+    user: CaseReader,
 ) -> dict[str, Any]:
     """One investigation run belonging to this case, in the caller's tenant."""
     # Scoping kept out of the docstring because FastAPI publishes that verbatim
@@ -1823,7 +1836,7 @@ async def case_investigation_report_md(
     case_id: str,
     run_id: str,
     db: DBSession,
-    user: AuthUser,
+    user: CaseReader,
 ) -> PlainTextResponse:
     """The Markdown report the case workspace renders."""
     # `CaseWorkspace.tsx` fetched this from two places and the route did not
@@ -1924,7 +1937,7 @@ async def _emit_summary_breadcrumb(
 async def case_auto_summary(
     case_id: str,
     db: DBSession,
-    user: AuthUser,
+    user: CaseReader,
     format: Literal["json", "html"] = Query(
         "json",
         description=(
@@ -1963,7 +1976,7 @@ async def case_auto_summary(
 async def case_auto_postmortem(
     case_id: str,
     db: DBSession,
-    user: AuthUser,
+    user: CaseReader,
     format: Literal["json", "html"] = Query(
         "json",
         description=(
@@ -2004,7 +2017,7 @@ async def case_auto_postmortem(
 async def case_investigation_pdf(
     case_id: str,
     run_id: str,
-    user: AuthUser,
+    user: CaseReader,
 ) -> Response:
     safe_run_id = quote(run_id, safe="")
     resp = await _agents_proxy(
@@ -2032,7 +2045,7 @@ async def case_investigation_pdf(
 async def list_related_cases(
     case_id: str,
     db: DBSession,
-    user: AuthUser,
+    user: CaseReader,
 ) -> dict[str, Any]:
     """Return other cases that share alerts or observables with this case.
 

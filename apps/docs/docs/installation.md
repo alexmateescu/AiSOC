@@ -22,7 +22,7 @@ deploying to production, see [Deployment options](./deployment/docker).
 # Linux + macOS (one-liner):
 curl -fsSL https://raw.githubusercontent.com/beenuar/AiSOC/main/install.sh | bash
 
-# Windows (PowerShell as Administrator):
+# Windows (PowerShell, as your normal user — winget elevates per package):
 iwr -useb https://raw.githubusercontent.com/beenuar/AiSOC/main/install.ps1 | iex
 ```
 
@@ -38,7 +38,7 @@ against rather than estimated from.
 
 | | CORE | Why |
 |---|---|---|
-| Docker memory | **8 GB** | Steady-state RSS across the fourteen CORE containers is well under this. The headroom is for the bundled local model, whose process grows to roughly the model size (~2 GB) while a request is in flight. |
+| Docker memory | **8 GB** | Steady-state RSS across the sixteen CORE containers is well under this. The headroom is for the bundled local model, whose process grows to roughly the model size (~2 GB) while a request is in flight. |
 | Docker disk | **20 GB** | Images plus the ~2 GB model plus room for Kafka, Postgres and Qdrant volumes to grow. Below roughly 2 GB free, Kafka corrupts its log directory **and still passes its healthcheck** — `make doctor` fails on this before it can happen. |
 | `python3` | **3.9+** | `make up` runs `scripts/ensure_env.py` on the host to create `.env` and generate its secrets, and `make smoke` — the headline proof — is a host-side Python script. CI runs 3.11. |
 | `bash` | any | Every script under `scripts/` has a bash shebang. macOS's bundled 3.2 is sufficient. |

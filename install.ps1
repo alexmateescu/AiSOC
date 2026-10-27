@@ -9,20 +9,28 @@
     What this script does, in order:
         1. Verifies you're on Windows 10 (build 19041+) or Windows 11.
         2. Verifies WSL2 is enabled (required by Docker Desktop).
-        3. Installs (idempotently) the four prerequisites AiSOC needs:
+        3. Installs (idempotently) the five prerequisites AiSOC needs:
              - Git
              - Docker Desktop (which bundles Docker Engine + Compose v2)
              - Node.js 22 LTS
              - pnpm 8+ (via corepack)
+             - Python 3 (runs the same setup scripts the Unix path runs:
+               the .env secret generator, the port resolver, and the
+               end-to-end pipeline check in step 9)
            All installs go through winget, the official Windows package
            manager. We never download random installers from the internet.
         4. Clones the AiSOC repo (if you ran the script as a one-liner) or
            reuses it (if you ran .\install.ps1 from inside a clone).
-        5. Creates a .env from .env.example so the first boot has sane
-           defaults.
+        5. Creates a .env and generates its fifteen secrets, by running
+           `scripts/ensure_env.py` — the same generator `make env` runs.
+           A plain copy of .env.example cannot boot: it ships
+           ENVIRONMENT=production with the secrets empty, and the API
+           refuses to start in production on those values.
         6. Runs `pnpm install --frozen-lockfile` to fetch the workspace's
            Node deps.
-        7. Starts the CORE stack with `docker compose up -d` and waits for
+        7. Moves AiSOC's published ports off anything already listening
+           (`scripts/resolve_port_conflicts.py`, as `make up` does), then
+           starts the CORE stack with `docker compose up -d` and waits for
            every container to report healthy.
         8. Creates the first administrator and prints its generated password
            once.
@@ -604,6 +612,80 @@ Workaround: install pnpm manually, then re-run this script:
     Write-Ok "pnpm installed: $((& pnpm --version))"
 }
 
+# ─── Step 4b: Python 3 ────────────────────────────────────────────────────
+
+# Python is a hard prerequisite on Windows for the same reason it is on the
+# `make up` path: three steps of this install are Python programs that the
+# Unix path runs and this one must not diverge from —
+# `scripts/ensure_env.py` (the fifteen generated secrets),
+# `scripts/resolve_port_conflicts.py` (moving a published port off whatever
+# already holds it) and the golden-pipeline runner that proves the install.
+#
+# It used to be optional, and each of those three silently degraded: the
+# `.env` shipped placeholder secrets that `enforce_secure_defaults` refuses
+# to boot on, a busy port was a hard stop, and the pipeline check was
+# skipped. Installing it is one winget package and removes all three.
+function Install-Python {
+    $found = Resolve-Python
+    if ($null -ne $found) {
+        # Splatting needs a plain variable (`@name`); `@(expression)` in an
+        # argument position passes one array argument instead of several.
+        $probeArgs = @($found.Prefix) + @('--version')
+        $version = (& $found.Exe @probeArgs 2>&1 | Out-String).Trim()
+        Write-Ok "python already installed: $version"
+        return
+    }
+    Install-WingetPackage -Id 'Python.Python.3.12' -DisplayName 'Python 3.12'
+    if ($null -eq (Resolve-Python)) {
+        # winget puts python on PATH through the registry, which this
+        # process has not re-read yet.
+        Update-PathFromRegistry
+    }
+    $resolved = Resolve-Python
+    if ($null -eq $resolved) {
+        Stop-WithError @"
+Python was installed via winget but no working interpreter is on PATH.
+
+Windows ships a Microsoft Store stub named python.exe that prints a
+"not found" notice instead of a version, and it takes precedence on a
+fresh PATH. Open a new PowerShell window and re-run this script; if it
+still fails, disable the stub in:
+  Settings > Apps > Advanced app settings > App execution aliases
+"@
+    }
+    $versionArgs = @($resolved.Prefix) + @('--version')
+    $version = (& $resolved.Exe @versionArgs 2>&1 | Out-String).Trim()
+    Write-Ok "python installed: $version"
+}
+
+# Runs a repository Python script with whichever interpreter spelling this
+# machine has, from the repository root. Returns the exit code rather than
+# throwing: every caller here has its own, more useful, failure message.
+function Invoke-RepoPython {
+    param(
+        [Parameter(Mandatory)][string]$RelativePath,
+        [string[]]$ScriptArgs = @()
+    )
+    $python = Resolve-Python
+    if ($null -eq $python) { return $null }
+    # Built as one variable because splatting is `@name`: `@(expression)` in
+    # an argument position passes a single array argument instead.
+    $invokeArgs = @($python.Prefix) + @((Join-Path $RepoRoot $RelativePath)) + $ScriptArgs
+    Push-Location $RepoRoot
+    try {
+        # `| Out-Host`, not a bare call: a PowerShell function returns
+        # everything it writes to the pipeline, so without this the caller's
+        # `$code` would be an array of the script's printed lines with the
+        # exit code last. The operator still sees the output — these scripts
+        # report which secrets were filled and which ports moved — it just
+        # goes to the host instead of the return value.
+        & $python.Exe @invokeArgs | Out-Host
+        return $LASTEXITCODE
+    } finally {
+        Pop-Location
+    }
+}
+
 # ─── Step 5: clone or locate repo ─────────────────────────────────────────
 
 $script:RepoRoot = $null
@@ -699,20 +781,64 @@ Then re-run this installer.
 
 # ─── Step 6: .env bootstrap ───────────────────────────────────────────────
 
+# Creates `.env` and fills its generated secrets, by running the same
+# `scripts/ensure_env.py` that `make env` runs. It is idempotent, so it runs
+# unconditionally — an existing `.env` keeps every value it already has and
+# only empty-or-placeholder secrets are filled.
+#
+# This used to be `Copy-Item .env.example .env`, and a plain copy cannot
+# produce a bootable deployment: `.env.example` ships `ENVIRONMENT=production`
+# with `SECRET_KEY`, `JWT_SECRET`, `METRICS_TOKEN` and `AISOC_CREDENTIAL_KEY`
+# empty, and `enforce_secure_defaults` (services/api/app/core/config.py)
+# refuses to start the API in production on exactly those values. The symptom
+# was `Wait-StackHealthy` reporting "These services are not running: api" with
+# nothing connecting it back to the copy. `compose-smoke.yml` already runs the
+# generator for this reason, with a comment saying a bare copy "has
+# provisioned an environment no real deployment would boot".
 function Initialize-EnvFile {
-    $envPath     = Join-Path $RepoRoot '.env'
-    $exampleEnv  = Join-Path $RepoRoot '.env.example'
-    if (Test-Path $envPath) {
-        Write-Ok ".env already exists at $envPath"
+    $envPath    = Join-Path $RepoRoot '.env'
+    $exampleEnv = Join-Path $RepoRoot '.env.example'
+    $generator  = Join-Path $RepoRoot 'scripts\ensure_env.py'
+
+    if (-not (Test-Path $generator)) {
+        # Older checkout without the generator: the copy is all there is, and
+        # it is better than no .env at all — but say what it costs.
+        if (-not (Test-Path $envPath) -and (Test-Path $exampleEnv)) {
+            Copy-Item $exampleEnv $envPath
+            Write-Warn "Created $envPath by copying .env.example — scripts/ensure_env.py is not in this checkout,"
+            Write-Warn 'so its secrets are placeholders and the API will refuse to start. Update your clone.'
+        } else {
+            Write-Warn "No scripts/ensure_env.py and no .env.example in repo; skipping .env creation."
+        }
         return
     }
-    if (Test-Path $exampleEnv) {
-        Copy-Item $exampleEnv $envPath
-        Write-Ok "Created $envPath from .env.example"
-        Write-Info "  (Optional: edit .env to add your OpenAI/Anthropic API key for richer agent runs.)"
-    } else {
-        Write-Warn "No .env.example found in repo; skipping .env creation."
+
+    Write-Info 'Creating .env and generating its secrets...'
+    $code = Invoke-RepoPython -RelativePath 'scripts\ensure_env.py'
+    if ($null -eq $code) {
+        Stop-WithError @"
+No Python 3 interpreter is available, so .env secrets cannot be generated.
+
+This is not optional: .env.example ships ENVIRONMENT=production with empty
+SECRET_KEY / JWT_SECRET / METRICS_TOKEN / AISOC_CREDENTIAL_KEY, and the API
+refuses to start in production on those values. Copying the template would
+produce a stack that cannot boot.
+
+Install Python and re-run this installer:
+  winget install --id Python.Python.3.12
+"@ 2
     }
+    if ($code -ne 0) {
+        Stop-WithError @"
+scripts/ensure_env.py exited $code, so .env is not usable.
+
+Re-run it directly to see why:
+  cd $RepoRoot
+  python scripts\ensure_env.py
+"@ 2
+    }
+    Write-Ok "Environment ready at $envPath"
+    Write-Info '  (Optional: edit .env to add your OpenAI/Anthropic API key for richer agent runs.)'
 }
 
 # ─── Step 7: pnpm install + handoff ───────────────────────────────────────
@@ -766,7 +892,12 @@ function Get-ComposePublishedPort {
     $previous = $ErrorActionPreference
     try {
         $ErrorActionPreference = 'Continue'
-        $mapped = & docker compose port $Service $ContainerPort 2>$null | Select-Object -Last 1
+        # Through Get-ComposeArgs so a stack already remapped by a previous
+        # run reports the port it actually publishes. Without the overlay
+        # this asks the base composition and answers 5432 for a postgres
+        # that moved, which reads as a conflict with something else.
+        $portArgs = @(Get-ComposeArgs) + @('port', $Service, "$ContainerPort")
+        $mapped = & docker @portArgs 2>$null | Select-Object -Last 1
     } catch {
         return $null
     } finally {
@@ -842,13 +973,78 @@ function Test-CorePortsFree {
     }
     if ($conflicts.Count -eq 0) { return }
     Write-Host ''
-    foreach ($conflict in $conflicts) { Write-Err $conflict }
+    foreach ($conflict in $conflicts) { Write-Warn $conflict }
     Write-Host ''
-    Write-Err 'Not starting: the ports above are taken by something else.'
-    Write-Err 'Stop that process, or edit the host port in docker-compose.yml.'
+
+    # Resolve rather than refuse, exactly as `make up` does on the Unix path.
+    # This used to `exit 3` here and tell the operator to go edit
+    # docker-compose.yml, which is a hard stop at step one of the documented
+    # quick start triggered by the single most likely condition in this
+    # audience's environment: an existing Postgres on 5432, or an Ollama on
+    # 11434. The README promises "a port already in use does not stop the
+    # install"; on Windows that promise was false.
+    #
+    # Only the published side moves — service-to-service traffic inside the
+    # compose network uses container ports and service names.
+    Write-Info 'Moving AiSOC off the ports above (nothing else is touched)...'
+    $code = Invoke-RepoPython -RelativePath 'scripts\resolve_port_conflicts.py'
+    if ($code -eq 0) {
+        Write-Ok 'Ports resolved. The addresses printed at the end are the ones to use.'
+        return
+    }
+
+    # Falling through means resolution itself failed, which is the only case
+    # that still deserves a stop: there is nowhere free to move to, or no
+    # interpreter to do the moving.
+    if ($null -eq $code) {
+        Write-Err 'The ports above are taken, and no Python 3 interpreter is available to move them.'
+        Write-Err '  winget install --id Python.Python.3.12'
+    } else {
+        Write-Err "Could not find free ports to move to (scripts\resolve_port_conflicts.py exited $code)."
+    }
+    Write-Err 'Stop whatever holds the ports above, or edit the host port in docker-compose.yml.'
     Write-Err "(A docker-compose.override.yml needs 'ports: !override' — a plain"
     Write-Err ' override appends, leaving the conflicting binding in place.)'
     exit 3
+}
+
+# The compose invocation for this repository, including the generated port
+# overlay when `scripts/resolve_port_conflicts.py` wrote one. This mirrors the
+# Makefile's `COMPOSE` variable; every compose call in this installer goes
+# through it so a remapped stack is addressed consistently — starting it with
+# the overlay and then running `ps` or `bootstrap_admin` without it would be
+# two different compositions.
+#
+# Deliberately `docker-compose.ports.yml` as a second `-f` rather than
+# `docker-compose.override.yml`: an override *appends* port bindings, leaving
+# the conflicting one published.
+function Get-ComposeArgs {
+    $composeArgs = @('compose')
+    if ($null -ne $script:RepoRoot) {
+        if (Test-Path (Join-Path $script:RepoRoot 'docker-compose.ports.yml')) {
+            $composeArgs += @('-f', 'docker-compose.yml', '-f', 'docker-compose.ports.yml')
+        }
+    }
+    return $composeArgs
+}
+
+# The address the console actually answers on. `AISOC_CONSOLE_URL` is written
+# into `.env` by scripts/resolve_port_conflicts.py whenever the console moves
+# off 3000, which is the same source the Makefile's `console_url` reads.
+# Printing a hardcoded localhost:3000 after moving the console hands the
+# operator a URL that answers nothing — worse than the conflict itself.
+function Get-ConsoleUrl {
+    $default = 'http://localhost:3000'
+    if ($null -eq $script:RepoRoot) { return $default }
+    $envPath = Join-Path $script:RepoRoot '.env'
+    if (-not (Test-Path $envPath)) { return $default }
+    $line = Get-Content $envPath -ErrorAction SilentlyContinue |
+        Where-Object { $_ -match '^AISOC_CONSOLE_URL=' } |
+        Select-Object -Last 1
+    if ([string]::IsNullOrWhiteSpace($line)) { return $default }
+    $value = ($line -replace '^AISOC_CONSOLE_URL=', '').Trim().Trim('"').Trim("'")
+    if ([string]::IsNullOrWhiteSpace($value)) { return $default }
+    return $value
 }
 
 # Waits on the services that declare a healthcheck, and refuses to call a
@@ -864,7 +1060,8 @@ function Wait-StackHealthy {
     Write-Info 'Waiting for services to become healthy...'
     $pending = @()
     for ($attempt = 0; $attempt -lt 60; $attempt++) {
-        $lines = @(& docker compose ps -a --format '{{.Service}} {{.State}} {{.Health}}' 2>$null)
+        $psArgs = @(Get-ComposeArgs) + @('ps', '-a', '--format', '{{.Service}} {{.State}} {{.Health}}')
+        $lines = @(& docker @psArgs 2>$null)
         $broken = @()
         $pending = @()
         foreach ($line in $lines) {
@@ -927,7 +1124,9 @@ function Start-Stack {
     try {
         Test-CorePortsFree
 
-        $composeArgs = @('compose', 'up', '-d')
+        # Get-ComposeArgs is evaluated after Test-CorePortsFree so it picks up
+        # a port overlay written moments ago.
+        $composeArgs = @(Get-ComposeArgs) + @('up', '-d')
         if ($Rebuild) { $composeArgs += '--build' }
         & docker @composeArgs
         if ($LASTEXITCODE -ne 0) {
@@ -957,7 +1156,8 @@ function New-AdminAccount {
     try {
         # Output is deliberately neither captured nor suppressed: the
         # generated password is printed here, once, and stored nowhere.
-        & docker compose run --rm -T api python -m app.scripts.bootstrap_admin
+        $bootstrapArgs = @(Get-ComposeArgs) + @('run', '--rm', '-T', 'api', 'python', '-m', 'app.scripts.bootstrap_admin')
+        & docker @bootstrapArgs
         if ($LASTEXITCODE -ne 0) {
             Write-Host ''
             Write-Warn 'Could not create the administrator — the stack is up, but you cannot sign in yet.'
@@ -1127,8 +1327,13 @@ function Write-SuccessBanner {
         Write-Host 'The end-to-end pipeline check did not run — see the note above.' -ForegroundColor Yellow
     }
     Write-Host ''
-    Write-Host '  Web console:    http://localhost:3000'
-    Write-Host '  API + Swagger:  http://localhost:8000/api/docs'
+    Write-Host "  Web console:    $(Get-ConsoleUrl)"
+    Write-Host '  API:            http://localhost:8000'
+    # Not /api/docs: interactive docs are deliberately off in this
+    # production-class stack, so advertising them hands the reader a 404.
+    # install.sh's banner says the same thing.
+    Write-Host '  API spec:       docs/openapi.yaml  (interactive docs are off in'
+    Write-Host '                  this production-class stack, which is the posture to keep)'
     Write-Host '  Realtime WS:    ws://localhost:8086'
     Write-Host ''
     Write-Host "  Sign in as:     $adminEmail"
@@ -1180,7 +1385,7 @@ function Invoke-Main {
         Write-Host '    2. Read the troubleshooting guide:'
         Write-Host '       https://github.com/beenuar/AiSOC/blob/main/docs/QUICK_INSTALL.md#troubleshooting'
         Write-Host '    3. File an issue with the system info below:'
-        Write-Host '       https://github.com/beenuar/AiSOC/issues/new?template=installer-bug.md'
+        Write-Host '       https://github.com/beenuar/AiSOC/issues/new?template=installer-failure.yml'
         Write-Host ''
         Write-Host '  System info:' -ForegroundColor DarkGray
         try {
@@ -1234,6 +1439,7 @@ function Invoke-Main {
         Install-Docker
         Install-Node
         Install-Pnpm
+        Install-Python
     } else {
         Write-Info "-NoInstall: skipping prerequisite install. Verifying what's on PATH..."
         if (-not (Test-CommandExists git))    { Stop-WithError "git missing (and -NoInstall was given)" }
@@ -1242,6 +1448,9 @@ function Invoke-Main {
         if ($LASTEXITCODE -ne 0)              { Stop-WithError "docker compose v2 missing (and -NoInstall was given)" }
         if (-not (Test-CommandExists node))   { Stop-WithError "node missing (and -NoInstall was given)" }
         if (-not (Test-CommandExists pnpm))   { Stop-WithError "pnpm missing (and -NoInstall was given)" }
+        # Checked by running it, not by name: Windows ships a Store stub
+        # called python.exe that is on PATH and is not an interpreter.
+        if ($null -eq (Resolve-Python))       { Stop-WithError "python 3 missing (and -NoInstall was given) — .env secrets and port resolution both need it" }
         Test-DockerDaemon
     }
 

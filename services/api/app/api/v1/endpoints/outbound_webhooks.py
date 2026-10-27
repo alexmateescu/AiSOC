@@ -19,8 +19,9 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app._vendor.ssrf_guard import SSRFError, validate_outbound_url
 from app.api.v1.deps import CurrentUser, require_permission
-from app.db.database import get_db
+from app.db.rls import TenantDBSession
 from app.models.outbound_webhook import OutboundDelivery, OutboundWebhook
 from app.security.credential_vault import get_vault
 from app.services.outbound_webhooks import attempt_delivery
@@ -28,6 +29,22 @@ from app.services.outbound_webhooks import attempt_delivery
 logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/outbound-webhooks", tags=["integrations"])
+
+
+def _refuse_internal(url: str) -> str:
+    """Refuse destinations inside the deployment, as ``destinations.py`` does.
+
+    The delivery worker POSTs the alert payload to this URL and records the
+    status code and error text, so an internal URL (169.254.169.254, the
+    compose service names, loopback, RFC 1918) made the API a request proxy
+    into its own network with a response oracle (GHSA-898c-wxrw-hx6c).
+    Private ranges stay refused unless ``AISOC_SSRF_ALLOW_PRIVATE`` says
+    otherwise, for an on-prem receiver.
+    """
+    try:
+        return validate_outbound_url(url)
+    except SSRFError as exc:
+        raise ValueError(f"destination refused: {exc}") from exc
 
 
 class WebhookCreate(BaseModel):
@@ -43,7 +60,7 @@ class WebhookCreate(BaseModel):
     def _http_only(cls, value: str) -> str:
         if not value.startswith(("http://", "https://")):
             raise ValueError("url must be http or https")
-        return value
+        return _refuse_internal(value)
 
 
 class WebhookUpdate(BaseModel):
@@ -51,6 +68,18 @@ class WebhookUpdate(BaseModel):
     url: str | None = Field(default=None, max_length=2048)
     event_types: list[str] | None = Field(default=None, max_length=64)
     enabled: bool | None = None
+
+    # The create model checked the scheme and nothing else, and this one
+    # checked nothing at all, so a destination saved as https://partner could
+    # be edited to file:// or to 169.254.169.254 afterwards.
+    @field_validator("url")
+    @classmethod
+    def _http_only(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        if not value.startswith(("http://", "https://")):
+            raise ValueError("url must be http or https")
+        return _refuse_internal(value)
 
 
 class WebhookOut(BaseModel):
@@ -107,7 +136,7 @@ async def _owned(db: AsyncSession, webhook_id: uuid.UUID, tenant_id: uuid.UUID) 
 @router.get("", response_model=list[WebhookOut])
 async def list_webhooks(
     user: Annotated[CurrentUser, Depends(require_permission("integrations:read"))],
-    db: Annotated[AsyncSession, Depends(get_db)],
+    db: TenantDBSession,
 ) -> list[WebhookOut]:
     rows = (
         (await db.execute(select(OutboundWebhook).where(OutboundWebhook.tenant_id == user.tenant_id).order_by(OutboundWebhook.name)))
@@ -121,7 +150,7 @@ async def list_webhooks(
 async def create_webhook(
     body: WebhookCreate,
     user: Annotated[CurrentUser, Depends(require_permission("integrations:write"))],
-    db: Annotated[AsyncSession, Depends(get_db)],
+    db: TenantDBSession,
 ) -> dict[str, Any]:
     """Create a destination and mint its signing secret.
 
@@ -157,7 +186,7 @@ async def update_webhook(
     webhook_id: uuid.UUID,
     body: WebhookUpdate,
     user: Annotated[CurrentUser, Depends(require_permission("integrations:write"))],
-    db: Annotated[AsyncSession, Depends(get_db)],
+    db: TenantDBSession,
 ) -> WebhookOut:
     row = await _owned(db, webhook_id, user.tenant_id)
     for field_name in ("name", "url", "event_types", "enabled"):
@@ -174,7 +203,7 @@ async def update_webhook(
 async def delete_webhook(
     webhook_id: uuid.UUID,
     user: Annotated[CurrentUser, Depends(require_permission("integrations:write"))],
-    db: Annotated[AsyncSession, Depends(get_db)],
+    db: TenantDBSession,
 ) -> None:
     row = await _owned(db, webhook_id, user.tenant_id)
     await db.delete(row)
@@ -185,7 +214,7 @@ async def delete_webhook(
 async def rotate_secret(
     webhook_id: uuid.UUID,
     user: Annotated[CurrentUser, Depends(require_permission("integrations:write"))],
-    db: Annotated[AsyncSession, Depends(get_db)],
+    db: TenantDBSession,
 ) -> dict[str, Any]:
     row = await _owned(db, webhook_id, user.tenant_id)
     plaintext = secrets.token_urlsafe(32)
@@ -198,7 +227,7 @@ async def rotate_secret(
 @router.get("/deliveries", response_model=list[DeliveryOut])
 async def list_deliveries(
     user: Annotated[CurrentUser, Depends(require_permission("integrations:read"))],
-    db: Annotated[AsyncSession, Depends(get_db)],
+    db: TenantDBSession,
     status_filter: Annotated[str | None, Query(alias="status", pattern="^(pending|delivered|failed|dead)$")] = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
 ) -> list[DeliveryOut]:
@@ -212,7 +241,7 @@ async def list_deliveries(
 @router.get("/dead-letters", response_model=list[DeliveryOut])
 async def list_dead_letters(
     user: Annotated[CurrentUser, Depends(require_permission("integrations:read"))],
-    db: Annotated[AsyncSession, Depends(get_db)],
+    db: TenantDBSession,
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
 ) -> list[DeliveryOut]:
     """Deliveries that exhausted their retries or were refused outright.
@@ -241,7 +270,7 @@ async def list_dead_letters(
 async def replay_delivery(
     delivery_id: uuid.UUID,
     user: Annotated[CurrentUser, Depends(require_permission("integrations:write"))],
-    db: Annotated[AsyncSession, Depends(get_db)],
+    db: TenantDBSession,
 ) -> DeliveryOut:
     """Send a dead letter again, with the body the first attempt sent.
 

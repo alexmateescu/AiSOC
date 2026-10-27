@@ -213,10 +213,27 @@ async def connector_row(engine, vendor):  # noqa: ANN001
 
 @pytest_asyncio.fixture(scope="module", loop_scope="module")
 async def scheduler(engine, ingest, connector_row):  # noqa: ANN001
-    """The real `ConnectorScheduler`, started."""
+    """The real `ConnectorScheduler`, started — with the mock vendor admitted.
+
+    GHSA-cq4g-g6wp-4m2w put the SSRF guard on every scheduled poll, and the
+    guard refuses loopback unconditionally unless the operator names the host
+    in ``AISOC_SSRF_ALLOW_HOSTS`` (``ALLOW_PRIVATE`` deliberately never admits
+    loopback). The mock vendor this suite polls lives on ``127.0.0.1``, so
+    without the variable the scheduler *correctly* refuses to poll it — the
+    guard working, not the scheduler failing, which is exactly how this suite
+    went red the moment the guard landed while the quota noise on that day's
+    runners hid the real failure under pull errors. Setting the variable here
+    is not a test-only bypass: it is the documented operator path for a vendor
+    on a named internal host, exercised end to end — the guard reads it per
+    validation, admits exactly this host, and keeps refusing everything else
+    (the cloud-metadata blocklist cannot be overridden by it at all).
+    """
     from app.ingest_client import IngestClient
     from app.scheduler import ConnectorScheduler
     from app.security.credential_vault import get_vault
+
+    previous = os.environ.get("AISOC_SSRF_ALLOW_HOSTS")
+    os.environ["AISOC_SSRF_ALLOW_HOSTS"] = "127.0.0.1"
 
     instance = ConnectorScheduler(
         engine=engine,
@@ -227,6 +244,10 @@ async def scheduler(engine, ingest, connector_row):  # noqa: ANN001
     await instance.start()
     yield instance
     await instance.stop()
+    if previous is None:
+        os.environ.pop("AISOC_SSRF_ALLOW_HOSTS", None)
+    else:
+        os.environ["AISOC_SSRF_ALLOW_HOSTS"] = previous
 
 
 class TestTheJobIsScheduledToRun:

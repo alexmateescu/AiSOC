@@ -22,7 +22,7 @@ python = "^3.11"
 # `tests/test_fastapi_floor.py` re-derives the boundary from the installed
 # version, so a Dependabot bump that lowers the floor fails rather than
 # producing an image that dies on startup.
-fastapi = ">=0.117,<0.142"
+fastapi = ">=0.117,<0.162"
 uvicorn = { version = ">=0.29,<0.55", extras = ["standard"] }
 # EmailStr (used in auth/passkeys/tenants endpoints) requires the optional
 # email-validator package, which is only pulled in via the "email" extra.
@@ -30,7 +30,7 @@ uvicorn = { version = ">=0.29,<0.55", extras = ["standard"] }
 pydantic = { version = ">=2.7,<2.15", extras = ["email"] }
 pydantic-settings = "^2.2.1"
 sqlalchemy = { version = "^2.0.30", extras = ["asyncio"] }
-asyncpg = ">=0.29.0,<0.32"
+asyncpg = ">=0.29.0,<0.33"
 alembic = "^1.13.1"
 redis = { version = ">=5.0.4,<9.0.0", extras = ["hiredis"] }
 httpx = ">=0.27,<0.29"
@@ -111,7 +111,7 @@ pysigma = ">=0.11.17,<0.12"
 pysigma-backend-opensearch = "^1.0.0"
 yara-python = "^4.5.0"
 pyyaml = "^6.0.1"
-strawberry-graphql = { version = ">=0.236,<0.333", extras = ["fastapi"] }
+strawberry-graphql = { version = ">=0.236,<0.337", extras = ["fastapi"] }
 webauthn = ">=2.2,<4.0"
 weasyprint = ">=62,<71"          # WS-G2: server-side PDF generation from print-ready HTML
 # Phase 4.5 / Milestone 1F — the hunt scheduler now drives next-fire

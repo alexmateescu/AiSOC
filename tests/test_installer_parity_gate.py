@@ -76,6 +76,20 @@ def _code_lines(text: str) -> list[str]:
     return out
 
 
+# Lines that *print* rather than *do*. A banner telling the operator what to
+# run later contains the same command text as the invocation that runs it,
+# and that near-miss is not hypothetical here: the installer's `-NoLaunch`
+# help prints `docker compose up -d`, `docker compose ps -a` and
+# `docker compose run --rm -T api …` verbatim, so three assertions below
+# would have passed on a script that only ever *mentioned* those commands.
+_OUTPUT_CMDLET = re.compile(r"^\s*Write-(Host|Info|Ok|Warn|Err|Log|Section)\b", re.IGNORECASE)
+
+
+def _action_lines(text: str) -> str:
+    """Code lines with the output cmdlets removed — what the script executes."""
+    return "\n".join(line for line in _code_lines(text) if not _OUTPUT_CMDLET.match(line))
+
+
 # ── What the installer starts ───────────────────────────────────────────────
 
 
@@ -95,22 +109,97 @@ def test_windows_installer_does_not_hand_off_to_the_demo_stack() -> None:
 
 
 def test_windows_installer_starts_the_real_stack() -> None:
-    code = "\n".join(_code_lines(_read(INSTALL_PS1)))
-    assert "'compose', 'up', '-d'" in code or "docker compose up -d" in code, (
+    actions = _action_lines(_read(INSTALL_PS1))
+    assert ("'up', '-d'" in actions) or ("'compose', 'up', '-d'" in actions) or ("docker compose up -d" in actions), (
         "install.ps1 must start the deployment defined by the root docker-compose.yml, the same one `make up` starts."
     )
 
 
 def test_windows_installer_waits_for_containers_to_be_healthy() -> None:
     """`docker compose up -d` returning 0 is not the stack being up."""
-    code = "\n".join(_code_lines(_read(INSTALL_PS1)))
-    assert "docker compose ps -a" in code, (
+    actions = _action_lines(_read(INSTALL_PS1))
+    assert ("'ps', '-a'" in actions) or ("docker compose ps -a" in actions), (
         "install.ps1 must poll `docker compose ps -a` before declaring the "
         "stack up. Without `-a` an exited container is absent from the "
         "listing entirely and a crash-looping service reads as success."
     )
     for state in ("exited", "restarting", "unhealthy"):
-        assert state in code, f"install.ps1's wait loop does not treat {state!r} as a failure"
+        assert state in actions, f"install.ps1's wait loop does not treat {state!r} as a failure"
+
+
+# ── No on-ramp may point an evaluator at the demo stack ────────────────────
+
+#: Surfaces a first-time user meets. Each one has, at some point, told
+#: somebody to run `pnpm aisoc:demo` as their way into the product:
+#: install.sh and install.ps1 by handing off to it, the devcontainer in its
+#: attach banner, and the sandbox README in its "when you're ready for the
+#: real stack" line. The compose file behind that command has no ingest
+#: service, no fusion service and Kafka disabled — its own header says it
+#: "does NOT run the AiSOC pipeline" and must not be used to evaluate
+#: whether AiSOC works — so each of those sent an evaluator to a populated
+#: console that had never run the product.
+#:
+#: Fixing the installers did not fix the class; the other two were found
+#: still doing it afterwards. This checks all of them at once.
+ONRAMP_SURFACES = (
+    "install.sh",
+    "install.ps1",
+    ".devcontainer/devcontainer.json",
+    "packages/aisoc-sandbox/README.md",
+    "apps/docs/docs/quickstart.md",
+    "apps/docs/docs/installation.md",
+    "docs/QUICK_INSTALL.md",
+    "README.md",
+)
+
+
+def _instructional_lines(path: Path, text: str) -> list[str]:
+    """Lines that tell a reader to do something, minus the ones explaining
+    what we deliberately do *not* do.
+
+    Every one of these files is entitled to name the demo stack while
+    warning readers off it — several now do, at length, and a gate that
+    could not tell a warning from an instruction would force those
+    warnings to be deleted. That would be the wrong direction: the warning
+    is the thing keeping an evaluator out of a console that proves nothing.
+
+    So the exemptions are the three shapes commentary actually takes here:
+    a source-code comment, a Markdown blockquote, and a Docusaurus
+    admonition (`:::caution` … `:::`). Everything else counts.
+    """
+    if path.suffix == ".ps1":
+        return _code_lines(text)
+    if path.suffix in {".sh", ".json"}:
+        return [line for line in text.splitlines() if not line.strip().startswith(("#", "//"))]
+
+    out: list[str] = []
+    in_admonition = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(":::"):
+            # `:::caution Title` opens, a bare `:::` closes.
+            in_admonition = len(stripped) > 3
+            continue
+        if in_admonition or stripped.startswith(">"):
+            continue
+        out.append(line)
+    return out
+
+
+@pytest.mark.parametrize("rel", ONRAMP_SURFACES)
+def test_no_onramp_offers_the_demo_stack_as_a_way_in(rel: str) -> None:
+    path = REPO / rel
+    if not path.is_file():
+        pytest.skip(f"{rel} is not in this checkout")
+    offenders = [line.strip() for line in _instructional_lines(path, _read(path)) if DEMO_HANDOFF in line]
+    assert not offenders, (
+        f"{rel} points a first-time user at the demo stack:\n  "
+        + "\n  ".join(offenders)
+        + f"\n`{DEMO_HANDOFF}` starts a compose file with no ingest and no fusion service. "
+        "It cannot answer whether AiSOC works, so it must not be anybody's way in — "
+        "use `make up`. Explaining in a comment why it is not used is fine; telling "
+        "somebody to run it is not."
+    )
 
 
 # ── Parity with the Makefile targets install.sh reaches through `make` ──────
@@ -132,9 +221,9 @@ def test_windows_installer_creates_the_first_administrator() -> None:
     """
     module = "app.scripts.bootstrap_admin"
     assert module in _makefile_recipe("bootstrap"), f"`make bootstrap` no longer runs {module}; update this gate and install.ps1 together"
-    code = "\n".join(_code_lines(_read(INSTALL_PS1)))
-    assert module in code, f"install.ps1 never runs {module}, so no administrator is created"
-    assert "docker compose run --rm -T api" in code, (
+    actions = _action_lines(_read(INSTALL_PS1))
+    assert module in actions, f"install.ps1 never runs {module}, so no administrator is created"
+    assert ("'run', '--rm', '-T', 'api'" in actions) or ("docker compose run --rm -T api" in actions), (
         "install.ps1 must create the administrator the same way `make bootstrap` does — a one-shot `docker compose run --rm -T api`"
     )
 
@@ -149,6 +238,73 @@ def test_windows_installer_runs_the_golden_pipeline() -> None:
         "install.ps1 never runs the golden pipeline, so it cannot tell a working "
         "deployment from a broken one before printing a success banner."
     )
+
+
+# ── Setup steps that are Python programs on both paths ─────────────────────
+#
+# Both of these shipped broken on Windows, and this gate is why they could.
+# It asserted compose/bootstrap/smoke/lockfile parity and said nothing about
+# how `.env` is produced or what happens when a port is taken — so
+# install.ps1 plain-copied `.env.example` (ENVIRONMENT=production with the
+# secrets empty, which `enforce_secure_defaults` refuses to boot on) and
+# exited 3 on a busy port, for as long as both existed.
+
+
+def test_both_installers_generate_the_env_secrets() -> None:
+    """A copied `.env.example` is not a usable environment.
+
+    `.env.example` ships `ENVIRONMENT=production` with `SECRET_KEY`,
+    `JWT_SECRET`, `METRICS_TOKEN` and `AISOC_CREDENTIAL_KEY` empty.
+    `scripts/ensure_env.py` is what fills them, `make env` runs it, and an
+    installer that only copies the template hands the operator a stack whose
+    API crash-loops on its first boot with nothing pointing back at the copy.
+    """
+    generator = "ensure_env.py"
+    assert generator in _makefile_recipe("env"), f"`make env` no longer runs {generator}; update this gate and both installers together"
+    for path in (INSTALL_SH, INSTALL_PS1):
+        text = _read(path)
+        body = _action_lines(text) if path is INSTALL_PS1 else text
+        assert generator in body, (
+            f"{path.name} never runs scripts/{generator}, so the `.env` it writes carries "
+            "empty secrets and the API refuses to start in production."
+        )
+
+
+def test_windows_installer_resolves_port_conflicts_rather_than_refusing() -> None:
+    """A busy port must move the publication, not stop the install.
+
+    `make up` runs `scripts/resolve_port_conflicts.py`, which republishes the
+    conflicting port and writes `docker-compose.ports.yml`. install.ps1 used
+    to `exit 3` and tell the operator to edit `docker-compose.yml` by hand —
+    on the two conditions most likely in this audience's environment, an
+    existing Postgres on 5432 or an Ollama on 11434 — while README.md
+    promises "a port already in use does not stop the install".
+    """
+    resolver = "resolve_port_conflicts.py"
+    assert resolver in _makefile_recipe("_ports"), f"`make up` no longer runs {resolver}; update this gate and install.ps1 together"
+    actions = _action_lines(_read(INSTALL_PS1))
+    assert resolver in actions, (
+        f"install.ps1 never runs scripts/{resolver}, so a port already in use is a hard stop on Windows "
+        "while the same condition is resolved automatically on the `make up` path."
+    )
+
+
+def test_windows_installer_passes_the_port_overlay_to_every_compose_call() -> None:
+    """Starting a remapped stack and then addressing the base composition is
+    two different stacks: `ps` reports nothing to wait for and
+    `bootstrap_admin` runs against a project the operator is not using. The
+    Makefile funnels every call through its `COMPOSE` variable for this
+    reason; install.ps1 funnels them through `Get-ComposeArgs`."""
+    overlay = "docker-compose.ports.yml"
+    assert overlay in _read(MAKEFILE), f"the Makefile no longer builds {overlay}; update this gate and install.ps1 together"
+    actions = _action_lines(_read(INSTALL_PS1))
+    assert overlay in actions, f"install.ps1 never references {overlay}, so a remapped stack is addressed inconsistently"
+
+    # Every `& docker` invocation that speaks to the project must go through
+    # the helper. A raw `docker compose …` would silently target the base
+    # composition.
+    raw = [line.strip() for line in actions.splitlines() if re.search(r"&\s*docker\s+compose\b", line) and "version" not in line]
+    assert not raw, "install.ps1 calls compose without the port overlay:\n  " + "\n  ".join(raw)
 
 
 def test_both_installers_use_a_frozen_lockfile() -> None:

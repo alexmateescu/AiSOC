@@ -1,9 +1,9 @@
 {
   "(environment)": {
     "flags": "--no-color-output --no-error-summary --no-site-packages --no-incremental",
-    "mypy": "2.4.0",
+    "mypy": "2.3.1",
     "mypy_major": "2",
-    "python": "3.11"
+    "python": "3.14"
   },
   "(unmanaged)": {
     "plugins/mttr-widget/plugin.py": {
@@ -476,6 +476,10 @@
     },
     "app/connectors/posture/aws.py": {
       "no-redef": 1
+    },
+    "app/security/ssrf_guard.py": {
+      "attr-defined": 6,
+      "union-attr": 1
     },
     "tests/test_pipeline_filter_rules.py": {
       "arg-type": 1

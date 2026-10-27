@@ -94,7 +94,7 @@ of these regenerates:
 
 | Figure | Current | Command |
 | --- | --- | --- |
-| Executable detection rules | 2,511 of 6,991 on disk | `python3 scripts/generate_corpus_stats.py --check` |
+| Executable detection rules | 2,535 of 7,015 on disk | `python3 scripts/generate_corpus_stats.py --check` |
 | Rules that cannot fire | 2 | `python3 scripts/check_detection_fields.py` |
 | Connectors | 87 | `python3 scripts/generate_connector_count.py --check` |
 | Services per profile | CORE 16, full 21 | `python3 scripts/check_profile_service_counts.py` |

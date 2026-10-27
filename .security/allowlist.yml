@@ -231,9 +231,45 @@ ceilings:
     # ceiling: `text()` with every value bound, which three gates hold
     # (check_text_bind_casts, check_raw_sql_columns,
     # check_tenant_query_predicates). Counting it beats suppressing it.
-    total: 110
+    # 110/44 -> 111/44, and the rules are no longer a moving target
+    # (issue #1099, closed by this change). The registry packs the scan
+    # fetched at run time are vendored under .security/semgrep/ and the
+    # ceiling is now bound to their combined digest via `rules_sha256`,
+    # verified by the ratchet the same way `measured_with` is — so from here
+    # a count can only move when this tree moves, or when someone refreshes
+    # the packs with scripts/vendor_semgrep_packs.py and re-measures both
+    # numbers in the same change. The totals moving in the act of pinning is
+    # itself the closing exhibit: 110/44 was measured against the registry
+    # state of an earlier week, 111/44 against the vendored state of
+    # 2026-10-17, with no scanned file changing in between.
+    #
+    # Both numbers here were measured by this gate in CI, per the rule at the
+    # top of this section. Worth recording because it narrows the attribution
+    # hunt below: a local macOS run of the *identical* rules digest and
+    # binary read 110/43 against CI's 111/44 — one finding apart in both
+    # buckets on the same tree. Platform is a variable the count depends on,
+    # so never pin a ceiling from a laptop measurement.
+    #
+    # What this does NOT close: the scanner's own one-run-in-twenty +/-1,
+    # measured further down on identical rule sets and identical trees. That
+    # is the reason `Semgrep (ratcheted)` stays unrequired, and it is
+    # unchanged by pinning the rules; requiring the job still waits on that
+    # +/-1 being attributed and eliminated.
+    # 111 -> 112 (error unchanged at 44). A fifth and sixth
+    # `dynamic-urllib-use-detected`, both in scripts/chaos/store_outage.py
+    # (#1446), which probes the liveness/readiness routes the chaos legs
+    # grade. Net +1 against the ceiling: the rewrite replaced one flagged
+    # call and added one. Both call sites refuse any URL that does not start
+    # with the fixed localhost probe prefixes — the same shape as the four
+    # findings above — so the `file://` read the rule warns about is not
+    # reachable; the rule fires on any non-literal argument to `urlopen`.
+    # Counted rather than suppressed, per the note at the bottom of this
+    # file. Measured with semgrep 1.86.0 on the vendored packs
+    # (rules_sha256 below): 112 total / 44 error.
+    total: 112
     error: 44
     measured_with: "1.86.0"
+    rules_sha256: "5af76658e7e28b96b1099d2c995d7c85b3b9a4f96795a39df3d02aa7d295cb99"
   checkov:
     # 219 -> 272 (the 2026-10-12 merge train). The chart stopped describing
     # seven services and started installing CORE (depth 4.5, #1326: three more

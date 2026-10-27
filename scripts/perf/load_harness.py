@@ -347,6 +347,20 @@ class ProducerSummary:
     def alert_every(self) -> int:
         return int(self.raw.get("alert_every") or 1)
 
+    @property
+    def payload_bytes_per_event(self) -> float | None:
+        """Mean request-body bytes per attempted event, measured at the wire.
+
+        ``None`` for a summary written by a producer from before the counter
+        existed — the honest answer, exactly like ``alerting_sent`` above,
+        rather than a default that looks like a measurement.
+        """
+        value = self.raw.get("payload_bytes_per_event")
+        if value is None:
+            return None
+        parsed = float(value)
+        return parsed if parsed > 0 else None
+
 
 @dataclass
 class AlertRow:
@@ -867,6 +881,17 @@ def main(argv: list[str] | None = None) -> int:
     }
     if args.target == "compose":
         shape["hosts"] = 1
+    # `throughput_claims.py` requires `payload_bytes` beside `ingest_eps` —
+    # wired as a gate in depth 5.8, after which the job failed every
+    # scheduled run for seventeen days because nothing ever recorded the
+    # key (the fan-out half of the same gap was fixed in #1218; this is the
+    # payload half). Read from what the producer actually sent — it counts
+    # request-body bytes at the marshal — and omitted, not defaulted, when
+    # an older producer summary lacks the counter, so the grader says
+    # "unreproducible" instead of publishing a guess.
+    payload_bytes = summary.payload_bytes_per_event
+    if payload_bytes is not None:
+        shape["payload_bytes"] = round(payload_bytes)
     # `throughput_claims.py` requires both of these beside an alert-path rate,
     # and it is right to: that rate is the one a reader uses to decide whether
     # a deployment keeps up, and it means nothing without the fan-out it was

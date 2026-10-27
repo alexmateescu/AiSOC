@@ -44,6 +44,9 @@ The API uses bare environment variable names (no prefix). Booleans accept `true`
 | `AISOC_APP_DB_PASSWORD` | _empty_ | Postgres **runtime** role (`aisoc_app`), DML only so the row-level-security policies apply to it. `make env` generates one. |
 | `REDIS_PASSWORD` | _empty_ | Redis AUTH password. `REDIS_URL` references it rather than repeating it, so rotating one rotates both. `make env` generates one. |
 | `CLICKHOUSE_PASSWORD` | _empty_ | ClickHouse event-lake password, referenced the same way by `CLICKHOUSE_URL`. `make env` generates one. |
+| `AISOC_SSRF_ALLOW_PRIVATE` | `false` | The API validates connector `base_url`s at create/update and webhook destinations at create, update and delivery through the SSRF guard. `true` re-admits RFC1918 / link-local destinations (never loopback, never cloud metadata) for on-prem systems. One `.env` value reaches `api`, `connectors` and `agents` in compose. |
+| `AISOC_SSRF_ALLOW_HOSTS` | — | Comma-separated **exact** hostnames the guard admits (no wildcards, no CIDR). Use it to permit one named internal SIEM or webhook without opening every private range. The cloud-metadata block list cannot be overridden by it. |
+| `AISOC_SSRF_EXTRA_BLOCKED_HOSTS` | — | Comma-separated extra hosts or IPs to deny on top of the built-in cloud-metadata block list. |
 
 :::info A published default cannot satisfy a production guard
 
@@ -299,11 +302,36 @@ Source: [`services/agents/app/`](https://github.com/beenuar/AiSOC/tree/main/serv
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | — | OTLP collector endpoint |
 | `OTEL_EXPORTER` | `otlp` | One of `otlp`, `jaeger`, `console` |
 | `AISOC_SSRF_ALLOWED_SCHEMES` | `http,https` | Comma-separated list of URL schemes allowed for outbound `http_request` and `notify` playbook steps. Anything else is rejected. |
-| `AISOC_SSRF_ALLOW_PRIVATE` | `false` | When `true`, lets playbook steps reach loopback / RFC1918 / link-local destinations. Leave off in production; enable only for self-hosted webhooks on a private network. |
+| `AISOC_SSRF_ALLOW_PRIVATE` | `false` | When `true`, lets playbook steps reach RFC1918 / link-local destinations (never loopback, never cloud metadata). Leave off in production; enable only for self-hosted webhooks on a private network. Compose passes one `.env` value to every service that runs the guard — this one, `api` and `connectors` — so the three processes cannot disagree. |
+| `AISOC_SSRF_ALLOW_HOSTS` | — | Comma-separated **exact** hostnames to admit (no wildcards, no CIDR ranges). A named host skips the IP-range checks, so a single internal webhook or SIEM can be admitted without opening every private range. The cloud-metadata block list still applies — nothing can admit `169.254.169.254` or its siblings. |
 | `AISOC_SSRF_EXTRA_BLOCKED_HOSTS` | — | Comma-separated extra hosts or IPs to deny in addition to the built-in cloud-metadata block list (`169.254.169.254`, `metadata.google.internal`, …). |
 | `AISOC_SIEM_WRITEBACK_ENABLED` | `1` | Whether the triage worker asks the API to project a verdict onto the finding that raised the alert. Off means nothing is attempted. |
 | `AISOC_AGENTS_SERVICE_TOKEN` | — | Shared secret for the API's writeback route. **Unset disables the service path**, so the worker logs a warning and posts nothing rather than failing silently. |
 | `AISOC_SIEM_WRITEBACK_TIMEOUT_S` | `20` | Timeout for the writeback call. A timeout is a skipped writeback, never a failed triage. |
+
+---
+
+## Connectors service (`services/connectors`)
+
+Source: [`services/connectors/app/`](https://github.com/beenuar/AiSOC/tree/main/services/connectors/app)
+
+Every connector egress path — the stateless "Test connection" route, resource
+reads and scheduled polls — goes through the SSRF guard in this process
+(GHSA-cq4g-g6wp-4m2w), so a tenant-controlled `base_url` cannot reach cloud
+metadata, loopback or internal services. The guard reads the same variables
+in every service that runs it, and compose delivers them to `api`,
+`connectors` and `agents` from one `.env` value:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AISOC_SSRF_ALLOW_PRIVATE` | `false` | `true` re-admits connectors on RFC1918 / link-local ranges — the on-prem SIEM case. Never admits loopback or cloud metadata. |
+| `AISOC_SSRF_ALLOW_HOSTS` | — | Comma-separated **exact** hostnames to admit (no wildcards, no CIDR). A named host skips the IP-range checks; the cloud-metadata block list still applies and cannot be overridden. |
+| `AISOC_SSRF_EXTRA_BLOCKED_HOSTS` | — | Comma-separated extra hosts or IPs to deny on top of the built-in block list. |
+
+The service's port, auth and Kafka variables are set by compose and documented
+inline in `docker-compose.yml`; the connector-specific credentials (Splunk,
+CrowdStrike, …) are entered per connector instance in the console and stored
+vault-encrypted, not read from the environment.
 
 ---
 

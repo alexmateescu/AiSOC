@@ -3,29 +3,30 @@
 > Run an AiSOC agent investigation **offline in under 30 seconds**. No Docker, no API key, no network.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-22c55e.svg)](https://github.com/beenuar/AiSOC/blob/main/LICENSE)
-[![PyPI release](https://img.shields.io/badge/pypi-not%20yet%20published-f59e0b)](https://github.com/beenuar/AiSOC/blob/main/CHANGELOG.md)
+[![PyPI release](https://img.shields.io/pypi/v/aisoc-sandbox?color=22c55e)](https://pypi.org/project/aisoc-sandbox/)
 
 `aisoc-sandbox` is the quickest possible on-ramp to [AiSOC](https://github.com/beenuar/AiSOC). It walks one alert fixture through a four-stage agent funnel — **Detect → Triage → Hunt → Respond** — using a deterministic offline reasoner in place of a real LLM, and prints the resulting Investigation Ledger to your terminal.
 
-It is the simulator-equivalent of the production [`services/agents/`](https://github.com/beenuar/AiSOC/tree/main/services/agents) graph, collapsed into a single zero-dependency Python package. **When you're ready to run the real stack: `pnpm aisoc:demo` from a fresh clone of [AiSOC](https://github.com/beenuar/AiSOC).**
+It is the simulator-equivalent of the production [`services/agents/`](https://github.com/beenuar/AiSOC/tree/main/services/agents) graph, collapsed into a single zero-dependency Python package. **When you're ready to run the real stack: `git clone https://github.com/beenuar/AiSOC && cd AiSOC && make up`.**
 
 ## Why this exists
 
-The production AiSOC stack needs Postgres, Kafka, Redis, an LLM API key, and ~5 minutes to boot. That's the right cost for a buyer evaluating against their own alert data — but it's the wrong cost for a developer who just wants to see how the agent reasons before they commit their evening.
+The production AiSOC stack needs Postgres, Kafka, Redis and a few minutes to boot. That's the right cost for a buyer evaluating against their own alert data — but it's the wrong cost for a developer who just wants to see how the agent reasons before they commit their evening. (It does **not** need an API key: the stack ships a local model and runs triage with no credentials.)
 
 This package collapses the boot time to **< 5 seconds** and the disk footprint to **< 50 KB**. The trade-off is that the reasoning is deterministic and the tools are simulated (not executed); see "Differences from the production stack" below.
 
 ## Install
 
 ```bash
-# Today (from this monorepo):
+pip install aisoc-sandbox
+aisoc-sandbox demo
+
+# Or without installing anything permanently:
+pipx run aisoc-sandbox demo
+
+# Or from a clone of the monorepo, to run it against your own changes:
 git clone https://github.com/beenuar/AiSOC.git
 cd AiSOC && pip install -e packages/aisoc-sandbox
-
-# Once published to PyPI (ready, unpublished — the upload is blocked on
-# registry credentials, which is an account action, not a code change):
-#   pip install aisoc-sandbox
-#   pipx run aisoc-sandbox demo
 ```
 
 Python 3.10+ on Linux / macOS / Windows. Zero runtime dependencies.
@@ -118,9 +119,9 @@ print(ledger.to_json())
 | Persistence | In-memory; one CLI invocation | Postgres `investigation_events` table |
 | Latency | Synthetic per-stage numbers | Real LLM + tool latency |
 | Boot time | < 5 s | ~5 min cold, ~3.5 min warm |
-| Dependencies | None | Postgres + Kafka + Redis + LLM API key |
+| Dependencies | None | Postgres + Kafka + Redis (a local model ships with the stack; no API key needed) |
 
-This is on purpose. The sandbox is the **on-ramp**, not a replacement: it gives you 30-second visibility into how the funnel hangs together so you can decide whether the full demo is worth the 5-minute boot.
+This is on purpose. The sandbox is the **on-ramp**, not a replacement: it gives you 30-second visibility into how the funnel hangs together so you can decide whether the full stack is worth the boot.
 
 ## License
 

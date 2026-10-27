@@ -436,3 +436,36 @@ class TestIsDisallowedAddress:
 
         blocked, _ = _is_disallowed_address(ipaddress.ip_address(ip_str), allow_private=False)
         assert blocked is False
+
+
+class TestOperatorAllowHosts:
+    """AISOC_SSRF_ALLOW_HOSTS admits exact hosts; the blocklist still wins.
+
+    The escape exists for a vendor appliance reachable only through a local
+    tunnel: an SSH port-forward lands the "remote" SIEM on loopback, which
+    AISOC_SSRF_ALLOW_PRIVATE deliberately never admits.
+    """
+
+    def test_a_listed_loopback_host_is_admitted(self, monkeypatch):
+        monkeypatch.setenv("AISOC_SSRF_ALLOW_HOSTS", "127.0.0.1")
+        assert validate_outbound_url("http://127.0.0.1:8089/services") == "http://127.0.0.1:8089/services"
+
+    def test_an_unlisted_loopback_host_is_still_refused(self, monkeypatch):
+        monkeypatch.setenv("AISOC_SSRF_ALLOW_HOSTS", "127.0.0.1")
+        with pytest.raises(SSRFError):
+            validate_outbound_url("http://[::1]:8089/")
+
+    def test_the_blocklist_wins_over_the_allowlist(self, monkeypatch):
+        monkeypatch.setenv("AISOC_SSRF_ALLOW_HOSTS", "169.254.169.254")
+        with pytest.raises(SSRFError):
+            validate_outbound_url("http://169.254.169.254/latest/meta-data/")
+
+    def test_matching_is_exact_not_suffix(self, monkeypatch):
+        monkeypatch.setenv("AISOC_SSRF_ALLOW_HOSTS", "127.0.0.1")
+        with pytest.raises(SSRFError):
+            validate_outbound_url("http://evil127.0.0.1.nip.io.invalid/")
+
+    def test_unset_means_nothing_is_admitted(self, monkeypatch):
+        monkeypatch.delenv("AISOC_SSRF_ALLOW_HOSTS", raising=False)
+        with pytest.raises(SSRFError):
+            validate_outbound_url("http://127.0.0.1:8089/")

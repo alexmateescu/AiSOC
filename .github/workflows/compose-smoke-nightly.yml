@@ -65,7 +65,16 @@ jobs:
 
       - name: Seed environment file
         run: |
-          cp .env.example .env
+          # The same generator `make up` runs. A plain `cp .env.example .env`
+          # leaves every generated secret empty — deliberately, that file
+          # ships them empty for scripts/ensure_env.py to fill — and with
+          # ENVIRONMENT defaulting to production the API then *refuses to
+          # boot* (InsecureProductionDefaultsError names all six), so the
+          # stack could never converge: this job failed every night on
+          # "api /health 200: 0" long before the litellm tag deletion added
+          # a second failure in front of it. Seeding the real first-run way
+          # means this smoke exercises the path an operator actually takes.
+          python3 scripts/ensure_env.py
           # AISOC_VERSION is overridden purely for clarity in `docker ps`
           # output — every image is built locally so the tag is just a label.
           if grep -q '^AISOC_VERSION=' .env; then

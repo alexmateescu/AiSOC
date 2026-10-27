@@ -38,6 +38,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text
 
 from app.api.v1.deps import AuthUser, DBSession, require_permission
+from app.db.rls import TenantDBSession
 
 logger = logging.getLogger(__name__)
 
@@ -111,7 +112,13 @@ async def read_kill_switch(db: DBSession, user: AuthUser) -> KillSwitchState:
 )
 async def engage(
     body: EngageRequest,
-    db: DBSession,
+    # Tenant-scoped on purpose: aisoc_kill_switch and aisoc_kill_switch_audit
+    # carry the strict RLS policy `WITH CHECK (tenant_id = current_tenant_id())`,
+    # so these INSERTs through a session that never sets app.current_tenant_id
+    # were refused for every tenant — the emergency stop answered HTTP 500 on
+    # every deployment (same defect class as GHSA-898c-wxrw-hx6c, reproduced
+    # live against real Postgres as the aisoc_app runtime role).
+    db: TenantDBSession,
     user: Annotated[AuthUser, Depends(require_permission("settings:write"))],
 ) -> KillSwitchState:
     actor = getattr(user, "email", None) or str(getattr(user, "user_id", "unknown"))
@@ -156,7 +163,11 @@ async def engage(
 )
 async def release(
     body: ReleaseRequest,
-    db: DBSession,
+    # Tenant-scoped for the same reason as engage: the UPDATE's new row and
+    # the audit INSERT are judged by the strict WITH CHECK. The global-switch
+    # read below still works — the table's USING clause admits tenant_id IS
+    # NULL rows to every session.
+    db: TenantDBSession,
     user: Annotated[AuthUser, Depends(require_permission("settings:write"))],
 ) -> KillSwitchState:
     actor = getattr(user, "email", None) or str(getattr(user, "user_id", "unknown"))

@@ -62,11 +62,6 @@ scripts/detection_specs_part2.py:jwt:1111
 
 # ── Infrastructure and CI ─────────────────────────────────────────────────
 
-# Render IaC. The match is the YAML `key:` field of an env-var declaration
-# and the value is the variable's *name* (`AISOC_DISABLE_NEO4J`,
-# `AISOC_DISABLE_QDRANT`), not its value, which is the string "true".
-render.yaml:generic-api-key:78
-render.yaml:generic-api-key:132
 
 # The disaster-recovery job's BACKUP_ENCRYPTION_KEY used to be a committed
 # 64-hex constant and needed an entry here. It is generated per run now, so
@@ -148,7 +143,7 @@ services/api/tests/test_evidence_bundle.py:generic-api-key:26
 # Depth 4.2 (#1322): the TAXII live job's signing secret is a CI-only literal
 # that names itself as one; the workflow's Postgres and app both live and die
 # inside the job. Not a credential for anything reachable.
-.github/workflows/taxii-live.yml:generic-api-key:65
+.github/workflows/taxii-live.yml:generic-api-key:51
 
 # Rule-id lock entries: `"<slug>": "det-threat-anomaly-NNN"` pins a detection
 # rule's id so regeneration cannot renumber it. The scanner's key/value

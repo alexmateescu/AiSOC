@@ -579,19 +579,35 @@ The important security properties:
 - **Per-service credential posture.** The `api`, `agents`, `connectors`, and `realtime` services run with credentials enabled because the browser console sends a session cookie. The `ueba`, `honeytokens`, and `purple-team` services run with `allow_credentials=false` and are safe with wildcard origins even in production. The Go services (`ingest`, `enrichment`) are token-authenticated per request and also run without credentials.
 - **No per-service drift.** Adding a new console subdomain means setting `AISOC_CORS_ORIGINS` once at the deployment layer — no code change in any service.
 
-## Playbook outbound traffic — SSRF guard
+## Outbound traffic — SSRF guard
 
-Playbook `http_request` and `notify` steps run inside the agents service and can reach arbitrary URLs supplied by playbook authors. To keep this from being abused as a metadata-service or internal-network pivot, every outbound URL is validated by the SSRF guard before any socket is opened:
+Three services open sockets to URLs that a tenant, a playbook author or a
+webhook configuration supplies, and all three validate every such URL through
+the same SSRF guard before any socket is opened:
+
+- **Agents** — playbook `http_request` and `notify` steps (`services/agents/app/playbook/ssrf_guard.py`; both `_handle_http` and `_handle_notify` call it first).
+- **Connectors** — every connector egress path: the stateless "Test connection" route, resource reads and scheduled polls (GHSA-cq4g-g6wp-4m2w). A tenant-controlled `base_url` cannot reach cloud metadata, loopback or internal services.
+- **API** — connector `base_url`s at create/update, before they are encrypted and stored, and outbound webhook destinations at create, update and delivery time (GHSA-898c-wxrw-hx6c).
+
+What the guard enforces:
 
 - Only `http://` and `https://` are allowed by default (override with `AISOC_SSRF_ALLOWED_SCHEMES` if you genuinely need `https` only or an additional scheme).
 - URLs that embed credentials (`https://user:pass@host`) are rejected outright.
 - The hostname is resolved through `socket.getaddrinfo`; every resolved IP must be a global-unicast address. Loopback (`127.0.0.0/8`, `::1`), RFC1918 ranges, link-local, multicast, and the IETF reserved blocks are blocked.
-- Cloud metadata endpoints — `169.254.169.254`, `fd00:ec2::254`, `metadata.google.internal`, `metadata.azure.com`, `metadata`, `metadata.aws` — are blocked even if `AISOC_SSRF_ALLOW_PRIVATE=true`.
+- Cloud metadata endpoints — `169.254.169.254`, `fd00:ec2::254`, `metadata.google.internal`, `metadata.azure.com`, `metadata`, `metadata.aws` — are blocked **unconditionally**: no relax knob admits them.
 - Operators can extend the deny list with `AISOC_SSRF_EXTRA_BLOCKED_HOSTS=internal-only.example.com,10.0.0.5`.
 
-If a playbook needs to reach a private webhook (Slack on a private network, an internal Jira, etc.), set `AISOC_SSRF_ALLOW_PRIVATE=true` **only** on the agents service and keep network-level egress controls in place. The metadata block list always applies.
+Two relax knobs exist for legitimate private infrastructure, and compose
+delivers both to all three guard-running services from one `.env` value so
+the processes cannot disagree about what an operator admitted:
 
-The guard is a single chokepoint at `services/agents/app/playbook/ssrf_guard.py`; both `_handle_http` and `_handle_notify` call it before the HTTP client makes any request. New action handlers that perform outbound HTTP should call `validate_outbound_url` first.
+- `AISOC_SSRF_ALLOW_PRIVATE=true` re-admits RFC1918 / link-local destinations — the on-prem SIEM or private-webhook case. It never admits loopback and never admits cloud metadata.
+- `AISOC_SSRF_ALLOW_HOSTS=splunk.corp.internal,jira.corp.internal` admits **exact** hostnames (no wildcards, no CIDR ranges). A named host skips the IP-range checks, so one internal system can be permitted without opening every private range. The metadata block list still applies.
+
+Keep network-level egress controls in place regardless; the guard is
+defence-in-depth, not a replacement for them. New action handlers or service
+code that performs outbound HTTP to configurable destinations should call
+`validate_outbound_url` first.
 
 ## Hardening checklist
 
@@ -681,6 +697,47 @@ Two patterns are worth documenting because they came up repeatedly during the sw
 - **`py/import-and-import-from` — pick one import style per module.** Tests that need to monkey-patch a module-level constant should use `pytest.MonkeyPatch.setattr(module, "_NAME", value)` (importing the module via the standard `from app.connectors.foo import _NAME` form), not `import app.connectors.foo as foo_module` _and_ a from-import for the same names. The dual style trips CodeQL's import-redundancy check.
 
 The remaining alert categories (`py/uninitialized-local-variable`, `py/side-effect-in-assert`, `py/incomplete-url-substring-sanitization`, `py/ineffectual-statement`, `py/unnecessary-lambda`, `py/mixed-returns`, `py/unused-global-variable`, `py/unused-import`) are all standard Python correctness items and the fixes were uncontroversial — see the `[Unreleased]` section of the [CHANGELOG](https://github.com/beenuar/AiSOC/blob/main/CHANGELOG.md) for the per-PR breakdown.
+
+## Static analysis (semgrep) — vendored rule packs
+
+Semgrep runs in `security.yml` as a **ratcheted, deliberately non-required**
+job: measured across identical trees it splits ±1 finding for reasons no
+author can act on, and a ratchet over a non-deterministic scanner fails open —
+a randomly lost finding sitting exactly at the ceiling is silent in the
+direction nobody checks. The measurements behind that decision, and the
+conditions under which requiring it would become reasonable, are recorded
+beside the ceilings in `.security/allowlist.yml`.
+
+What makes the measurement reproducible at all is that the scan does not fetch
+rules from the registry at run time. The five registry packs it uses —
+`p/security-audit`, `p/owasp-top-ten`, `p/python`, `p/typescript`, `p/react` —
+are **vendored** under `.security/semgrep/`, the scan reads the committed
+files, and the ratchet binds its ceiling to the combined digest of those packs
+(`rules_sha256` in the allowlist, printed by `vendor_semgrep_packs.py
+--digest`) — so a registry pack changing upstream cannot silently re-grade the
+tree. A ceiling whose digest cannot be established is a failure, not a skip.
+The pinned binary and the pinned rules together are the whole measurement; a
+pinned binary against unpinned rules is half a pin, and it was measured rather
+than suspected — two consecutive runs on one branch moved 103/39 → 104/40
+while the commits between them changed zero scanned files.
+
+To refresh the packs (an explicit re-measure, exactly like bumping the pinned
+scanner binary):
+
+1. `python3 scripts/vendor_semgrep_packs.py` — re-fetches the current registry
+   packs into `.security/semgrep/` and rewrites `MANIFEST.sha256`.
+2. Re-run the scan locally and re-measure the finding counts.
+3. Update the ceilings *and* the recorded `rules_sha256` in
+   `.security/allowlist.yml` in the same commit, with the measurement stated
+   in the commit message.
+
+`scripts/vendor_semgrep_packs.py --check` verifies the committed packs against
+the manifest without network access — deliberately, because a check that
+compared against the live registry would fail whenever upstream moves, which
+is exactly when the pin is doing its job. CI runs `--check` in `security.yml`,
+so a hand-edited pack fails before it can re-grade anything. Never raise a
+ceiling to make a scan pass — when a change adds findings, fix the findings or
+record why they are false positives.
 
 ## Reporting a vulnerability
 

@@ -34,7 +34,7 @@ numbers matter to the decision:
 
 | | Measured |
 |---|---|
-| `ghcr.io/berriai/litellm:main-stable` image | **1.67 GB** |
+| `ghcr.io/berriai/litellm:v1.102.1` image (measured as `main-stable`, which served this version before upstream deleted the tag) | **1.67 GB** |
 | Idle resident memory | **451 MiB** |
 | For comparison — `aisoc-core-api` / `aisoc-agents` images | 1.31 GB / 1.69 GB |
 | CORE service count | 10 → **11** |

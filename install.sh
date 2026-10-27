@@ -14,11 +14,18 @@
 #         - pnpm 8+ (via corepack)
 #   3.  Clones the AiSOC repo (if you ran the script as a one-liner) or
 #       reuses it (if you ran ./install.sh from inside a clone).
-#   4.  Creates a .env from .env.example so the first boot has sane defaults.
+#   4.  Creates a .env and generates its secrets with scripts/ensure_env.py
+#       (what `make env` runs). A plain copy of .env.example cannot boot:
+#       it ships ENVIRONMENT=production with the secrets empty, and the API
+#       refuses to start in production on those values.
 #   5.  Runs `pnpm install` to fetch the orchestrator's Node deps.
-#   6.  Hands off to `pnpm aisoc:demo`, which pulls prebuilt images, brings
-#       up the slim demo profile, seeds the showcase ransomware case, and
-#       opens your browser at the case ledger view.
+#   6.  Starts the CORE stack with `make up` — the real deployment defined
+#       by the root docker-compose.yml, which moves any published port that
+#       is already taken, then creates the first administrator and prints
+#       its generated password once.
+#   7.  Pushes one real event through the pipeline and verifies it comes
+#       back out of the API as an alert. A failure here fails the install:
+#       "the containers started" is not "the application works".
 #
 # Usage:
 #   One-liner (no clone needed):
@@ -29,9 +36,12 @@
 #
 # Flags:
 #   --no-install        Skip the dependency-install phase (use what's on PATH).
-#   --no-launch         Set everything up but don't run pnpm aisoc:demo at the end.
-#   --no-pull           Forwarded to aisoc:demo to skip image pull.
-#   --rebuild           Forwarded to aisoc:demo to build images from source.
+#   --no-launch         Set everything up but don't start the stack, create the
+#                       administrator or run the pipeline check.
+#   --no-pull           Use the images already on this machine; don't refresh
+#                       them from the registry (AISOC_PULL_POLICY=never).
+#   --rebuild           Build the service images from source instead of using
+#                       the published ones.
 #   --skip-preflight    Skip the early environment checks (RAM, disk, ports, …).
 #                       Use this if preflight is wrong about your machine and
 #                       you know what you're doing.
@@ -47,16 +57,17 @@
 #   --help              Show this text and exit.
 #
 # Exit codes:
-#   0  success — demo stack is up and your browser opened
+#   0  success — the stack is up and one real event came back out as an alert
 #   1  prerequisite install failed
 #   2  Docker daemon refused to come up
-#   3  pnpm aisoc:demo failed (stack didn't boot or seed)
+#   3  the stack did not come up
 #   4  preflight failed (use --skip-preflight to override at your own risk)
+#   5  the clone failed, or the end-to-end pipeline check did
 #
 # Safe to re-run. Each install step checks "is this already present and the
-# right version?" before doing anything. If everything's installed and the
-# repo is cloned, a re-run completes in roughly the time `pnpm aisoc:demo`
-# itself takes (≈ 3.5 minutes on a warm Docker daemon).
+# right version?" before doing anything. On a warm Docker daemon with the
+# images already pulled, a re-run is a few minutes — most of it the stack
+# coming up and the pipeline check.
 #
 # Tested on:
 #   - Ubuntu 22.04 / 24.04
@@ -157,7 +168,8 @@ DIAGNOSE_ONLY=0
 NON_INTERACTIVE=0
 CLONE_DIR="${HOME}/aisoc"
 BRANCH="main"
-DEMO_FLAGS=()
+NO_PULL=0
+REBUILD=0
 
 # If stdin isn't a TTY (curl|bash, CI, log redirects), default to
 # non-interactive. Users who *want* prompts in those environments can pass
@@ -170,8 +182,8 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --no-install)        NO_INSTALL=1 ;;
     --no-launch)         NO_LAUNCH=1 ;;
-    --no-pull)           DEMO_FLAGS+=("--no-pull") ;;
-    --rebuild)           DEMO_FLAGS+=("--rebuild") ;;
+    --no-pull)           NO_PULL=1 ;;
+    --rebuild)           REBUILD=1 ;;
     --skip-preflight)    SKIP_PREFLIGHT=1 ;;
     --diagnose)          DIAGNOSE_ONLY=1 ;;
     --non-interactive)   NON_INTERACTIVE=1 ;;
@@ -761,7 +773,7 @@ ensure_env_file() {
   fi
 }
 
-# ─── Step 7: pnpm install + handoff to aisoc:demo ────────────────────────────
+# ─── Step 7: pnpm install, then start the stack ──────────────────────────────
 
 run_pnpm_install() {
   info "Installing JS workspace deps (pnpm install)..."
@@ -776,8 +788,10 @@ package.json and pnpm-lock.yaml disagree — re-clone or 'git checkout pnpm-lock
 
 run_demo() {
   if [ "$NO_LAUNCH" = "1" ]; then
-    info "--no-launch: skipping pnpm aisoc:demo. To start the stack later:"
-    info "  cd $REPO_ROOT && pnpm aisoc:demo"
+    info "--no-launch: not starting the stack. To start it later:"
+    info "  cd $REPO_ROOT"
+    info "  make up      # starts the stack and creates the administrator"
+    info "  make smoke   # proves the pipeline end to end"
     return 0
   fi
   section "Starting AiSOC (CORE profile)"
@@ -804,10 +818,27 @@ run_demo() {
     export AISOC_NO_BROWSER=1
   fi
 
-  # We forward the user's --no-pull / --rebuild flags through to the demo
-  # script. Run docker via `sg docker` if the user was just added to the
-  # group and hasn't logged out — otherwise pnpm aisoc:demo will explode on
-  # its very first `docker compose` call.
+  # --no-pull and --rebuild, honoured rather than collected and dropped.
+  # They used to be parsed into a DEMO_FLAGS array that nothing read once
+  # the demo handoff was removed, so both were accepted and silently
+  # ignored — the installer's own --help documented behaviour it no longer
+  # had. --no-pull sets AISOC_PULL_POLICY=never, which `make up`'s refresh
+  # step and compose's own `pull_policy` both already understand; --rebuild
+  # goes through the Makefile's UP_FLAGS passthrough so there is still one
+  # code path that starts the stack.
+  local -a make_args=(up)
+  if [ "$REBUILD" = "1" ]; then
+    info "--rebuild: building the service images from source."
+    make_args+=("UP_FLAGS=--build")
+  fi
+  if [ "$NO_PULL" = "1" ]; then
+    info "--no-pull: using the images already on this machine."
+    export AISOC_PULL_POLICY=never
+  fi
+
+  # Run docker via `sg docker` if the user was just added to the group and
+  # hasn't logged out — otherwise the first `docker compose` call explodes.
+  #
   # One architecture, one command. This used to hand off to
   # `pnpm aisoc:demo`, which started a *different* nine-service compose file
   # with no ingest service, no fusion service and Kafka disabled — its only
@@ -818,10 +849,16 @@ run_demo() {
   # `make up` is now the only path, so what the installer starts, what the
   # README documents and what CI tests are the same stack.
   if [ "$DOCKER_NEEDS_NEWGRP" = "1" ] && have sg; then
-    sg docker -c "cd '$REPO_ROOT' && make up" \
+    # `sg` takes one command string, so the arguments are quoted into it.
+    local quoted_args=""
+    local arg
+    for arg in "${make_args[@]}"; do
+      quoted_args+=" $(printf '%q' "$arg")"
+    done
+    sg docker -c "cd '$REPO_ROOT' && make${quoted_args}" \
       || { err "'make up' exited non-zero."; exit 3; }
   else
-    ( cd "$REPO_ROOT" && make up ) \
+    ( cd "$REPO_ROOT" && make "${make_args[@]}" ) \
       || { err "'make up' exited non-zero."; exit 3; }
   fi
 }

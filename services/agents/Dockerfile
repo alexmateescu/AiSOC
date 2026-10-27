@@ -35,8 +35,8 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# System deps occasionally needed by transitive packages (qdrant fastembed,
-# weasyprint, etc.). Keep the list small; expand only when poetry resolution
+# System deps occasionally needed by transitive packages (weasyprint and its
+# pillow leg, etc.). Keep the list small; expand only when poetry resolution
 # proves a missing system library is required.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \

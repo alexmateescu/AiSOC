@@ -6,7 +6,7 @@ from typing import Any
 import redis.asyncio as aioredis
 from fastapi import FastAPI
 
-from app._health import install_health_routes, register_subscription
+from app._health import install_health_routes, register_dependency, register_subscription
 from app.api.router import router, set_worker
 from app.core.config import settings
 from app.core.logging import configure_logging, logger
@@ -14,6 +14,7 @@ from app.memory.provider import MemoryPriorProvider
 from app.services import ioc_match
 from app.services.ai_asset_recorder import AiAssetRecorder
 from app.services.alert_enricher import AlertEnricher
+from app.services.alert_outbox import AlertNotificationOutbox
 from app.services.alert_sink import AlertSink
 from app.services.attack_chain_grouper import AttackChainGrouper
 from app.services.baselines import BaselineStore
@@ -56,7 +57,16 @@ async def lifespan(app: FastAPI):
     configure_logging()
     logger.info("Starting AiSOC Alert Fusion Service", port=settings.http_port)
 
-    redis_client = aioredis.from_url(settings.redis_url, decode_responses=False)
+    # Short socket timeouts are part of the Redis fallback: a black-holed
+    # connection must fail open into Postgres-backed dedup, not stall the
+    # alert path waiting for a TCP read that never arrives.
+    redis_client = aioredis.from_url(
+        settings.redis_url,
+        decode_responses=False,
+        socket_connect_timeout=settings.redis_connect_timeout_seconds,
+        socket_timeout=settings.redis_socket_timeout_seconds,
+        health_check_interval=30,
+    )
 
     dedup = Deduplicator(redis_client)
     correlator = Correlator(redis_client)
@@ -141,7 +151,19 @@ async def lifespan(app: FastAPI):
     # The pool is passed as a callable because `sink.start()` opens it
     # during `worker.start()`, after this point; capturing it eagerly would
     # capture None and drop every dead letter.
-    dlq = PostgresDLQ(lambda: sink._pool) if sink is not None else None
+    # `ensure_pool`/`invalidate_pool` matter here: the DLQ shares the sink's
+    # pool, and while the consumer is holding a message neither the alert path
+    # nor anything else reconnects. Without them a Postgres outage that
+    # invalidated the pool would turn the hold into a permanent stall.
+    dlq = (
+        PostgresDLQ(
+            lambda: sink._pool,
+            ensure_pool=sink.ensure_pool,
+            invalidate_pool=sink.invalidate_pool,
+        )
+        if sink is not None
+        else None
+    )
 
     # Depth 6.1 — the observed AI estate. Shares the alert sink's pool for
     # the same reason the dead-letter queue does: one Postgres connection
@@ -150,6 +172,31 @@ async def lifespan(app: FastAPI):
     # capturing `sink._pool` eagerly would capture None and silently drop
     # every sighting for the life of the process.
     ai_assets = AiAssetRecorder(lambda: sink._pool) if sink is not None else None
+
+    # Remediation phase 4 — the recovery record for a fused alert that is
+    # durable in Postgres but whose Kafka notification never landed. Shares
+    # the sink's pool, and is passed as a callable for the same reason the
+    # two above are: `sink.start()` opens it during `worker.start()`, after
+    # this point. Without a sink there is no pool and no alert row either,
+    # so there is nothing for the journal to be about.
+    outbox = (
+        AlertNotificationOutbox(lambda: sink._pool, ensure_pool=sink.ensure_pool)
+        if sink is not None and settings.alert_outbox_enabled
+        else None
+    )
+
+    if sink is None:
+        # Explicit, not inferred: this mode writes no alert rows and has no
+        # durable DLQ. The consumer still retries and holds, but its committed
+        # offsets are not evidence that an alert survived. Development-only.
+        logger.warning(
+            "fusion.alert_persistence_disabled",
+            setting="AISOC_ALERT_SINK_ENABLED=false",
+            detail=(
+                "alerts are not persisted to Postgres and dead letters are log-only; "
+                "Kafka offsets commit after processing, not after durable capture"
+            ),
+        )
 
     worker = FusionWorker(
         engine,
@@ -172,6 +219,7 @@ async def lifespan(app: FastAPI):
         sessions=SessionStore(_fusion_pool()) if settings.alert_sink_enabled else None,
         ueba_cache=ueba_cache,
         ai_assets=ai_assets,
+        outbox=outbox,
     )
     set_worker(worker)
 
@@ -185,6 +233,13 @@ async def lifespan(app: FastAPI):
     worker_task = asyncio.create_task(worker.start())
     worker_task.add_done_callback(_log_worker_exit)
     register_subscription(app, "alerts+raw_events", lambda: worker.attached)
+    # Two different questions, which is why they are two probes and not one
+    # flag read twice. The subscription above is "am I consuming"; the
+    # dependency below is "can I reach the broker", and only the second can
+    # describe an outage -- `attached` stays true across one, because
+    # aiokafka's retry lives inside `__anext__` and the `async for` never
+    # exits. See `FusionWorker.broker_reachable`.
+    register_dependency(app, "kafka", worker.broker_reachable)
     app.state.worker_task = worker_task
     app.state.redis = redis_client
 
@@ -237,6 +292,43 @@ app = FastAPI(
 _mark_ready, _mark_not_ready = install_health_routes(app, service_name="aisoc-fusion")
 app.state.mark_ready = _mark_ready
 app.state.mark_not_ready = _mark_not_ready
+
+
+async def _postgres_ready() -> bool:
+    import asyncpg
+
+    dsn = settings.database_url
+    for prefix in ("postgresql+asyncpg://", "postgres+asyncpg://"):
+        if dsn.startswith(prefix):
+            dsn = "postgresql://" + dsn[len(prefix) :]
+            break
+    conn = await asyncpg.connect(dsn, timeout=1.4)
+    await conn.close()
+    return True
+
+
+def _clickhouse_ready() -> bool:
+    if not settings.lake_writer_enabled:
+        return False
+    from clickhouse_driver import Client
+
+    client = Client(
+        host=settings.clickhouse_host,
+        port=settings.clickhouse_port,
+        database=settings.clickhouse_database,
+        user=settings.clickhouse_user,
+        password=settings.clickhouse_password or "",
+        connect_timeout=0.7,
+        send_receive_timeout=0.7,
+    )
+    try:
+        return client.execute("SELECT 1", settings={"max_execution_time": 1}) == [(1,)]
+    finally:
+        client.disconnect()
+
+
+register_dependency(app, "database", _postgres_ready)
+register_dependency(app, "lake_writer", _clickhouse_ready, required=False)
 
 app.include_router(router)
 

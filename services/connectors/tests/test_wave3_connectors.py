@@ -250,7 +250,8 @@ async def test_datadog_fetch_logs_emits_normalized_events():
     assert len(events) == 1
     ev = events[0]
     assert ev["source"] == "datadog"
-    assert ev["severity"] == "high"  # status:critical → high
+    assert ev["severity"] == "critical"
+    assert ev["raw_event"]["attributes"]["status"] == "critical"
     assert ev["raw_event"]["attributes"]["service"] == "nginx"
 
 

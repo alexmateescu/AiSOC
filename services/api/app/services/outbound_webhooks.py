@@ -41,6 +41,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import socket
 import time
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -51,6 +52,7 @@ import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app._vendor.ssrf_guard import SSRFError, validate_outbound_url
 from app.models.outbound_webhook import OutboundDelivery, OutboundWebhook
 from app.security.credential_vault import CredentialVaultError, get_vault
 
@@ -208,6 +210,26 @@ async def attempt_delivery(
     }
     if secret:
         headers[_SIGNATURE_HEADER] = sign(body, secret=secret)
+
+    # Checked again at send time, not only at registration: a hostname that
+    # resolved to a public address when the destination was saved can resolve
+    # to an internal one now (DNS rebinding), and rows written before the
+    # registration check existed were never validated at all
+    # (GHSA-898c-wxrw-hx6c). Two classes, deliberately: a *policy* refusal
+    # (metadata, loopback, private range, bad scheme) is permanent and kills
+    # the delivery, while a hostname that merely failed to resolve is the
+    # same transient condition as a connection failure — the HTTP attempt
+    # below will fail through the existing retry ladder rather than a DNS
+    # blip permanently deadening a valid destination. A host the guard cannot
+    # resolve is one the client cannot connect to either.
+    try:
+        validate_outbound_url(webhook.url)
+    except SSRFError as exc:
+        if not isinstance(exc.__cause__, socket.gaierror):
+            delivery.status = "dead"
+            delivery.next_attempt_at = None
+            delivery.last_error = f"destination refused: {exc}"[:500]
+            return delivery
 
     owns_client = client is None
     client = client or httpx.AsyncClient(timeout=_TIMEOUT_SECONDS)

@@ -268,7 +268,7 @@ services:
     replicaCount: 2
     containerPort: 8085
     healthCheckPath: /health
-    readinessPath: /health
+    readinessPath: /readyz
     service:
       type: ClusterIP
       port: 80
@@ -649,10 +649,14 @@ backup:
 llmGateway:
   enabled: true
   image:
-    # Pinned, not floating. `main-stable` moves, and a gateway that
-    # changes under a running deployment changes which models resolve.
+    # Pinned, not floating. This read `main-stable` — a moving tag, and a
+    # gateway that changes under a running deployment changes which models
+    # resolve — until upstream deleted that tag outright and every fresh
+    # install failed with `manifest unknown`. v1.102.1 is the version
+    # `main-stable` served when this stack was measured against it. Keep in
+    # lockstep with the root docker-compose.yml litellm pin.
     repository: ghcr.io/berriai/litellm
-    tag: main-stable
+    tag: v1.102.1
     pullPolicy: IfNotPresent
   replicaCount: 1
   env:

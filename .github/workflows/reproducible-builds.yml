@@ -182,7 +182,7 @@ jobs:
           # Whatever the ceiling currently admits, which is what the locks
           # resolve. Both ends run so the declared range is a tested range
           # rather than an assumption about the middle.
-          - fastapi: '0.141.1'
+          - fastapi: '0.161.1'
             label: shipped
     env:
       API_DEPS: >-
@@ -420,10 +420,30 @@ jobs:
           # fourteenth service lands, this floor makes the omission loud
           # rather than letting the run pass with thirteen.
           [ "$total" -ge 13 ] || { echo "::error::only $total services found; expected at least 13"; exit 1; }
-          for result in '${{ needs.twice-all.result }}' '${{ needs.twice-lockonly.result }}'; do
-            case "$result" in
-              success) ;;
-              *) echo "::error::a reproducibility matrix finished as '$result', so not every service was proved"; exit 1 ;;
+          # `twice-all` must have run and succeeded: every service ships an
+          # image, so a skip there is always coverage lost.
+          [ '${{ needs.twice-all.result }}' = 'success' ] || {
+            echo "::error::the image reproducibility matrix finished as '${{ needs.twice-all.result }}', so not every service was proved"
+            exit 1
+          }
+          # `twice-lockonly` skips BY DESIGN when no service is lock-only —
+          # its own `if:` is `lockonly != '[]'`. Reading that intended no-op
+          # as a failure is what turned every scheduled run red from the day
+          # the last image-less service gained a Dockerfile (the push runs
+          # stayed green only because their path filters skip the whole
+          # workflow). The skip is accepted exactly when `lockonly` is
+          # empty; a skip while `lockonly` names services is still lost
+          # coverage, and a failure or cancellation is still a failure.
+          lockresult='${{ needs.twice-lockonly.result }}'
+          if [ "$lockonly" = '[]' ]; then
+            case "$lockresult" in
+              success|skipped) ;;
+              *) echo "::error::the lock-only matrix finished as '$lockresult'"; exit 1 ;;
             esac
-          done
+          else
+            [ "$lockresult" = 'success' ] || {
+              echo "::error::the lock-only matrix finished as '$lockresult' while lock-only services exist: $lockonly"
+              exit 1
+            }
+          fi
           echo "all $total service(s) proved reproducible at this commit" >> "$GITHUB_STEP_SUMMARY"

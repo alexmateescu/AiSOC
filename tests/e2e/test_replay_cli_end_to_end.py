@@ -334,6 +334,13 @@ def stack(splunk: str) -> Iterator[dict[str, str]]:
         # verdict for the same evidence every time.
         "AISOC_DETERMINISTIC": "1",
         "AISOC_CORS_ORIGINS": "http://127.0.0.1",
+        # The mock Splunk is a loopback HTTP server, and connector egress now
+        # goes through the SSRF guard (GHSA-cq4g-g6wp-4m2w), which refuses
+        # loopback regardless of AISOC_SSRF_ALLOW_PRIVATE. This is the guard's
+        # operator escape for exactly this deployment shape — a vendor
+        # reachable on a local address — named per exact host, with the
+        # metadata blocklist still unoverridable.
+        "AISOC_SSRF_ALLOW_HOSTS": "127.0.0.1",
     }
 
     services = [
