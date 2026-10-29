@@ -8,7 +8,6 @@ first sight and stop consuming the inference backend.
 from __future__ import annotations
 
 import pytest
-
 from app.workers import fused_alert_consumer as worker_mod
 from app.workers.fused_alert_consumer import FusedAlertTriageWorker, _is_terminal_request_error
 

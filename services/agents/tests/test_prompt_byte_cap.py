@@ -8,9 +8,8 @@ into a retry storm (the Oct 2026 prefill-guard incident).
 
 from __future__ import annotations
 
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
-
 from app.llm import contract
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 
 
 def _total_bytes(msgs) -> int:
