@@ -16,7 +16,7 @@
  * ``{x-unsupported: <kind>}`` marker so the marketplace UI can show
  * a "schema not fully described" warning.
  */
-import type { ZodTypeAny } from 'zod';
+import type { ZodTypeAny } from 'zod/v3';
 
 type JsonSchema = Record<string, unknown>;
 

@@ -45,7 +45,7 @@ import {
   manifestForConnector,
   RiskClass,
 } from './index.js';
-import { z, type ZodTypeAny } from 'zod';
+import { z, type ZodTypeAny } from 'zod/v3';
 
 interface DevState {
   def: ConnectorDefinition<ZodTypeAny> | null;
