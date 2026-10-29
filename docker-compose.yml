@@ -1530,6 +1530,11 @@ services:
       - "${AISOC_BIND_ADDR:-127.0.0.1}:8010:8090"
     profiles:
       - chatops
+    volumes:
+      # Upstream v20.2.1 packaging gap: teams-bot hmac_signer cross-loads
+      # slack-bot source at /slack-bot, but neither the image nor compose
+      # provides that path, so fresh deploys crash-loop with ModuleNotFoundError.
+      - ./services/slack-bot:/slack-bot:ro
     environment:
       AISOC_API_BASE_URL: http://api:8000
       AISOC_ACTIONS_BASE_URL: http://actions:8085
