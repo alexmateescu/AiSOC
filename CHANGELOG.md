@@ -25,6 +25,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Dependencies (archived prototype):** the historical connector-ts SDK under
+  `plans/cyble-aisoc/` moves `zod` `^3.23.8` → `^4.6.6`
+  ([GHSA-mrhx-c7xc-m3w5](https://github.com/advisories/GHSA-mrhx-c7xc-m3w5),
+  high: memory exhaustion validating oversized constrained strings; the fix
+  exists only on the 4.x line), importing through zod 4's `zod/v3`
+  compatibility subpath so the v3 runtime semantics the SDK's introspection
+  depends on are unchanged. Archived reference code, not the published
+  `packages/sdk-ts` — but it is public code people copy from, and the
+  advisory is real. Externally contributed.
+
 - **Dependencies:** `decode-uri-component` 0.5.0 → 0.5.1 in the mobile
   app's lockfile, resolving
   [GHSA-qr28-fpjm-wq7f](https://github.com/advisories/GHSA-qr28-fpjm-wq7f)
