@@ -508,7 +508,7 @@ async def run_auto_triage(state: InvestigationState) -> InvestigationState:
         # and auto_triage_node catches AutoTriageError specifically — so
         # constructing outside would have failed the whole graph run over a
         # configuration problem the deterministic path handles fine.
-        llm = make_chat_model("triage", temperature=0.0, max_tokens=512, json_output=True)
+        llm = make_chat_model("triage", temperature=0.0, max_tokens=2048, json_output=True)
         system_prompt = prompt_text("triage.system") + "\n\n" + system_rule(nonce)
         response = await safe_ainvoke(
             llm,
