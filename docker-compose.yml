@@ -741,6 +741,8 @@ services:
     ports:
       - "${AISOC_BIND_ADDR:-127.0.0.1}:8001:8084"
     environment:
+      REALTIME_URL: ${REALTIME_URL:-http://realtime:4000}
+      AISOC_INVESTIGATION_MAX_SECONDS: ${AISOC_INVESTIGATION_MAX_SECONDS:-120}
       DATABASE_URL: postgresql+asyncpg://aisoc_app:${AISOC_APP_DB_PASSWORD:-aisoc_app_dev_secret}@postgres:5432/aisoc
       REDIS_URL: redis://:${REDIS_PASSWORD:-redis_dev_secret}@redis:6379/4
       CORE_API_URL: http://api:8000
