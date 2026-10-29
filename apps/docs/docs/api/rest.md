@@ -263,6 +263,7 @@ Where the model runs, and whether the credential pointed at it works.
 | `GET` | `/llm/runtime` | Where the local model is **actually** running |
 | `GET/PUT/DELETE` | `/llm/credentials` | The tenant's own provider credential (BYOK) |
 | `POST` | `/llm/credentials/test` | Place one real call with it and report what happened |
+| `POST` | `/llm/credentials/models` | List the chat models a `custom` endpoint serves |
 
 `/llm/status` reports *configuration*; `/llm/runtime` reports *outcome*. The
 two differ more often than you would expect: a GPU reservation is a request,
@@ -329,6 +330,55 @@ curl -sX POST "$AISOC_API/api/v1/llm/credentials/test" \
 Requires `settings:write` rather than `settings:read`: it spends the tenant's
 money and touches an external service, which is not a read. The request is one
 token against a fixed prompt.
+
+#### Listing a custom endpoint's models
+
+The `custom` provider points at any OpenAI-compatible endpoint. Rather than
+typing a model id, the console can ask the endpoint's `GET {base_url}/models`
+and offer the chat models it lists:
+
+```bash
+curl -sX POST "$AISOC_API/api/v1/llm/credentials/models" \
+  -H "Authorization: Bearer $AISOC_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"base_url": "https://llm.internal.example/v1", "api_key": "..."}'
+```
+
+```json
+{
+  "outcome": "ok",
+  "detail": "2 chat model(s) of 5 listed.",
+  "models": [
+    { "id": "vendor/model-a", "name": null },
+    { "id": "vendor/model-b", "name": null }
+  ],
+  "listed": 5,
+  "excluded": 3,
+  "truncated": false
+}
+```
+
+Both body fields are optional. `base_url` falls back to the saved `custom`
+credential's. `api_key` is used for this request only and never stored; when
+it is omitted the saved key is used, **but only if the target is the saved base
+URL** — a form that changed the base URL and left the key blank sends no key
+rather than the saved one.
+
+`/models` rows say little in the OpenAI shape, so the filter reads, strongest
+first: a declared `capabilities` flag, declared input/output modalities
+(`architecture.modality`, `input_modalities`/`output_modalities`), and a `type`
+or `mode` label (`chat`, or an image, video, audio, embedding or rerank family).
+When any row's label says chat, a row labelled otherwise is left out, because
+that endpoint names its routes in the label. A row that declares nothing is
+kept unless its id names a non-text family (`embed`, `tts`, `whisper`, `image`,
+…). It is a filter for a dropdown, not a capability guarantee: any id can still
+be typed, and `/test` is what proves it answers.
+
+Bounded on purpose: 10 s for the whole exchange, 2 MB of body, 5,000 rows
+examined and 500 models returned (`truncated` says when that cap was reached).
+Redirects are not followed. The same air-gap check and SSRF guard as `/test`
+apply, and `outcome` uses the same four values. It requires `settings:write`,
+like `/test`, because it makes the server dial an address the caller chose.
 
 See [Where the model runs](../operations/where-the-model-runs) for the four
 deployment options these routes report on.

@@ -37,6 +37,7 @@ import {
   type FullTenant,
   type LlmCredentialUpsert,
   type LlmCredentialView,
+  type LlmModelDiscoveryResult,
   type LlmProvider,
   type LlmStatus,
   type LlmWritableProvider,
@@ -1918,6 +1919,14 @@ function BYOKCard({
   const [apiKey, setApiKey] = useState('');
   const [enabled, setEnabled] = useState(true);
   const [formError, setFormError] = useState<string | null>(null);
+  const [discovering, setDiscovering] = useState(false);
+  // Remembers which base URL the list came from: a list fetched for one
+  // endpoint says nothing about another, so it is shown only while that base
+  // URL is still the one in the form.
+  const [discovery, setDiscovery] = useState<{
+    baseUrl: string;
+    result: LlmModelDiscoveryResult;
+  } | null>(null);
 
   // Reset form whenever we enter edit mode (or the underlying credential
   // moves while editing). Never preload the API key — it lives only in
@@ -1993,6 +2002,42 @@ function BYOKCard({
   const onCancel = () => {
     setEditing(false);
   };
+
+  // Ask the custom endpoint which chat models it serves. Uses what is in the
+  // form, so it works before the credential is saved; a blank key means "use
+  // the stored one", which the server sends only to the stored base URL. On
+  // any failure the list stays empty and the typed model id is what is saved.
+  const onDiscoverClick = async () => {
+    const target = baseUrl.trim();
+    setDiscovering(true);
+    try {
+      const result = await deploymentApi.discoverLlmModels({
+        base_url: target ? target : null,
+        api_key: apiKey.trim() ? apiKey.trim() : null,
+      });
+      setDiscovery({ baseUrl: target, result });
+    } catch (err) {
+      setDiscovery({
+        baseUrl: target,
+        result: {
+          outcome: 'refused',
+          detail: extractApiDetail(err, 'Could not list models.'),
+          models: [],
+          listed: 0,
+          excluded: 0,
+          truncated: false,
+        },
+      });
+    } finally {
+      setDiscovering(false);
+    }
+  };
+
+  const shownDiscovery =
+    provider === 'custom' && discovery && discovery.baseUrl === baseUrl.trim()
+      ? discovery.result
+      : null;
+  const discoveredModels = shownDiscovery?.models ?? [];
 
   // One real call with the saved credential. Reports four outcomes, and
   // `unverified` is deliberately not an error: an air-gapped deployment
@@ -2302,6 +2347,67 @@ function BYOKCard({
           />
         </Field>
       </div>
+      {provider === 'custom' ? (
+        <div className="mt-4 flex flex-col gap-2">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+            <button
+              type="button"
+              onClick={onDiscoverClick}
+              disabled={discovering || submitting || !baseUrl.trim()}
+              className="shrink-0 rounded-md border border-gray-700 bg-gray-900 px-3 py-1.5 text-xs font-medium text-gray-200 hover:bg-gray-800 disabled:opacity-50"
+            >
+              {discovering ? 'Listing models…' : 'List models from endpoint'}
+            </button>
+            {discoveredModels.length > 0 ? (
+              <select
+                aria-label="Discovered chat models"
+                value={discoveredModels.some(m => m.id === model) ? model : ''}
+                onChange={e => {
+                  if (e.target.value) setModel(e.target.value);
+                }}
+                disabled={submitting}
+                className={inputClass()}
+              >
+                <option value="">Choose a discovered model…</option>
+                {discoveredModels.map(m => (
+                  <option key={m.id} value={m.id}>
+                    {m.name && m.name !== m.id ? `${m.id} — ${m.name}` : m.id}
+                  </option>
+                ))}
+              </select>
+            ) : null}
+          </div>
+          {shownDiscovery ? (
+            <p
+              role="status"
+              className={clsx(
+                'text-xs',
+                shownDiscovery.outcome === 'ok' && discoveredModels.length > 0
+                  ? 'text-gray-400'
+                  : 'text-amber-300/80',
+              )}
+            >
+              {shownDiscovery.outcome === 'ok' && discoveredModels.length > 0
+                ? `${discoveredModels.length} chat model${
+                    discoveredModels.length === 1 ? '' : 's'
+                  } of ${shownDiscovery.listed} listed by the endpoint${
+                    shownDiscovery.excluded > 0
+                      ? ` (${shownDiscovery.excluded} image, audio, embedding or other non-chat entries hidden)`
+                      : ''
+                  }.${
+                    shownDiscovery.truncated ? ' Only the first part of a longer list is shown.' : ''
+                  } Pick one, or type any id in the Model field.`
+                : `${shownDiscovery.detail} The Model field still accepts a typed id.`}
+            </p>
+          ) : (
+            <p className="text-xs text-gray-500">
+              Asks the endpoint&apos;s <code className="font-mono">/models</code>{' '}
+              for the chat models it serves. Optional — a typed model id
+              always works.
+            </p>
+          )}
+        </div>
+      ) : null}
       <div className="mt-4">
         <Toggle
           checked={enabled}

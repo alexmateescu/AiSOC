@@ -7,6 +7,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Dependencies:** `@hono/node-server` 1.19.17 → 2.1.5 across the pnpm
+  workspace, resolving
+  [GHSA-rmxm-3fg6-px4f](https://github.com/advisories/GHSA-rmxm-3fg6-px4f)
+  (CVE-2026-118663, medium): `serveStatic` decoded the request path a
+  second time, letting an encoded path bypass middleware guarding static
+  routes. The only dependent is `@modelcontextprotocol/sdk` (used by
+  `services/mcp`), which declares `^1.19.9 || ^2.0.5`, so the patched
+  major is inside the SDK's own supported range; no first-party code
+  calls `serveStatic`. Shipped by moving the existing `pnpm.overrides`
+  floor from `>=1.19.15 <2` to `>=2.1.3 <3` (Dependabot alert #226).
+
+## [20.2.1] - 2026-10-28
+
+### Security
+
+- **ReDoS in phishing header analysis**
+  ([GHSA-9m2j-23jf-gg3p](https://github.com/beenuar/AiSOC/security/advisories/GHSA-9m2j-23jf-gg3p),
+  medium, reported by [q7256](https://github.com/q7256); affects
+  v19.0.0 – v20.2.0). `_ADDRESS_IN_NAME` in
+  `services/api/app/services/phishing/headers.py` was an unanchored scan,
+  so a long `From` display name with no address-like substring was
+  re-consumed from every interior position — quadratic, measured at 33 s
+  for 128 KB and reported at 71 s, and `POST /api/v1/phishing/reports`
+  (authenticated, `cases:write` — the default analyst role) runs it
+  synchronously on the event loop, stalling every other request on the
+  process. Two independent bounds: a `(?<![\w.+-])` lookbehind makes
+  interior starts fail in O(1) with the match set unchanged, and the
+  display name is capped at 1,024 characters before analysis — which also
+  keeps the impersonation finding's stored `evidence` out of the megabyte
+  range on a crafted report. 128 KB now completes in 26 ms, linear. The
+  regression test pins a 1-second budget with ≥30× margin both ways, was
+  demonstrated failing on the pre-fix tree, and a reverted-fix negative
+  control was demonstrated failing again. Every other `re.compile` in the
+  phishing package was audited for the same class; the one suspicious
+  sibling (`campaigns.py` `_OPAQUE`) was measured linear — its leading
+  `\b` already prevents interior-start rescans — and deliberately left
+  unchanged.
+
+## [20.2.0] - 2026-10-28
+
+### Security
+
+- `qs` moves to **6.17.0** via the repo-wide `pnpm.overrides` block
+  ([GHSA-6pq8-jhm2-2vcw](https://github.com/advisories/GHSA-6pq8-jhm2-2vcw),
+  medium: `qs.stringify` with `arrayFormat: 'comma'` throws an uncaught
+  TypeError on array elements carrying a non-callable own `toString`,
+  reachable as a DoS by anything serialising caller-influenced structures
+  into a query string). The override was chosen over per-package bumps
+  because `qs` is transitive and a per-dependency bump would leave the
+  other resolution paths behind. The only runtime `qs` in the lockfile is
+  now 6.17.0; the nearby `6.15.0` is `@types/qs`, a types package.
+- The two remaining Dependabot alerts — `deepmerge` prototype poisoning
+  (LOW, root and `apps/mobile` lockfiles) — are dismissed as tolerable
+  risk rather than fixed, because **no patched version exists**: the
+  latest published `deepmerge` (4.3.1) is inside the vulnerable range.
+  The dismissal records the evidence: the only dependents are dev/build
+  tooling (`jest-config`, `@svgr/plugin-svgo`, `@expo/config`) merging
+  repo-authored configuration, not untrusted input. To be re-checked
+  when upstream ships a release above 4.3.1.
+
 ### Fixed
 
 - The Jira connector pulls issues from `GET /rest/api/3/search/jql`. Jira
@@ -120,6 +182,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   said the upload was blocked on credentials, while PyPI has been serving
   `aisoc-sandbox` 0.1.0; it also claimed the production stack needs an LLM
   API key, which has not been true since the bundled local model shipped.
+- `.pr-body.md` — a pull-request body draft from the v20.1.0 media close-out
+  (#1492) committed to the repository root by accident — is removed. Nothing
+  referenced it; session scratch does not belong in the tree.
 
 ### Added — gates, so none of the above drifts back
 

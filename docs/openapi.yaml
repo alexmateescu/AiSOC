@@ -3742,7 +3742,7 @@ paths:
 
         nothing in production has ever written a built-in row, a default install
 
-        answered with an empty list while the engine ran 2,614 rules.
+        answered with an empty list while the engine ran 2,609 rules.
 
 
         ``X-Total-Count`` carries the number matching the filters, which is not
@@ -4105,7 +4105,7 @@ paths:
 
         This used to read ``detection_rules`` alone and therefore answered with an
 
-        empty list on every install, while fusion loaded and fired 2,614 rules
+        empty list on every install, while fusion loaded and fired 2,609 rules
 
         (#1273). The filters and the page bound are not cosmetic: the whole
 
@@ -4239,7 +4239,7 @@ paths:
 
         built-in''s detail page opens without a row having to exist for it. The
 
-        read never creates one: a GET that materialised would put 2,614 rows per
+        read never creates one: a GET that materialised would put 2,609 rows per
 
         tenant in a table meant to hold decisions.'
       operationId: get_rule_compat_api_v1_detection_rules__rule_id__get
@@ -4400,7 +4400,7 @@ paths:
 
         the ``detection_rules`` table alone and therefore drew an empty heatmap
 
-        over a product shipping ATT&CK mappings for 2,614 loaded rules — the
+        over a product shipping ATT&CK mappings for 2,609 loaded rules — the
 
         strongest possible version of the "blind to everything" answer, and
 
@@ -11648,6 +11648,78 @@ paths:
       - autonomy
       summary: Resume autonomous closure and action dispatch
       operationId: release_api_v1_kill_switch_release_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReleaseRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KillSwitchState'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+      security:
+      - HTTPBearer: []
+  /api/v1/kill-switch/global/engage:
+    post:
+      tags:
+      - autonomy
+      summary: Freeze autonomous closure and action dispatch for every tenant
+      description: 'Stop autonomous closure and dispatch across the whole deployment.
+
+
+        One row, upserted. The conflict target is the expression index
+
+        `aisoc_kill_switch_global_idx ON aisoc_kill_switch ((TRUE)) WHERE tenant_id
+
+        IS NULL`, which is what keeps the global switch a singleton rather than a
+
+        pile of rows a reader would have to reconcile at 3am.'
+      operationId: engage_global_api_v1_kill_switch_global_engage_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EngageRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KillSwitchState'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+      security:
+      - HTTPBearer: []
+  /api/v1/kill-switch/global/release:
+    post:
+      tags:
+      - autonomy
+      summary: Resume autonomous closure and action dispatch across every tenant
+      description: 'Release the platform-wide stop.
+
+
+        A tenant that engaged its own switch keeps it: the two scopes are
+
+        independent and neither needs the other''s agreement, so releasing globally
+
+        must not silently resume a tenant that asked to stay stopped.'
+      operationId: release_global_api_v1_kill_switch_global_release_post
       requestBody:
         content:
           application/json:
@@ -19808,6 +19880,53 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/LlmCredentialTestResult'
+      security:
+      - HTTPBearer: []
+  /api/v1/llm/credentials/models:
+    post:
+      tags:
+      - llm
+      summary: List the chat models a custom OpenAI-compatible endpoint serves
+      description: 'Ask ``GET {base_url}/models`` and return the chat-capable entries.
+
+
+        For the ``custom`` provider, whose model was otherwise a hand-typed id.
+
+
+        `settings:write`, like `/test`: this dials an operator-supplied URL with
+
+        private addresses permitted, which is not something a read-only role
+
+        should be able to point at the network.
+
+
+        The stored key goes only to the stored base URL. A form that has changed
+
+        the base URL and left the key blank gets a keyless request, not the saved
+
+        key sent somewhere it was never configured to go; an endpoint that needs a
+
+        key then answers 401 and the detail says so.'
+      operationId: discover_llm_models_api_v1_llm_credentials_models_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LlmModelDiscoveryRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LlmModelDiscoveryResult'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
       security:
       - HTTPBearer: []
   /api/v1/threatintel/stix/indicators:
@@ -28066,6 +28185,20 @@ components:
       required:
       - discovered
       title: DiscoverResponse
+    DiscoveredModelView:
+      properties:
+        id:
+          type: string
+          title: Id
+        name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Name
+      type: object
+      required:
+      - id
+      title: DiscoveredModelView
     DismissTuningRequest:
       properties:
         reason:
@@ -32403,6 +32536,76 @@ components:
         only signal we expose — same convention the OAuth credential view
 
         uses (``has_secret``).'
+    LlmModelDiscoveryRequest:
+      properties:
+        base_url:
+          anyOf:
+          - type: string
+            maxLength: 512
+          - type: 'null'
+          title: Base Url
+        api_key:
+          anyOf:
+          - type: string
+            maxLength: 4096
+          - type: 'null'
+          title: Api Key
+      type: object
+      title: LlmModelDiscoveryRequest
+      description: 'Where to list models from, for a form that may not be saved yet.
+
+
+        Both fields are optional. ``base_url`` falls back to the stored ``custom``
+
+        credential''s. ``api_key`` is used for this one request and never stored;
+
+        when it is omitted the stored key is used, but only if the target is the
+
+        stored base URL -- see :func:`discover_llm_models`.'
+    LlmModelDiscoveryResult:
+      properties:
+        outcome:
+          type: string
+          enum:
+          - ok
+          - refused
+          - unreachable
+          - unverified
+          title: Outcome
+        detail:
+          type: string
+          title: Detail
+        models:
+          items:
+            $ref: '#/components/schemas/DiscoveredModelView'
+          type: array
+          title: Models
+        listed:
+          type: integer
+          title: Listed
+        excluded:
+          type: integer
+          title: Excluded
+        truncated:
+          type: boolean
+          title: Truncated
+      type: object
+      required:
+      - outcome
+      - detail
+      - models
+      - listed
+      - excluded
+      - truncated
+      title: LlmModelDiscoveryResult
+      description: 'The chat models an endpoint listed, or why there are none.
+
+
+        ``outcome`` uses the Test button''s vocabulary. Anything other than ``ok``
+
+        leaves ``models`` empty and the console falls back to the hand-typed id,
+
+        which is the path that always worked; nothing is invented to fill the gap.'
     LoginRequest:
       properties:
         email:

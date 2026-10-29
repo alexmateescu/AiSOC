@@ -6438,6 +6438,23 @@ export interface LlmCredentialTestResult {
   latency_ms?: number;
 }
 
+/**
+ * The chat models a custom OpenAI-compatible endpoint listed at ``/models``.
+ *
+ * ``listed`` is every distinct id the endpoint returned and ``excluded`` the
+ * ones judged not chat-capable (image, audio, embedding and similar), so the
+ * selector can say how much it filtered. Any outcome other than ``ok`` comes
+ * with an empty ``models``: the hand-typed id is the fallback, never a guess.
+ */
+export interface LlmModelDiscoveryResult {
+  outcome: "ok" | "refused" | "unreachable" | "unverified";
+  detail: string;
+  models: { id: string; name?: string | null }[];
+  listed: number;
+  excluded: number;
+  truncated: boolean;
+}
+
 export const deploymentApi = {
   /** Live air-gap policy snapshot for this pod. Safe to poll. */
   getAirgapStatus: () => request<AirgapStatus>("/api/v1/airgap/status"),
@@ -6472,6 +6489,19 @@ export const deploymentApi = {
   testLlmCredential: () =>
     request<LlmCredentialTestResult>("/api/v1/llm/credentials/test", {
       method: "POST",
+    }),
+
+  /**
+   * List the chat models a ``custom`` endpoint serves.
+   *
+   * Works before the form is saved: ``base_url`` and ``api_key`` are used for
+   * this one request and never stored. Omit ``api_key`` to use the stored key,
+   * which the server sends only to the stored base URL.
+   */
+  discoverLlmModels: (payload: { base_url?: string | null; api_key?: string | null }) =>
+    request<LlmModelDiscoveryResult>("/api/v1/llm/credentials/models", {
+      method: "POST",
+      body: JSON.stringify(payload),
     }),
 };
 

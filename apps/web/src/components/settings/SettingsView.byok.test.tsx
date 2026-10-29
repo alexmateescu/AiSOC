@@ -44,6 +44,7 @@ vi.mock('swr', () => ({
 const mockGetLlmCredential = vi.hoisted(() => vi.fn());
 const mockUpsertLlmCredential = vi.hoisted(() => vi.fn());
 const mockDeleteLlmCredential = vi.hoisted(() => vi.fn());
+const mockDiscoverLlmModels = vi.hoisted(() => vi.fn());
 const mockGetAirgapStatus = vi.hoisted(() => vi.fn());
 const mockGetLlmStatus = vi.hoisted(() => vi.fn());
 const mockGetConnectors = vi.hoisted(() => vi.fn());
@@ -57,6 +58,7 @@ vi.mock('@/lib/api', () => ({
     getLlmCredential: mockGetLlmCredential,
     upsertLlmCredential: mockUpsertLlmCredential,
     deleteLlmCredential: mockDeleteLlmCredential,
+    discoverLlmModels: mockDiscoverLlmModels,
   },
   connectorsApi: {
     list: mockGetConnectors,
@@ -467,5 +469,162 @@ describe('WS-H2 — BYOKCard: loading & error states', () => {
     expect(
       await screen.findByText(/byok panel unavailable/i),
     ).toBeInTheDocument();
+  });
+});
+
+// ──────────────────────────────────────────────────────────────────────────────
+describe('BYOKCard: model discovery for the custom provider', () => {
+  beforeEach(() => {
+    clearSwrMaps();
+    vi.clearAllMocks();
+    mockUpsertLlmCredential.mockResolvedValue(undefined);
+  });
+
+  async function openCustomForm() {
+    await renderDeploymentTab({ credential: null });
+    await userEvent.click(
+      await screen.findByRole('button', { name: /configure byok/i }),
+    );
+    await userEvent.selectOptions(
+      await screen.findByRole('combobox', { name: /provider/i }),
+      'custom',
+    );
+    await userEvent.type(
+      screen.getByPlaceholderText('https://internal-llm.example.com/v1'),
+      'https://gw.example.com/v1',
+    );
+    await userEvent.type(screen.getByLabelText(/api key/i), 'typed-key');
+  }
+
+  it('is offered for the custom provider only', async () => {
+    await renderDeploymentTab({ credential: null });
+    await userEvent.click(
+      await screen.findByRole('button', { name: /configure byok/i }),
+    );
+
+    expect(
+      screen.queryByRole('button', { name: /list models from endpoint/i }),
+    ).not.toBeInTheDocument();
+
+    await userEvent.selectOptions(
+      screen.getByRole('combobox', { name: /provider/i }),
+      'custom',
+    );
+
+    expect(
+      screen.getByRole('button', { name: /list models from endpoint/i }),
+    ).toBeInTheDocument();
+  });
+
+  it('lists what the server returned and saves the chosen id', async () => {
+    mockDiscoverLlmModels.mockResolvedValue({
+      outcome: 'ok',
+      detail: '2 chat model(s) of 5 listed.',
+      models: [{ id: 'acme/chat-large' }, { id: 'acme/chat-small', name: 'Chat Small' }],
+      listed: 5,
+      excluded: 3,
+      truncated: false,
+    });
+    await openCustomForm();
+
+    await userEvent.click(
+      screen.getByRole('button', { name: /list models from endpoint/i }),
+    );
+
+    expect(mockDiscoverLlmModels).toHaveBeenCalledWith({
+      base_url: 'https://gw.example.com/v1',
+      api_key: 'typed-key',
+    });
+    const picker = await screen.findByRole('combobox', {
+      name: /discovered chat models/i,
+    });
+    const offered = Array.from((picker as HTMLSelectElement).options)
+      .map(o => o.value)
+      .filter(Boolean);
+    expect(offered).toEqual(['acme/chat-large', 'acme/chat-small']);
+    expect(screen.getByRole('status')).toHaveTextContent(
+      /2 chat models of 5 listed .*3 .*non-chat entries hidden/i,
+    );
+
+    await userEvent.selectOptions(picker, 'acme/chat-small');
+    expect(screen.getByPlaceholderText('provider default')).toHaveValue(
+      'acme/chat-small',
+    );
+
+    await userEvent.click(
+      screen.getByRole('button', { name: /save credential/i }),
+    );
+    await waitFor(() =>
+      expect(mockUpsertLlmCredential).toHaveBeenCalledWith(
+        expect.objectContaining({
+          provider: 'custom',
+          base_url: 'https://gw.example.com/v1',
+          model: 'acme/chat-small',
+        }),
+      ),
+    );
+  });
+
+  it('keeps the typed id working when discovery fails', async () => {
+    mockDiscoverLlmModels.mockResolvedValue({
+      outcome: 'refused',
+      detail: 'The endpoint does not publish a model list at /models (HTTP 404).',
+      models: [],
+      listed: 0,
+      excluded: 0,
+      truncated: false,
+    });
+    await openCustomForm();
+
+    await userEvent.click(
+      screen.getByRole('button', { name: /list models from endpoint/i }),
+    );
+
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      /HTTP 404.*still accepts a typed id/i,
+    );
+    expect(
+      screen.queryByRole('combobox', { name: /discovered chat models/i }),
+    ).not.toBeInTheDocument();
+
+    await userEvent.type(
+      screen.getByPlaceholderText('provider default'),
+      'hand-typed-model',
+    );
+    await userEvent.click(
+      screen.getByRole('button', { name: /save credential/i }),
+    );
+    await waitFor(() =>
+      expect(mockUpsertLlmCredential).toHaveBeenCalledWith(
+        expect.objectContaining({ model: 'hand-typed-model' }),
+      ),
+    );
+  });
+
+  it('drops a list fetched for one base URL when the base URL changes', async () => {
+    mockDiscoverLlmModels.mockResolvedValue({
+      outcome: 'ok',
+      detail: '1 chat model(s) of 1 listed.',
+      models: [{ id: 'acme/chat-large' }],
+      listed: 1,
+      excluded: 0,
+      truncated: false,
+    });
+    await openCustomForm();
+    await userEvent.click(
+      screen.getByRole('button', { name: /list models from endpoint/i }),
+    );
+    expect(
+      await screen.findByRole('combobox', { name: /discovered chat models/i }),
+    ).toBeInTheDocument();
+
+    await userEvent.type(
+      screen.getByPlaceholderText('https://internal-llm.example.com/v1'),
+      '2',
+    );
+
+    expect(
+      screen.queryByRole('combobox', { name: /discovered chat models/i }),
+    ).not.toBeInTheDocument();
   });
 });
