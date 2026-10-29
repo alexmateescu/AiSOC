@@ -315,11 +315,11 @@ export function AlertsView() {
     page: 1,
     pageSize: 25,
     sort: 'priority',
+    status: 'new',
   });
-  // Default to the entity-centric queue — that's the whole point of Wave 1's
-  // RBA work. Analysts can flip back to the raw alert grid for legacy
-  // workflows or when triaging a specific alert ID.
-  const [viewMode, setViewMode] = useState<ViewMode>('entities');
+  // Default to the raw alerts grid (operator preference 2026-10-28): triage
+  // starts from alerts; the entity-centric RBA queue stays one click away.
+  const [viewMode, setViewMode] = useState<ViewMode>('alerts');
 
   const { data, error, isLoading } = useSWR(
     ['alerts', filters],
