@@ -847,3 +847,97 @@ class TestAuditing:
         assert len(rows) == 1
         assert rows[0].changes["programmatic_access_revoked"] == 1
         assert rows[0].changes["sessions_revoked_at"]
+
+
+# ---------------------------------------------------------------------------
+# The manager, which an escalation needs and nothing stored
+# ---------------------------------------------------------------------------
+
+
+class TestManagerAttribute:
+    """``manager.value`` from the enterprise extension (depth 5.4).
+
+    The platform held a provisioned directory and could not answer "who
+    does this person report to", which is the one question the playbook
+    verification escalation asks. The column was simply missing, so every
+    sync delivered the attribute and every sync dropped it.
+
+    Both wire shapes are exercised because both are in the wild, and
+    reading only the complex one finds nothing on the other — which looks
+    identical to "this person has no manager", the distinction the
+    escalation turns on.
+    """
+
+    async def test_a_create_stores_the_manager_from_the_enterprise_extension(self, client, session_factory):
+        payload = {
+            **ENTRA_CREATE_USER,
+            "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User": {
+                "department": "Security",
+                "manager": {"value": "9f8e7d6c-entra-0000-0000-000000000002", "displayName": "Alan Turing"},
+            },
+        }
+        created = await client.post(f"{BASE}/Users", json=payload)
+        assert created.status_code == 201
+
+        async with session_factory() as db:
+            row = (await db.execute(select(ScimUser).where(ScimUser.user_id == uuid.UUID(created.json()["id"])))).scalar_one()
+        assert row.manager_ref == "9f8e7d6c-entra-0000-0000-000000000002"
+
+    async def test_a_bare_string_manager_is_read_too(self, client, session_factory):
+        """Several providers send a username rather than a complex value."""
+        payload = {
+            **ENTRA_CREATE_USER,
+            "externalId": "bare-string-manager",
+            "emails": [{"primary": True, "type": "work", "value": "katherine@example.com"}],
+            "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User": {"manager": "alan@example.com"},
+        }
+        created = await client.post(f"{BASE}/Users", json=payload)
+        assert created.status_code == 201
+
+        async with session_factory() as db:
+            row = (await db.execute(select(ScimUser).where(ScimUser.user_id == uuid.UUID(created.json()["id"])))).scalar_one()
+        assert row.manager_ref == "alan@example.com"
+
+    async def test_the_manager_is_echoed_back_with_its_schema(self, client):
+        """A provider that reads a resource without what it sent re-sends forever."""
+        payload = {
+            **ENTRA_CREATE_USER,
+            "externalId": "echo-manager",
+            "emails": [{"primary": True, "type": "work", "value": "echo@example.com"}],
+            "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User": {"manager": {"value": "boss@example.com"}},
+        }
+        user_id = (await client.post(f"{BASE}/Users", json=payload)).json()["id"]
+        body = (await client.get(f"{BASE}/Users/{user_id}")).json()
+
+        extension = "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User"
+        assert extension in body["schemas"]
+        assert body[extension]["manager"]["value"] == "boss@example.com"
+
+    async def test_a_patch_moves_the_reporting_line(self, client, session_factory):
+        """A reorganisation is a PATCH, and the suffix carries the URN."""
+        user_id = (await client.post(f"{BASE}/Users", json=OKTA_CREATE_USER)).json()["id"]
+        response = await client.patch(
+            f"{BASE}/Users/{user_id}",
+            json={
+                "schemas": [PATCH_SCHEMA],
+                "Operations": [
+                    {
+                        "op": "replace",
+                        "path": "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User:manager",
+                        "value": {"value": "newboss@example.com"},
+                    }
+                ],
+            },
+        )
+        assert response.status_code == 200
+
+        async with session_factory() as db:
+            row = (await db.execute(select(ScimUser).where(ScimUser.user_id == uuid.UUID(user_id)))).scalar_one()
+        assert row.manager_ref == "newboss@example.com"
+
+    async def test_no_manager_is_recorded_as_none_rather_than_a_blank(self, client, session_factory):
+        """`None` and `""` would read differently to the escalation."""
+        created = await client.post(f"{BASE}/Users", json=OKTA_CREATE_USER)
+        async with session_factory() as db:
+            row = (await db.execute(select(ScimUser).where(ScimUser.user_id == uuid.UUID(created.json()["id"])))).scalar_one()
+        assert row.manager_ref is None

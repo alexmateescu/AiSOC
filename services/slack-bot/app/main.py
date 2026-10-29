@@ -65,6 +65,7 @@ from app.notify import router as notify_router
 from app.services.aisoc_clients import AisocActionsClient, AisocApiClient
 from app.services.approval_audit import StructlogAuditSink
 from app.services.approval_timeout import ApprovalTimeoutScheduler
+from app.war_room import router as war_room_router
 
 # Configure structlog before anything else so module-level loggers
 # (httpx, slack_bolt, …) inherit the JSON renderer.
@@ -330,6 +331,11 @@ app = FastAPI(
 # Bolt's respond() only works inside an inbound interaction — which is why an
 # agent could not ask for approval until a human asked first.
 app.include_router(notify_router)
+# Depth 9.4. Before this the only outbound thing this service could do was
+# post one approval card into one pre-configured channel; it could not
+# create anything, so "open a war room" existed in the tree only as a
+# sentence in a playbook template.
+app.include_router(war_room_router)
 
 # Phase 2.6 — k8s liveness + readiness probes (see app/_health.py).
 _mark_ready, _mark_not_ready = install_health_routes(app, service_name="aisoc-slack-bot")

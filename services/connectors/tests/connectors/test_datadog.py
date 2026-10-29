@@ -56,12 +56,23 @@ def test_invalid_mode_rejected():
         DatadogConnector(site="us1", mode="bogus", api_key="k", application_key="a")
 
 
-def test_normalize_log_critical_to_high(fixture):
+def test_normalize_log_critical_preserves_critical(fixture):
     out = _logs_connector().normalize(fixture["logs"][0])
-    assert out["severity"] == "high"
+    assert out["severity"] == "critical"
+    assert out["raw_event"]["attributes"]["status"] == "critical"
     assert out["stream"] == "logs"
     assert out["host"] == "web-1"
     assert out["service"] == "api"
+
+
+def test_normalize_log_emergency_and_alert_outrank_critical():
+    # Syslog ordering: emergency (0) and alert (1) are MORE severe than
+    # critical (2). They must never map below critical's tier, or a paging
+    # emergency would rank under a critical log in the alert queue.
+    for status in ("emergency", "alert"):
+        out = _logs_connector().normalize({"attributes": {"status": status, "message": "m"}})
+        assert out["severity"] == "critical", status
+        assert out["raw_event"]["attributes"]["status"] == status
 
 
 def test_normalize_log_error_to_medium(fixture):

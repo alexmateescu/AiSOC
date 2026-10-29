@@ -129,13 +129,41 @@ class TestTheHandlersUseIt:
         source = inspect.getsource(getattr(module, handler))
         assert 'set_cookie("aisoc_token"' not in source, f"{handler} still puts the token in a cookie the API does not read"
 
-    @pytest.mark.parametrize("handler", ["oidc_callback", "saml_acs"])
-    def test_the_token_travels_in_the_fragment(self, handler: str) -> None:
+    def test_the_token_travels_in_the_fragment(self) -> None:
         """Not the query string: a fragment is not sent to the server, does
-        not reach an access log, and does not leak through `Referer`."""
-        module = oidc if handler == "oidc_callback" else saml
-        source = inspect.getsource(getattr(module, handler))
-        assert "#" in source and "access_token=" in source
+        not reach an access log, and does not leak through `Referer`.
+
+        Both callbacks build this with one shared function, so it is
+        called rather than read out of their source. The source-text form
+        this replaces asserted that the characters `#` and `access_token=`
+        appeared in the handler — which stops being true the moment the
+        construction moves, while the property it names is still held, and
+        would equally have stayed true if the fragment were built wrongly.
+        """
+        fragment = saml._session_fragment({"access_token": "a-token", "refresh_token": "r-token"})
+
+        assert fragment.startswith("#access_token=")
+        assert "refresh_token=r-token" in fragment
+        assert "?" not in fragment, "a query string is sent to the server and lands in an access log"
+
+    def test_a_sign_in_that_still_owes_a_factor_carries_no_session(self) -> None:
+        """Depth 8.1. The callback lands on the second-factor page with a
+        challenge, and **no tokens at all** — a fragment that carried both
+        would hand over the session the challenge exists to withhold."""
+        fragment = saml._session_fragment({"mfa_required": True, "mfa_token": "challenge-token", "methods": ["totp", "webauthn"]})
+
+        assert "access_token" not in fragment
+        assert "refresh_token" not in fragment
+        assert fragment.startswith("#mfa_required=1")
+        assert "mfa_token=challenge-token" in fragment
+
+    def test_an_unenrolled_user_is_sent_to_enrol_rather_than_to_verify(self) -> None:
+        """The two are different pages and conflating them strands a user
+        who has nothing to verify yet."""
+        fragment = saml._session_fragment({"mfa_enrollment_required": True, "mfa_token": "t", "methods": []})
+
+        assert fragment.startswith("#mfa_enrollment_required=1")
+        assert "access_token" not in fragment
 
     @pytest.mark.parametrize("handler", ["oidc_callback", "saml_acs"])
     def test_a_provisioning_refusal_says_why(self, handler: str) -> None:

@@ -86,14 +86,14 @@ conditional `numpy` pins collide into an unresolvable install. Parse with
 
 ## Wave 3: Replay, shadow mode and evaluation measure the real thing
 
-- [ ] **3.1** Frozen context, not empty context
+- [x] **3.1** Frozen context, not empty context
 - [x] **3.2** No side effects from a replay
-- [ ] **3.3** Input shapes: per-source adapters for Elastic and Defender
+- [x] **3.3** Input shapes: per-source adapters for Elastic and Defender
 - [x] **3.4** Model attribution: `model_used` is set from the call that answered
-- [ ] **3.5** Non-degenerate acceptance for the reproducibility test
+- [x] **3.5** Non-degenerate acceptance for the reproducibility test
 - [x] **3.6** Tool calls recorded from the ledger, not hard-coded to 0
-- [ ] **3.7** Demotion without a page load
-- [ ] **3.8** Skills: activation evidence, LLM-path-only disclosure, console retraction
+- [x] **3.7** Demotion without a page load
+- [x] **3.8** Skills: activation evidence, LLM-path-only disclosure, console retraction
 - [~] **3.9** The weekly live evaluation installs from the lockfile and fails loudly; it still cannot *run* without a funded key (M2)
 - [x] **3.10** The 9.3% flip rate is qualified or removed
 - [x] **3.11** CI runs the live tests
@@ -101,12 +101,18 @@ conditional `numpy` pins collide into an unresolvable install. Parse with
 
 ## Wave 4: Enterprise identity, white-label and metering
 
-- [ ] **4.1** SSO completes in the console
-- [ ] **4.2** Console MFA
-- [ ] **4.3** White-label reaches every surface it claims
-- [ ] **4.4** Metering counts what happened
-- [ ] **4.5** SCIM live coverage and the console token claim
-- [ ] **4.6** Maturity evidence names tests that exercise the row
+- [~] **4.1** SSO completes in the console
+  - Two of the three defects did **not** reproduce: the console fragment consumer (`authApi.completeSsoHandoff`) and the login-screen SSO entry both landed in v17.1.0. Neither was covered by a test, so six now pin them. The third reproduced exactly as written — `_saml_settings()` read its IdP trust anchor from `SAML_IDP_*` while the connection's own `metadata_url` / `metadata_xml` were read by nothing, so a SAML login redirected to the environment's IdP and a correctly signed assertion came back `invalid_response`. Fixed in `app/auth/saml_metadata.py`; the ACS also now lands on `/login?next=` with both tokens, because the old RelayState redirect lost the fragment to the console's own auth guard. Driven end to end against real Postgres and a real signed assertion in `sso-live.yml`. **Still `[~]`**: the containerised-IdP leg (`sso-live.yml :: keycloak-oidc`) has never been observed to pass — no container runtime would start where it was written — so the claim row is PARTIAL, not GATED.
+- [x] **4.2** Console MFA
+  - Reproduced first: ten of eleven assertions against the real login route and real Postgres failed with `{"detail":"Not Found"}` — the surface did not exist. TOTP (RFC 6238, in-tree, pinned to the spec's own vectors rather than to a round trip), ten single-use recovery codes, a vault-encrypted secret, a `last_used_step` high-water mark so a code cannot be replayed inside its own 30-second window, per-tenant enforcement with **no backfill row** (absence means not required), and audited enrolment, disable, recovery-code use, policy change and administrative reset. A correct password for an enrolled account now answers **202** with a challenge instead of a session — 202 rather than a widened 200 body, because `access_token` is a required field and making it optional breaks every generated client. An unenrolled member of a newly-enforcing tenant enrols from that challenge rather than being locked out; the trade-off is stated in the module and the docs. Migration `096`. 28 offline tests, 13 live, and a CI negative control that deletes the challenge branch and requires the suite to go red.
+- [x] **4.3** White-label reaches every surface it claims
+  - Each of the eight bullets was checked against `main` first. Six were real and are now branded: both report workers (a reproduce-first test showed the scheduled digest rendering unbranded), the investigation summary, the replay report, email approvals — where `send_approval_email` had **no caller at all**, so the signed fallback was unreachable until `approval_delivery` wired it — the Slack and Teams prompts, and the sidebar logo, whose `<img>` could not send the bearer header the asset route requires, so its `src` no longer points there and a test asserts it. The browser tab was already branded client-side by `BrandedDocumentTitle`; the root metadata stays the platform default because SSR has no credential. **Two were narrowed with the reason recorded rather than built.** The sign-in page cannot be branded today: `GET /api/v1/branding` resolves the organisation from the caller's credential, there is none yet on that page, and nothing maps a hostname to an organisation — `organizations` has a slug and a name and no domain — so baking one name in would be wrong for every organisation on the deployment except one *while looking configured*, which is worse than the platform name. `services/actions` had no read path to branding at all and gets one that reads **only `product_name`**, mirroring the vault split; it never raises, because a lookup that failed would take down the approval prompt it decorates, and an approval nobody sees is worse than one under the wrong name. Found on the way: neither report worker could store an artefact on **real Postgres** — a status-vocabulary mismatch invisible to the test double. `white-label-live.yml` runs the live suite with two negative controls.
+- [x] **4.4** Metering counts what happened
+  - All five bullets fixed rather than narrowed. `triages_model` and `triages_deterministic` read `investigation_runs.model_used` — the path auto-triage records for itself — instead of `alerts.ai_summary`/`ai_score`, which `persist_auto_triage` writes from one statement on **both** paths, so a deployment with no model configured reported 100% AI triage; `investigations` now excludes auto-triage runs, which had made it a second alert count wearing a different label; `events_ingested` is a real ClickHouse meter, grouped per day in one scan, reported as **not measured** rather than `0` when the lake is absent *or* deployed-and-unreachable; actions split into `automatic` / `human_gated` / `tier_unrecorded` behind migration `095`, which also adds `approval_tier` and repairs a `status` column that had held `'ActionStatus.COMPLETED'` since the table was added — the repr of a `(str, Enum)` member, which no query and no index could ever match; and `GET /usage/organization/export.csv` exports a portfolio, scoped by `resolve_portfolio_scope` and refusing a non-member rather than quietly falling back to their own tenant. The audit found one defect the branch had introduced: the path meters discriminated on `model_used <> 'kafka:auto_triage:deterministic'`, which reads as "the model path" only while `deterministic` is the sole alternative, and the worker stamps **four** tiers — `memory` (institutional-memory suppression) and `cached` (a deduplicated replay) place no LLM call and were both counted as AI triages, by the meter *and* by the `triages_per_month` quota that shares the definition. That is the same false sentence reached by another route, and it was live on `main`. `MODEL_TIERS`/`NON_MODEL_TIERS` now enumerate the vocabulary, and an AST pin reads the worker's own tier literals and fails on any tier no meter classifies — the fixture could not have caught it, having seeded only the two tiers that already worked. 35 offline tests, every assertion against rows counted independently in the test; the two new cases were confirmed to fail against the pre-fix predicate and the pin to fail with a tier removed. `tests/isolation/test_usage_lake_meter_live.py` was run against a real ClickHouse carrying the shipped `001_init.sql` — six cases pass, and dropping the tenant predicate makes the suite red, as its CI negative control requires.
+- [x] **4.5** SCIM live coverage and the console token claim
+  - Both halves built, and the doc was made true rather than narrowed. `tests/isolation/test_scim_live.py` now drives 24 cases through `create_application()` against real Postgres: PATCH in both providers' dialects (Okta's pathless `replace`, Entra's `"False"` string and its boolean), rename, group membership add and remove in both dialects, group-name-to-role resolution, and deprovisioning proved by its consequences — API keys revoked, the session revocation time stamped, `DELETE` deactivating rather than erasing, and reactivation **not** restoring the revoked keys. Four tenant-isolation and unauthenticated negative controls sit alongside, so an empty table cannot pass for isolation. Run here against a live Postgres with all 110 migrations applied: 24 passed. It cannot pass vacuously — `ISOLATION_REQUIRE_LIVE` raises at import when the DSN is absent, which is a collection error and red where a skipped module is not (verified: red with the flag set and no DSN, 24 clean skips in the offline collection job), and `scim-live.yml` reads the counts out of the report afterwards and fails on fewer than 20 executed or any skip. `ENVIRONMENT` is `test`, never `development`, which is in `AUTH_BYPASS_ENVIRONMENTS` and would have resolved an uncredentialed request to a demo admin inside the one suite whose purpose is proving the tenant comes from the credential; heavy imports sit inside fixtures. The console claim is now real: `ScimTokensPanel` creates, rotates, revokes and lists against the four `/api/v1/scim-tokens` routes that already existed and that nothing under `apps/web/src` had ever referenced — six component tests, and `check_scim_contract.py` checks **both** directions, failing on a doc promising a panel that is unwired and on a panel the doc does not mention. The audit found the branch's `check_test_discovery.py` redirection fix shipped with no self-test case, so the gate still proved only the syntaxes it handled before; eight cases now assert the reader directly across all seven redirection forms plus a control that a real path following a redirection is still read, which is what stops the new clause silently dropping arguments.
+- [x] **4.6** Maturity evidence names tests that exercise the row
+  - The row read `SCIM 2.0, white-label, usage metering` and named one test, `tests/isolation/test_scim_live.py`, which exercises neither of the other two — and the gate reported **OK** on it for four releases. The reason is structural and is the part worth keeping: `_match_key` matches a row's capability cell on a **prefix**, so the first capability's genuine evidence satisfied the lookup and the other two inherited a pass they never earned. Checking that each row's evidence exercises it cannot catch this on its own, because a bundled row has only one evidence entry to check; the row has to be split first. Now three rows with three entries: SCIM keeps `scim-live.yml`, white-label takes `white-label-live.yml` (two negative controls), and metering takes `lake-live.yml` — whose evidence string was also **wrong**, not merely missing, since that suite runs on live ClickHouse and the shared cell said Postgres. `bundles_several_capabilities()` now refuses a cell that lists several capabilities, distinguishing a list from a subordinate clause so `Alert-triggered playbooks, with a durable approval pause` still passes; its self-test asserts both directions, including the exact string that defeated the gate. Splitting one row into three pushed the README to 252 against its binding 250-line cap, so a section was **displaced rather than squeezed**: `## Try it without connecting anything` was a heading over a single sentence that now sits at the end of Quick start, where it reads the same and costs two fewer lines.
 
 ## Wave 5: Hunting, intel, sandbox and operations wiring
 
@@ -142,10 +148,14 @@ conditional `numpy` pins collide into an unresolvable install. Parse with
 
 ## Wave 7: Close the books
 
-- [ ] **7.1** Re-run every claim row this pass touched
-- [ ] **7.2** Update `GAP_CLOSURE_PROGRESS.md` and `PARITY_PROGRESS.md`
-- [ ] **7.3** One `[Unreleased]` entry in `CHANGELOG.md`
-- [ ] **7.4** Final report in this file
+- [x] **7.1** Re-run every claim row this pass touched
+  - Matrix: **302 rows, 299 GATED, 3 PARTIAL, 0 NO GATE**, counted by `check_claim_gate_matrix.py` rather than read off the summary line. Every static gate the touched rows name was re-run green: the matrix ratchet, maturity table (and its self-test), README gates, profile service counts, mypy baseline, comment paths, merge markers, attribution across 13,372 tracked files, competitor names, SCIM contract, detection fields, perf results, the one-case-table check, CI install parity and dependency pins. No row was promoted to GATED by this pass without the gate existing first; the three PARTIAL rows stay PARTIAL, including SSO, whose containerised-IdP leg has never been observed to pass.
+- [x] **7.2** Update `GAP_CLOSURE_PROGRESS.md` and `PARITY_PROGRESS.md`
+  - Parity **4.2 Console MFA** flipped to `[x]`, verified against the tree rather than against this file: `endpoints/mfa.py` mounted in the v1 router, migration `096`, `MfaView.tsx` in the console, `test_console_mfa.py` offline and `tests/isolation/test_console_mfa_live.py` live. Parity **4.1 SSO end to end** flipped to `[~]`, not `[x]` — the SAML metadata defect is fixed and driven end to end against real Postgres with a real signed assertion, but the containerised-IdP leg has never been watched to pass, and a box resting on a job nobody has seen succeed is not done. Everything else in both files was left alone: the remaining open boxes belong to the depth and gap-closure programmes, which are still running, and flipping them here would claim another plan's work.
+- [x] **7.3** One `[Unreleased]` entry in `CHANGELOG.md`
+  - Two entries under `### Fixed`, in house style, no tag: the enterprise-identity pass (white-label, metering, SCIM, maturity evidence) and the gate-parser fix. Both name what reproduced, what was narrowed instead of built, and why.
+- [x] **7.4** Final report in this file
+  - See **Final report** at the end of this file.
 
 ## Maintainer-only (recorded, not attempted)
 
@@ -538,12 +548,11 @@ left implied.
 
 ## Wave 3 (partial): what is done and what is not
 
-**Done, each with a reproduction and a negative control:** 3.2, 3.4, 3.6,
-3.10, 3.11, 3.12, and the actionable half of 3.9.
+**Done, each with a reproduction and a negative control:** 3.1, 3.2, 3.3,
+3.4, 3.5, 3.6, 3.7, 3.8, 3.10, 3.11, 3.12, and the actionable half of 3.9.
 
-**Not started:** 3.1 (frozen context), 3.3 (per-source input adapters),
-3.5 (non-degenerate acceptance), 3.7 (demotion without a page load),
-3.8 (skills activation evidence and the console retraction).
+**Wave 3 is closed.** Every item carries its reproduction and its negative
+control; 3.9's remaining half is maintainer-blocked on a funded key (M2).
 
 ### 3.2 A replay has no side effects
 
@@ -571,6 +580,72 @@ default was the only branch that ever ran. `tool_calls` was a literal under a
 comment promising it would move. `_classify_pivots` counted a raised call as a
 pivot, so four timeouts looked like four pivots.
 
+### 3.7 Demotion without a page load
+
+Reproduced against a real Postgres before anything was written. A tenant
+earns `auto_execute` on `isolate_host` from a 240-decision record, 30
+disagreements are injected -- window agreement 88.9%, trailing slice 40%, both
+under the floors -- and then, with no read of the API: the grant row still
+says `granted`, and `services/actions` still reports
+`earned_autonomy_for('isolate_host') == 'earned'`. That second one is the
+sharp end. It means the dispatch path would have auto-isolated a production
+host on a track record the product itself no longer accepted.
+
+Two callers now, where there was one. `app.workers.autonomy_drift` sweeps
+every tenant holding a grant on a timer from the API lifespan and writes the
+demotion with its audit row; `tenant_policy` re-runs the same evaluator before
+handing a verb to dispatch and **withholds** one that no longer holds,
+without writing anything -- issuing and revoking stay with the service that
+owns the hash chain.
+
+The sweep is on by default, unlike `shadow_reconcile` beside it, and the
+difference is what each reaches: that one polls a customer's SIEM, this one
+aggregates rows this deployment already wrote. A safety control that has to be
+switched on is off wherever nobody knew to switch it on.
+
+**A defect in the fix, caught by its own positive control.** The two shared
+aggregates bind different parameter counts -- the trailing slice takes `$7`
+for its `LIMIT`, the window aggregate stops at `$6` -- and passing seven to
+both made asyncpg refuse. The refusal was caught and an unreadable record is
+treated as no record, so *every* grant on *every* deployment was withheld
+while the log called the evidence unreadable. It passed the demotion test
+perfectly. Only the test asserting a healthy tenant **keeps** its verb found
+it. A safety control stuck on reads like working caution, which is why
+nothing about the symptom says "broken", and the arity is now derived from
+the statement so an edit to the shared module cannot put it back.
+
+`scripts/check_module_reachability.py` went the way an allowlist is supposed
+to: `autonomy_evidence_rules.py` was listed as a permanent entry reached only
+by tooling, the dispatch re-check gave it a production caller, and the gate
+refused the stale entry.
+### 3.5 Non-degenerate acceptance
+
+Measured before touching anything: all six decisions in the test window came
+back `benign` at `0.10` on tier `deterministic`, so Phase 1's acceptance bar
+was one constant list compared against itself.
+
+The replacement drives the same runner with a recording of
+`llama3.2:3b-instruct-q4_K_M` -- the model the air-gap compose file bundles --
+answering the production triage prompt, served to the real gateway client over
+a loopback socket rather than through a patched transport. Recorded replies
+give the two properties a live model and a constant each give only one of:
+they vary, and they repeat.
+
+Proven non-vacuous rather than asserted to be. Flattening the recording to a
+single verdict leaves the old bar passing (`first == second`) and makes the
+new one fail, and `test_the_acceptance_bar_rejects_a_constant_verdict_stream`
+keeps that proof in the suite.
+
+Two things the recording exposed that a constant could not. The LLM path
+writes the call's elapsed time into a finding string, so `latency_ms` was not
+the only wall clock in a decision and the run was not reproducible until that
+was excluded too. And one of the six real replies is malformed -- the model
+truncated mid-rationale -- which the committed fixture keeps as it arrived,
+because a recording edited until it parses is no longer a recording.
+
+The alerts are synthetic and the fixture's own `provenance` block says so;
+only the replies are real.
+
 ### 3.9 is half done, and the half that is left is M2
 
 Installing from the lockfile and failing loudly on an import error are done.
@@ -588,3 +663,83 @@ comment above it says the figure is "recorded so a future change that gives
 triage a tool shows up here as a number moving off zero", and a literal can
 never move. The fix derives the same zero from the ledger so it can change
 when the run does.
+
+## Final report
+
+**Where it landed: 40 of 48 items `[x]`, 2 `[~]`, 4 `[!]` maintainer-only.** The
+two still showing `[ ]` here — 4.3 white-label and 4.6 maturity evidence — are
+complete and flipped on the branch carrying their PR; they read open only in a
+worktree cut before it merged. Re-read this file on `main` rather than trusting
+that sentence.
+
+### What this pass was for
+
+It added no capability. It existed to repair what two other programmes had
+recorded as shipped and an audit found broken, which is why nearly every item
+begins with a reproduction rather than a design.
+
+### The pattern that recurred most
+
+**A mechanism existed, passed its tests, and nothing called it on the path that
+mattered.** `send_approval_email` had no caller at all, so the signed
+email-approval fallback was unreachable. The retro-hunt flag passed through no
+compose file, so a tenant could not turn the feature on. `find_matching()` had
+no production caller, so no playbook had ever run from an alert. A passing test
+on an uncalled function is indistinguishable from a working feature until
+somebody traces the call graph.
+
+**Its second half is worse and reachability analysis cannot see it: the code
+runs and the table it reads is one nothing writes.** `triages_model` counted a
+column the deterministic path also writes, so a deployment with no model
+reported 100% AI triage — and the figure looked plausible, which is why it
+survived four releases.
+
+### What the gates themselves got wrong
+
+Three gates were found grading something other than what they claimed.
+
+- `check_maturity_table` matched a row on a **prefix**, so one row covering
+  SCIM, white-label and metering satisfied the lookup with a single SCIM test
+  and the other two capabilities inherited a pass. It printed OK for four
+  releases.
+- `check_ci_install_parity` read the `tee` target in
+  `pytest … | tee /tmp/wl.txt` as a pytest **directory** argument, concluding a
+  job naming one file ran a whole service suite. Thirteen findings from one
+  `tee`.
+- `check_test_discovery` read a shell redirection as a test path.
+
+All three are the same shape: **a detector that knows one syntax of the
+language it parses.** Each fix ships with a self-test asserting both
+directions, because a parser fix that stops detecting is worse than the bug.
+
+### What was narrowed rather than built, and why
+
+Narrowing is in the plan as a legitimate outcome, and it was used twice, both
+times with the reason recorded beside the claim.
+
+- **The sign-in page is not branded.** Branding resolves from the caller's
+  credential and there is none yet on that page; nothing maps a hostname to an
+  organisation, because `organizations` has a slug and a name and no domain.
+  One name baked into the process would be wrong for every organisation on the
+  deployment except one, *while looking configured* — worse than the platform
+  name.
+- **`services/actions` reads only `product_name`.** The API resolver also
+  returns colours, a logo, support contacts and a footer; none has anywhere to
+  go in a Block Kit payload or a MessageCard, and resolving fields nobody
+  renders is how a second resolver starts drifting from the first.
+
+### What is left, and why it is not a gap
+
+Four items are `[!]` maintainer-only and were recorded rather than attempted:
+making the live jobs required checks under branch protection, funding provider
+keys so the weekly evaluation produces real numbers, a real multi-node cluster
+for the scale run, and accepting or overruling the closure default in the 1.4
+ADR. None is a code change.
+
+Two are `[~]`, and both are deliberate rather than unfinished. **3.9** installs
+from the lockfile and fails loudly but cannot *run* without a funded key (M2).
+**4.1** SSO is fixed and driven end to end against real Postgres with a real
+signed assertion, but its containerised-IdP leg has never been observed to
+pass, so the claim row is PARTIAL — a row resting on a job nobody has watched
+succeed is not gated, and relabelling it would make this file a liability
+instead of a control.

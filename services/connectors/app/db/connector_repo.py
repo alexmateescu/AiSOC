@@ -31,8 +31,10 @@ from sqlalchemy import (
     String,
     Table,
     Text,
-    cast,
+    bindparam,
+    case,
     func,
+    literal_column,
     select,
     update,
 )
@@ -119,8 +121,97 @@ class ConnectorInstance:
     last_backfill_at: datetime | None = None
 
 
+def _recover_connector_config(value: Any) -> dict[str, Any]:
+    """The config object, recovering the array a previous release could write.
+
+    ``record_checkpoint`` double-encoded its patch, so Postgres coerced the
+    merge to an array and every connector that checkpointed once was left with
+    ``[{...the real config...}, "{\\"checkpoint\\": {...}}"]``. The poll that
+    followed raised on ``.items()`` and the instance went unhealthy for good.
+
+    Reading that shape back is recovery, not tolerance of a current bug: the
+    write path can no longer produce it, and an operator who upgrades should
+    not have to run SQL to get their connectors polling again. Both halves are
+    recoverable — the config is the mapping element, and the cursor is inside
+    the encoded string — so a resumed connector does not re-read its overlap
+    either.
+
+    Anything else unrecognisable becomes ``{}``, which is what the caller's
+    ``or {}`` already meant.
+    """
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, list):
+        return {}
+
+    recovered: dict[str, Any] = {}
+    checkpoint: Any = None
+    for element in value:
+        if isinstance(element, dict):
+            recovered.update(element)
+            continue
+        if isinstance(element, str):
+            try:
+                decoded = json.loads(element)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(decoded, dict):
+                checkpoint = decoded.get("checkpoint", checkpoint)
+    if checkpoint is not None and "checkpoint" not in recovered:
+        recovered["checkpoint"] = checkpoint
+    return recovered
+
+
+def _instance_from_row(row: Any) -> ConnectorInstance:
+    """Map one result row onto the dataclass.
+
+    Shared by both readers below so the eighteen field assignments — the part
+    that actually drifts when a column is added — exist once.
+    """
+    return ConnectorInstance(
+        id=row.id,
+        tenant_id=row.tenant_id,
+        name=row.name,
+        connector_type=row.connector_type,
+        is_enabled=row.is_enabled,
+        auth_config=row.auth_config or {},
+        connector_config=_recover_connector_config(row.connector_config),
+        health_status=row.health_status,
+        last_sync=row.last_sync,
+        events_ingested=row.events_ingested,
+        events_dropped=row.events_dropped,
+        error_count=row.error_count,
+        schema_fingerprint=row.schema_fingerprint,
+        last_schema_drift_at=row.last_schema_drift_at,
+        last_drift_details=row.last_drift_details,
+        last_outage_at=row.last_outage_at,
+        last_backfill_at=row.last_backfill_at,
+    )
+
+
+# The column list below is spelled out at each ``select()`` rather than shared
+# through a module-level tuple, and that is deliberate rather than careless.
+# ``scripts/check_tenant_query_predicates.py`` identifies which table a
+# statement reaches from the names appearing inside the ``select(...)`` call
+# itself; behind a ``*_COLUMNS`` splat the statement names no table and becomes
+# invisible to the gate. Queries on this table being invisible is precisely how
+# the unscoped read below went unnoticed, so the duplication buys the one thing
+# worth more than brevity here: both statements are scannable.
+
+
 async def fetch_enabled_connectors(connection: Any) -> list[ConnectorInstance]:
-    """Return every connector instance with ``is_enabled = True``.
+    """Every enabled instance, **across every tenant**.
+
+    Deliberately unscoped, and the only legitimate caller is
+    ``ConnectorScheduler``: its job is to poll every tenant's sources, so it
+    cannot presuppose a tenant, and a tenant missing from its working set is a
+    customer whose connectors silently stop ingesting.
+
+    **A request handler must not call this.** Serving one caller's request from
+    a cross-tenant working set is how a saved instance belonging to somebody
+    else got resolved, decrypted and spent (GHSA-h4g5-39vv-pqfv). Handlers take
+    :func:`fetch_enabled_connector_for_tenant`, which asks the database for the
+    one row the caller is entitled to instead of filtering afterwards.
 
     ``connection`` must be a SQLAlchemy ``AsyncConnection``. We accept ``Any``
     in the type hint to avoid forcing every caller to import the async
@@ -147,29 +238,57 @@ async def fetch_enabled_connectors(connection: Any) -> list[ConnectorInstance]:
     ).where(connectors_table.c.is_enabled.is_(True))
 
     result = await connection.execute(stmt)
-    rows = result.fetchall()
-    return [
-        ConnectorInstance(
-            id=row.id,
-            tenant_id=row.tenant_id,
-            name=row.name,
-            connector_type=row.connector_type,
-            is_enabled=row.is_enabled,
-            auth_config=row.auth_config or {},
-            connector_config=row.connector_config or {},
-            health_status=row.health_status,
-            last_sync=row.last_sync,
-            events_ingested=row.events_ingested,
-            events_dropped=row.events_dropped,
-            error_count=row.error_count,
-            schema_fingerprint=row.schema_fingerprint,
-            last_schema_drift_at=row.last_schema_drift_at,
-            last_drift_details=row.last_drift_details,
-            last_outage_at=row.last_outage_at,
-            last_backfill_at=row.last_backfill_at,
-        )
-        for row in rows
-    ]
+    return [_instance_from_row(row) for row in result.fetchall()]
+
+
+async def fetch_enabled_connector_for_tenant(
+    connection: Any,
+    connector_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+) -> ConnectorInstance | None:
+    """The one enabled instance with this id **that this tenant owns**, or ``None``.
+
+    The tenant is part of the lookup rather than a check applied to its result.
+    That distinction is the fix: filtering after a cross-tenant fetch means the
+    row — including its ``auth_config`` ciphertext — has already been read into
+    the process, and every past instance of this bug class in this codebase has
+    been a scope that was absent rather than narrow.
+
+    ``None`` covers both "no such instance" and "not yours", and callers must
+    keep answering them identically. Telling them apart turns a lookup into an
+    oracle enumerating which connector ids exist in other tenants.
+
+    ``tenant_id`` must come from the authenticated principal — a console
+    token's verified claim or the header a service token is required to
+    declare — never from a value the caller is free to assert.
+    """
+    stmt = select(
+        connectors_table.c.id,
+        connectors_table.c.tenant_id,
+        connectors_table.c.name,
+        connectors_table.c.connector_type,
+        connectors_table.c.is_enabled,
+        connectors_table.c.auth_config,
+        connectors_table.c.connector_config,
+        connectors_table.c.health_status,
+        connectors_table.c.last_sync,
+        connectors_table.c.events_ingested,
+        connectors_table.c.events_dropped,
+        connectors_table.c.error_count,
+        connectors_table.c.schema_fingerprint,
+        connectors_table.c.last_schema_drift_at,
+        connectors_table.c.last_drift_details,
+        connectors_table.c.last_outage_at,
+        connectors_table.c.last_backfill_at,
+    ).where(
+        connectors_table.c.is_enabled.is_(True),
+        connectors_table.c.id == connector_id,
+        connectors_table.c.tenant_id == tenant_id,
+    )
+
+    result = await connection.execute(stmt)
+    row = result.first()
+    return _instance_from_row(row) if row is not None else None
 
 
 async def record_poll_success(
@@ -260,8 +379,61 @@ async def record_checkpoint(
     re-scans a bounded overlap rather than skipping events.
     """
     now = datetime.now(UTC)
-    patch = cast(json.dumps({"checkpoint": checkpoint}), JSONB)
-    merged = func.coalesce(connectors_table.c.connector_config, cast("{}", JSONB)).op("||")(patch)
+    # Bound as a mapping with a JSONB type, serialised exactly once.
+    #
+    # `cast(json.dumps(...), JSONB)` -- what this was -- serialises twice:
+    # `cast` declares the bind's type as JSONB, so SQLAlchemy's JSONB bind
+    # processor encodes the string it was handed, and Postgres receives a JSON
+    # *string scalar* rather than an object. `jsonb || <scalar>` then coerces
+    # both operands to arrays, so one successful checkpointed poll rewrote
+    # `connector_config` from
+    #     {"poll_interval_seconds": 120, "filter_rules": [...]}
+    # to
+    #     [{"poll_interval_seconds": 120, ...}, "{\"checkpoint\": {...}}"]
+    # and the *next* poll raised `AttributeError: 'list' object has no
+    # attribute 'items'` on reading it, which the poll's broad handler
+    # recorded as a failure. The instance went unhealthy and stayed there,
+    # with its poll interval and its filter rules no longer readable.
+    #
+    # Nothing caught it because every scheduler test patches this function
+    # with a fake that records the dict it was handed, so the statement below
+    # had never been executed by a test. `tests/isolation/
+    # test_queue_acknowledgement_live.py` now runs it against real Postgres.
+    patch = bindparam("checkpoint_patch", {"checkpoint": checkpoint}, JSONB, unique=True)
+    # A literal rather than another `cast(...)` bind, for the same reason.
+    empty = literal_column("'{}'::jsonb")
+    config = connectors_table.c.connector_config
+    # Heal the array a previous release left behind, at write time.
+    #
+    # ``_recover_connector_config`` recovers the array shape on *read*, but it
+    # never lands in the column: every ``||`` merge below would see the raw
+    # array and append the patch as one more element instead of setting the
+    # ``checkpoint`` key, so a connector upgraded past the fix kept its row
+    # corrupt forever — and the first API that validates the column strictly
+    # (``ConnectorResponse.connector_config: dict``) answers 500 for the whole
+    # connectors list, not just this row.
+    #
+    # The fold mirrors the read-side recovery: object elements merge left to
+    # right (later wins), double-encoded string elements are decoded and
+    # merged too, anything else is dropped. A hand-mangled string that starts
+    # with ``{`` but does not parse still raises — inside the scheduler's
+    # best-effort caller, which is the same failure shape as before: a failed
+    # checkpoint write costs a re-scan, never corruption.
+    heal_array = literal_column(
+        "(SELECT coalesce(jsonb_object_agg(kv.key, kv.value ORDER BY el.ord), '{}'::jsonb) "
+        "FROM jsonb_array_elements(connectors.connector_config) WITH ORDINALITY AS el(v, ord), "
+        "LATERAL jsonb_each(CASE "
+        "WHEN jsonb_typeof(el.v) = 'object' THEN el.v "
+        "WHEN jsonb_typeof(el.v) = 'string' AND left(btrim(el.v #>> '{}'), 1) = '{' "
+        "THEN btrim(el.v #>> '{}')::jsonb "
+        "ELSE '{}'::jsonb END) AS kv(key, value))"
+    )
+    base = case(
+        (config.is_(None), empty),
+        (func.jsonb_typeof(config) == "array", heal_array),
+        else_=config,
+    )
+    merged = base.op("||")(patch)
     stmt = update(connectors_table).where(connectors_table.c.id == connector_id).values(connector_config=merged, updated_at=now)
     await connection.execute(stmt)
 
@@ -312,6 +484,7 @@ async def record_schema_drift(
 __all__ = [
     "ConnectorInstance",
     "connectors_table",
+    "fetch_enabled_connector_for_tenant",
     "fetch_enabled_connectors",
     "metadata",
     "record_backfill_run",

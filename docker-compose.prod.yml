@@ -331,6 +331,20 @@ services:
       preflight-secrets:
         condition: service_completed_successfully
 
+  # The MCP server (depth 9.1), a `--profile mcp` opt-in that is off by
+  # default. It publishes 8096 in the base file for local clients; in
+  # production it is unpublished like every other upstream, because the
+  # console does not proxy it and an operator who wants an external MCP
+  # endpoint exposes it deliberately. It authorizes every call from the
+  # credential in the request (no static key — `check_mcp_over_http.py`
+  # enforces that), so the credential check still gates its start.
+  mcp:
+    depends_on:
+      preflight-secrets:
+        condition: service_completed_successfully
+    ports: !reset []
+    restart: unless-stopped
+
   # The console. Demo mode is inlined at build time by Next, so this asserts
   # the runtime side only; pull the `latest` tag rather than a `-demo` one.
   web:
@@ -447,6 +461,16 @@ services:
     depends_on:
       preflight-secrets:
         condition: service_completed_successfully
+    ports: !reset []
+
+  teams-bot:
+    depends_on:
+      preflight-secrets:
+        condition: service_completed_successfully
+    # Same treatment as its sibling: the base file publishes a port for
+    # local work, and in production only the console and ingest are
+    # reachable from the host. `!reset` rather than an empty list, because
+    # a plain override appends.
     ports: !reset []
 
   tempo:

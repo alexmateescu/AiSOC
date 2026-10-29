@@ -216,9 +216,7 @@ class LaceworkConnector(BaseConnector):
 
     def _normalize_policy(self, raw: dict[str, Any]) -> dict[str, Any]:
         sev_raw = (raw.get("severity") or "").lower()
-        if sev_raw in ("critical",):
-            sev = "high"
-        elif sev_raw in ("info", "low", "medium", "high"):
+        if sev_raw in ("info", "low", "medium", "high", "critical"):
             sev = sev_raw
         else:
             sev = "medium"

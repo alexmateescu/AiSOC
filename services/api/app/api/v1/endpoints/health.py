@@ -73,20 +73,24 @@ rule in ``connector_freshness``.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Response, status
+from redis.asyncio import from_url as redis_from_url
 from sqlalchemy import and_, func, select, text
 
 from app.api.v1.deps import AuthUser, CurrentUser, DBSession, require_permission
 from app.api.v1.endpoints.metrics import PipelineHealth, PipelineStage
 from app.core.config import settings
+from app.db.database import engine
 from app.db.rls import TenantDBSession
 from app.models.alert import Alert
 from app.models.connector import Connector
-from app.services.audit_hash import verify_chain_breaks
+from app.services.audit_hash import verify_chain_breaks, verify_chain_tail
 from app.services.connector_freshness import compute_freshness
 from app.services.dlq_replay_gateway import DlqReplayRequest, DlqReplayResponse, run_replay
 from app.services.fleet_health import assess_fleet
@@ -689,6 +693,19 @@ async def get_audit_chain_health(
         .one()
     )
 
+    # The head is read before the rows so a concurrent append cannot look
+    # like truncation (see verify_chain_tail).
+    head = (
+        (
+            await db.execute(
+                text("SELECT head_hash, next_index, updated_at FROM audit_chain_head WHERE tenant_id = :tid"),
+                {"tid": user.tenant_id},
+            )
+        )
+        .mappings()
+        .one_or_none()
+    )
+
     # Ordered by `chain_index` first, which is the order the serialized
     # appender actually chained in. `(created_at, id)` is the fallback for
     # epoch-1 rows, which have no index — and is precisely the ambiguity
@@ -715,22 +732,58 @@ async def get_audit_chain_health(
         .all()
     )
     replay = [dict(r) for r in reversed(rows)]
-    breaks = verify_chain_breaks(replay)
-    intact = not breaks
-    bad_index = int(breaks[0]["index"]) if breaks else None
-    reason = str(breaks[0]["reason"]) if breaks else None
-    epoch2_breaks = [b for b in breaks if (b.get("chain_epoch") or 1) >= 2]
 
-    head = (
+    # What the first replayed row should name as its predecessor.
+    #
+    # The replay can only verify the links *between the rows it fetched*,
+    # and the link from the first of them to whatever came before is
+    # unverifiable unless that predecessor is genesis. There are two ways
+    # it is not genesis, and both used to be reported as tampering:
+    #
+    # * **The window.** `window` is 500, so any tenant with more chained
+    #   rows than that starts the replay mid-chain and the first row names
+    #   a predecessor nobody fetched. Every such tenant reported
+    #   `prev_hash mismatch` at index 0 — a healthy chain, read as broken,
+    #   which is the one answer this surface must never give by accident.
+    # * **The retention window.** Depth 8.1 gave `audit_days` a purge
+    #   (migration `111`), so the oldest retained row can legitimately
+    #   name a predecessor that was lawfully removed. The checkpoint
+    #   written in the same transaction records which hash that was.
+    #
+    # Anchoring on the checkpoint is a *verification*: the survivor must
+    # name the hash the truncation recorded. Anchoring on the row's own
+    # `prev_hash` is an *acknowledgement* that this window cannot check
+    # that link, and `replay_anchor` below says which of the two happened
+    # rather than leaving a reader to infer it.
+    truncation = (
         (
             await db.execute(
-                text("SELECT head_hash, next_index, updated_at FROM audit_chain_head WHERE tenant_id = :tid"),
+                text(
+                    "SELECT first_retained_prev_hash FROM aisoc_audit_checkpoints WHERE tenant_id = :tid ORDER BY created_at DESC LIMIT 1"
+                ),
                 {"tid": user.tenant_id},
             )
         )
         .mappings()
         .one_or_none()
     )
+    chained_total = int(counts["chained"] or 0)
+    if replay and chained_total > len(replay):
+        anchor_prev_hash = replay[0].get("prev_hash")
+        replay_anchor = "window"
+    elif truncation is not None:
+        anchor_prev_hash = truncation["first_retained_prev_hash"]
+        replay_anchor = "retention_checkpoint"
+    else:
+        anchor_prev_hash = None
+        replay_anchor = "genesis"
+
+    breaks = verify_chain_breaks(replay, anchor_prev_hash=anchor_prev_hash)
+    tail_break = verify_chain_tail(replay, dict(head) if head else None)
+    intact = not breaks and tail_break is None
+    bad_index = int(breaks[0]["index"]) if breaks else None
+    reason = str(breaks[0]["reason"]) if breaks else (tail_break["reason"] if tail_break else None)
+    epoch2_breaks = [b for b in breaks if (b.get("chain_epoch") or 1) >= 2]
 
     unchained = int(counts["unchained"] or 0)
     return {
@@ -750,6 +803,16 @@ async def get_audit_chain_health(
         "oldest_unchained_at": counts["oldest_unchained"].isoformat() if counts["oldest_unchained"] else None,
         "newest_unchained_at": counts["newest_unchained"].isoformat() if counts["newest_unchained"] else None,
         "replay_window": len(replay),
+        # `genesis`, `retention_checkpoint`, or `window`. Only the first
+        # two mean the oldest link in this replay was checked; `window`
+        # means the chain is longer than the replay and the link below it
+        # was taken on trust.
+        "replay_anchor": replay_anchor,
+        # Deleting the newest rows leaves every remaining link valid; only the
+        # stored head shows the chain used to be longer.
+        "tail_intact": tail_break is None,
+        "tail_reason": tail_break["reason"] if tail_break else None,
+        "tail_missing_rows": tail_break["missing"] if tail_break else 0,
         # `replay_intact` covers the whole window including history. It can be
         # false forever on a deployment that forked before migration 074, and
         # that is the honest answer — those rows were not re-chained, because
@@ -974,3 +1037,95 @@ async def replay_dead_letters(
     Defaults to a dry run. Pass `execute: true` once the preview is clean.
     """
     return await run_replay(db, tenant_id=user.tenant_id, requested_by=user.user_id, request=request)
+
+
+# ---------------------------------------------------------------------------
+# Liveness and readiness (#1446)
+# ---------------------------------------------------------------------------
+#
+# Both unauthenticated: an LB or probe has no credential, and the bodies
+# carry only booleans about the service's own dependencies.
+#
+# The split follows the consumer doctrine: *liveness* says the process is
+# serving HTTP (restarting it would not help anything), *readiness* says the
+# service can do its job right now and names each dependency it checked —
+# including the healthy ones, because a dependency that is gone while the
+# body omits it is indistinguishable from a healthy idle one. The chaos
+# store-outage grader (scripts/chaos/store_outage.py) reads exactly these
+# keys; until these routes existed it probed a 404 and every leg's first
+# finding was an artifact of that rather than a fact about the service.
+
+
+async def _database_reachable() -> bool:
+    """One ``SELECT 1`` through the real engine, hard-capped.
+
+    The cap matters more than it looks: the chaos grader reads readiness with
+    a 4-second budget *while a store is down*, so a probe that waits out a
+    full connect timeout turns "down and we say so" into "down and we say
+    nothing".
+    """
+    try:
+        async with asyncio.timeout(1.5):
+            async with engine.connect() as conn:
+                await conn.execute(text("SELECT 1"))
+        return True
+    except Exception:  # noqa: BLE001 — any failure is the answer, not an error
+        return False
+
+
+async def _cache_reachable() -> bool:
+    """One Redis PING, hard-capped, on a throwaway connection."""
+    client = None
+    try:
+        async with asyncio.timeout(1.5):
+            client = redis_from_url(
+                str(settings.REDIS_URL),
+                socket_connect_timeout=1.0,
+                socket_timeout=1.0,
+            )
+            return bool(await client.ping())
+    except Exception:  # noqa: BLE001
+        return False
+    finally:
+        if client is not None:
+            with contextlib.suppress(Exception):
+                await client.aclose()
+
+
+@router.get("")
+async def health_liveness() -> dict[str, Any]:
+    """Liveness: the process answers HTTP. Nothing else is claimed.
+
+    Deliberately touches no store — a liveness probe that fails when a
+    dependency is down invites the orchestrator to restart a healthy
+    process, which converts an outage into an outage plus a restart storm.
+    Whether the service can do its *job* is ``/ready``'s question.
+    """
+    return {"status": "alive", "service": "aisoc-api"}
+
+
+@router.get("/ready")
+async def health_ready(response: Response) -> dict[str, Any]:
+    """Readiness: can this service do its job, named per dependency.
+
+    ``database`` is **block**: the API is the system of record's front door,
+    so without Postgres the status code goes 503 and a load balancer should
+    stop sending traffic here. The body still names every dependency —
+    failing *with the reason* is the whole point, and the chaos grader reads
+    the keys out of the 503 body.
+
+    ``cache`` is **degrade**: Redis is a cache and every read falls through
+    to its source, so its loss is reported (`cache: false`) while the status
+    stays 200 and the service keeps serving. Failing readiness over a cache
+    would pull the API out of the load balancer to fix a cache.
+    """
+    database, cache = await asyncio.gather(_database_reachable(), _cache_reachable())
+    ready = database
+    if not ready:
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+    return {
+        "status": "ready" if ready else "not_ready",
+        "service": "aisoc-api",
+        "database": database,
+        "cache": cache,
+    }

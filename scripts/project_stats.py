@@ -81,6 +81,31 @@ def _executable_detections() -> int | None:
     return total
 
 
+def _threat_anomaly_detections() -> int | None:
+    """Rules pairing a threat condition with a depth plan 3.4 baseline score.
+
+    Depth plan 3.5 asks for these to be *"counted as their own family"*, and
+    the reason is that the claim is genuinely different. An ordinary
+    executable rule fires on a well-formed event of its log source. One of
+    these additionally needs a warmed baseline for the principal — so a
+    day-one install has the rule and does not yet have the signal, and
+    folding them into the headline would overstate what it detects.
+
+    They are a subset of `_executable_detections`, not an addition to it.
+    """
+    path = ROOT / "services" / "fusion" / "app" / "data" / "detection_ruleset.json"
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except ValueError:
+        return None
+    rules = data.get("rules") if isinstance(data, dict) else data
+    if not isinstance(rules, list):
+        return None
+    return sum(1 for r in rules if isinstance(r, dict) and r.get("category") == "threat-anomaly")
+
+
 #: Directories under `detections/` holding YAML that is not a detection rule.
 #: Kept equal to `detection_truth_table.py`'s `SKIP_DIRS`, because a rule
 #: count and a file count published under the same words is how two surfaces
@@ -189,6 +214,7 @@ def collect() -> dict:
     stats: dict = {
         "connectors": _connectors(),
         "detections_executable": _executable_detections(),
+        "detections_threat_anomaly": _threat_anomaly_detections(),
         "detections_files_on_disk": _detection_files_on_disk(),
         "detections_yaml_files": _detection_yaml_files(),
         "services_in_repo": _python_services(),
@@ -211,6 +237,8 @@ def _render(stats: dict) -> str:
         "",
         f"  Connectors (registered)        {stats['connectors']}",
         f"  Detections (engine loads)      {stats['detections_executable']}",
+        f"  … threat-and-anomaly family    {stats['detections_threat_anomaly']}"
+        "  (a subset: each also needs a warmed baseline for the principal)",
         f"  Detection rules on disk        {stats['detections_files_on_disk']}  (includes quarantined imports the engine never evaluates)",
         f"  YAML files under detections/   {stats['detections_yaml_files']}  (the extra {playbook_yaml} are response playbooks, not rules)",
         f"  Services in repo               {stats['services_in_repo']}",

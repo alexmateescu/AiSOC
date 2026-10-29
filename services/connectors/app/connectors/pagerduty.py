@@ -241,15 +241,15 @@ class PagerDutyConnector(BaseConnector):
     # ``info`` so closed pages aren't re-surfaced as live alerts.
     _URGENCY_SEVERITY = {"high": "high", "low": "low"}
 
-    # Vendor priority labels map per the wave-1 PagerDuty rule
-    # (``info → info, warning → low, error → medium, critical → high``).
+    # Vendor priority labels map onto AiSOC's five-tier ladder. Preserve
+    # PagerDuty's top priority so active P1 incidents are not downgraded.
     _PRIORITY_SEVERITY = {
         "info": "info",
         "warning": "low",
         "warn": "low",
         "error": "medium",
-        "critical": "high",
-        "p1": "high",
+        "critical": "critical",
+        "p1": "critical",
         "p2": "medium",
         "p3": "low",
         "p4": "low",

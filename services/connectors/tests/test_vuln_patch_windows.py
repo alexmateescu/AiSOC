@@ -134,9 +134,7 @@ class TestTheStreamSplit:
     @pytest.mark.asyncio
     @respx.mock
     async def test_detector_events_leave_the_alert_stream(self):
-        route = respx.post(f"{INDEXER}/wazuh-alerts-*/_search").mock(
-            return_value=_hits_response([_detector_hit(), _real_alert_hit()])
-        )
+        route = respx.post(f"{INDEXER}/wazuh-alerts-*/_search").mock(return_value=_hits_response([_detector_hit(), _real_alert_hit()]))
         connector = WazuhConnector(INDEXER, USERNAME, PASSWORD)
         events = await connector.fetch_alerts(since_seconds=300)
 
@@ -152,9 +150,7 @@ class TestTheStreamSplit:
     @pytest.mark.asyncio
     @respx.mock
     async def test_legacy_mode_keeps_the_old_behaviour(self):
-        route = respx.post(f"{INDEXER}/wazuh-alerts-*/_search").mock(
-            return_value=_hits_response([_detector_hit(), _real_alert_hit()])
-        )
+        route = respx.post(f"{INDEXER}/wazuh-alerts-*/_search").mock(return_value=_hits_response([_detector_hit(), _real_alert_hit()]))
         connector = WazuhConnector(INDEXER, USERNAME, PASSWORD, vuln_mode="alerts")
         events = await connector.fetch_alerts(since_seconds=300)
 

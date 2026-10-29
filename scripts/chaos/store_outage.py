@@ -39,9 +39,11 @@ restart.
 from __future__ import annotations
 
 import argparse
+import http.server
 import json
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -149,6 +151,9 @@ class OutageResult:
     behaviour: str
     expected: str
     readiness_reported: bool = False
+    #: The status line the owning readiness surface answered during the
+    #: outage. ``None`` means it answered nothing at all.
+    readiness_status: int | None = None
     dependents_up: tuple[str, ...] = ()
     dependents_down: tuple[str, ...] = ()
     recovered: bool = False
@@ -165,6 +170,7 @@ class OutageResult:
             "expected": self.expected,
             "observed": self.behaviour,
             "readiness_reported": self.readiness_reported,
+            "readiness_status": self.readiness_status,
             "dependents_up": list(self.dependents_up),
             "dependents_down": list(self.dependents_down),
             "recovered": self.recovered,
@@ -178,18 +184,25 @@ def grade_outage(
     expectation: StoreExpectation,
     *,
     readiness: dict[str, Any],
+    readiness_status: int | None,
     dependents_responding: dict[str, bool],
     recovered: bool,
+    recovery_observable: bool = True,
     recovery_seconds: float | None = None,
 ) -> OutageResult:
     """Grade one outage against what the store's loss is supposed to look like.
 
     Pure, so the self-test can drive every branch without containers.
+
+    ``readiness_status`` is the status line the owning readiness surface
+    answered while the store was down, or ``None`` if it answered nothing at
+    all. It is graded rather than discarded: see :meth:`_grade_status_line`.
     """
     result = OutageResult(
         store=expectation.store,
         behaviour=expectation.behaviour,
         expected=expectation.behaviour,
+        readiness_status=readiness_status,
         recovered=recovered,
         recovery_seconds=recovery_seconds,
     )
@@ -201,12 +214,23 @@ def grade_outage(
     # from a healthy idle one.
     reported = readiness.get(expectation.readiness_key)
     result.readiness_reported = reported is False or reported == "down" or reported == "degraded"
-    if not result.readiness_reported:
+    if readiness_status is None:
+        # Distinct from "answered without the key", and the distinction is
+        # the operator's first question: a refusal with a reason and an
+        # unreachable socket look identical in a body-only reading.
+        result.findings.append(
+            f"{expectation.store} is down and the readiness surface answered nothing at all — "
+            "no status line and no body, so a service that is refusing with a reason cannot be "
+            "told apart from one that is gone"
+        )
+    elif not result.readiness_reported:
         result.findings.append(
             f"{expectation.store} is down and readiness does not say so "
             f"(`{expectation.readiness_key}` reads {reported!r}) — an operator cannot tell this "
             "apart from a healthy idle service"
         )
+
+    _grade_status_line(expectation, result, readiness_status)
 
     if expectation.behaviour == "block":
         if result.dependents_up:
@@ -220,11 +244,57 @@ def grade_outage(
                 f"{expectation.store} is down and {', '.join(result.dependents_down)} stopped serving; {expectation.why}"
             )
 
-    if not recovered:
+    if not recovery_observable:
+        # Separated from "did not recover" because they are different facts
+        # and only one of them is about the product. An endpoint that never
+        # mentions the key cannot be used to watch a reconnection, and the
+        # grader used to score exactly that silence as recovery in 0.0s --
+        # `probe.get(key)` returned None, `None not in (False, "down",
+        # "degraded")` was true, and three legs reported a recovery nobody
+        # had observed. An unknown must never be a pass.
+        result.findings.append(
+            f"{expectation.store} came back and readiness never reported `{expectation.readiness_key}` "
+            "at any point, so reconnection could not be observed — a recovery nobody can see is not "
+            "a recovery an operator can rely on"
+        )
+    elif not recovered:
         result.findings.append(
             f"{expectation.store} came back and the dependents did not reconnect — an outage plus a manual restart is worse than an outage"
         )
     return result
+
+
+def _grade_status_line(expectation: StoreExpectation, result: OutageResult, status: int | None) -> None:
+    """Require the status code the behaviour implies, rather than tolerating it.
+
+    The body said whether the store was named; the status line says whether
+    the service asked to be taken out of rotation, and the two are separate
+    claims. Grading only the body let a ``block`` store's owner answer ``200``
+    beside ``"database": false`` and still pass the readiness half — which is
+    the load balancer continuing to send work to a service that cannot do it.
+
+    * ``block``: readiness MUST fail. The orchestrator is the thing that acts
+      on this, and it reads the status code, not the JSON.
+    * ``degrade`` / ``refuse``: readiness MUST stay 2xx. Failing readiness
+      over a store whose loss the service is supposed to survive pulls a
+      working service out of the load balancer to fix a feature.
+    """
+    if status is None:
+        return  # already reported, above, as "answered nothing at all"
+    ok = 200 <= status < 300
+    if expectation.behaviour == "block":
+        if ok:
+            result.findings.append(
+                f"{expectation.store} is down and readiness still answered {status}; a blocking "
+                "outage must fail readiness, because the orchestrator acts on the status line and "
+                "never on the body"
+            )
+    elif not ok:
+        result.findings.append(
+            f"{expectation.store} is down and readiness answered {status}; losing "
+            f"{expectation.store} is a {expectation.behaviour}, so refusing readiness over it takes "
+            "a service that can still do its job out of the load balancer"
+        )
 
 
 def _resolve_container(service: str) -> str | None:
@@ -296,7 +366,27 @@ def _container_action(container: str, action: str) -> bool:
 _ALLOWED_PROBE_PREFIXES = ("http://127.0.0.1:", "http://localhost:", "https://127.0.0.1:")
 
 
-def _probe(url: str, timeout: float = 4.0) -> dict[str, Any] | None:
+def _probe(url: str, timeout: float = 4.0) -> tuple[int | None, dict[str, Any] | None]:
+    """Read a readiness answer: the status line *and* the body.
+
+    Both halves are graded, so both are returned. The status line is what an
+    orchestrator acts on; the body is what an operator reads. A grader that
+    keeps only one of them can score a service that answers ``200`` beside
+    ``{"database": false}`` as correct, which is the load balancer being told
+    to keep sending work to something that cannot do it.
+
+    The body is read *including* from an HTTP error response. A block-store
+    owner failing readiness with a 503 **and a JSON body naming why** is
+    exactly the correct behaviour — the API answers 503 with
+    ``{"database": false, ...}`` while Postgres is down. ``urlopen`` raises on
+    any 4xx/5xx, so without reading ``HTTPError``'s body the grader scored
+    that correct behaviour as silence ("``database`` reads None").
+
+    ``(None, None)`` means nothing answered: connection refused, a timeout, or
+    a reply that is not JSON. That is genuinely "nothing was said", and it is
+    reported as its own finding rather than folded into "did not mention the
+    key" — a refusal with a reason and a dead socket are different facts.
+    """
     if not url.startswith(_ALLOWED_PROBE_PREFIXES):
         raise ValueError(
             f"refusing to probe {url!r}: this harness only reads readiness endpoints on the "
@@ -304,9 +394,44 @@ def _probe(url: str, timeout: float = 4.0) -> dict[str, Any] | None:
         )
     try:
         with urllib.request.urlopen(url, timeout=timeout) as response:  # noqa: S310 - prefix-checked above
-            return dict(json.loads(response.read().decode("utf-8")))
+            return response.status, dict(json.loads(response.read().decode("utf-8")))
+    except urllib.error.HTTPError as err:
+        try:
+            return err.code, dict(json.loads(err.read().decode("utf-8")))
+        except (ValueError, OSError):
+            # A status line with an unreadable body is still an answer, and
+            # saying so is more useful than reporting silence.
+            return err.code, None
     except (urllib.error.URLError, TimeoutError, ValueError, OSError):
-        return None
+        return None, None
+
+
+#: What a readiness key reads when the store behind it is back. Every key this
+#: harness grades (`database`, `cache`, `kafka`, `graph`, `lake_writer`,
+#: `vector_store`) is a boolean; the string spellings are accepted so a service
+#: that reports a tri-state does not read as permanently broken. A key that is
+#: *absent* is deliberately not in this set -- see `recovery_observable`.
+_RECOVERED_VALUES: frozenset[Any] = frozenset({True, "up", "ok", "ready", "healthy"})
+
+
+def _responding(url: str, timeout: float = 4.0) -> bool:
+    """Is a dependent *serving its job*? Only a 2xx counts.
+
+    Deliberately stricter than :func:`_probe`: dependents are probed at their
+    readiness endpoints, where a 503 means "alive but cannot do my job" — for
+    a block store that is the required outcome, and counting it as responding
+    would grade the correct refusal as a finding.
+    """
+    if not url.startswith(_ALLOWED_PROBE_PREFIXES):
+        raise ValueError(
+            f"refusing to probe {url!r}: this harness only reads readiness endpoints on the "
+            f"local stack it is taking down, which must start with one of {_ALLOWED_PROBE_PREFIXES}"
+        )
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:  # noqa: S310 - prefix-checked above
+            return 200 <= response.status < 300
+    except (urllib.error.URLError, TimeoutError, ValueError, OSError):
+        return False
 
 
 def _self_test() -> int:
@@ -320,10 +445,11 @@ def _self_test() -> int:
 
     cases = [
         (
-            "degrade: readiness admits it and dependents keep serving",
+            "degrade: readiness admits it, stays 200, and dependents keep serving",
             grade_outage(
                 clickhouse,
                 readiness={"lake_writer": False},
+                readiness_status=200,
                 dependents_responding={"fusion": True, "api": True},
                 recovered=True,
             ),
@@ -334,6 +460,7 @@ def _self_test() -> int:
             grade_outage(
                 clickhouse,
                 readiness={"lake_writer": True},
+                readiness_status=200,
                 dependents_responding={"fusion": True, "api": True},
                 recovered=True,
             ),
@@ -344,27 +471,63 @@ def _self_test() -> int:
             grade_outage(
                 clickhouse,
                 readiness={"lake_writer": False},
+                readiness_status=200,
                 dependents_responding={"fusion": False, "api": True},
                 recovered=True,
             ),
             False,
         ),
         (
-            "block: dependents correctly drop out of the load balancer",
+            "degrade: readiness refused with 503 over a store the service survives",
+            grade_outage(
+                clickhouse,
+                readiness={"lake_writer": False},
+                readiness_status=503,
+                dependents_responding={"fusion": True, "api": True},
+                recovered=True,
+            ),
+            False,
+        ),
+        (
+            "block: readiness fails with 503 and dependents drop out of the load balancer",
             grade_outage(
                 kafka,
                 readiness={"kafka": False},
+                readiness_status=503,
                 dependents_responding={"ingest": False, "fusion": False},
                 recovered=True,
             ),
             True,
         ),
         (
+            "block: the key is named but readiness still answers 200 — the orchestrator reads the status line",
+            grade_outage(
+                kafka,
+                readiness={"kafka": False},
+                readiness_status=200,
+                dependents_responding={"ingest": False, "fusion": False},
+                recovered=True,
+            ),
+            False,
+        ),
+        (
             "block: ingest still ready without the spine it writes to",
             grade_outage(
                 kafka,
                 readiness={"kafka": False},
+                readiness_status=503,
                 dependents_responding={"ingest": True, "fusion": False},
+                recovered=True,
+            ),
+            False,
+        ),
+        (
+            "readiness answered nothing at all — not the same fact as answering without the key",
+            grade_outage(
+                kafka,
+                readiness={},
+                readiness_status=None,
+                dependents_responding={"ingest": False, "fusion": False},
                 recovered=True,
             ),
             False,
@@ -374,8 +537,21 @@ def _self_test() -> int:
             grade_outage(
                 clickhouse,
                 readiness={"lake_writer": False},
+                readiness_status=200,
                 dependents_responding={"fusion": True, "api": True},
                 recovered=False,
+            ),
+            False,
+        ),
+        (
+            "recovery: the key was never reported, so reconnection was unobservable — an unknown is not a pass",
+            grade_outage(
+                clickhouse,
+                readiness={"lake_writer": False},
+                readiness_status=200,
+                dependents_responding={"fusion": True, "api": True},
+                recovered=False,
+                recovery_observable=False,
             ),
             False,
         ),
@@ -390,6 +566,72 @@ def _self_test() -> int:
             for finding in result.findings:
                 print(f"      {finding}")
 
+    # Failing is not enough: a case that fails for the wrong reason proves
+    # nothing about the discrimination it was written to make. These pin the
+    # finding each new branch is supposed to produce.
+    named = [
+        (
+            "a block store answering 200 is reported as a status-line defect, not a body one",
+            "still answered 200",
+            grade_outage(
+                kafka,
+                readiness={"kafka": False},
+                readiness_status=200,
+                dependents_responding={"ingest": False, "fusion": False},
+                recovered=True,
+            ),
+        ),
+        (
+            "a degrade store refusing readiness is reported as taking a working service out of rotation",
+            "out of the load balancer",
+            grade_outage(
+                clickhouse,
+                readiness={"lake_writer": False},
+                readiness_status=503,
+                dependents_responding={"fusion": True, "api": True},
+                recovered=True,
+            ),
+        ),
+        (
+            "an unobservable recovery is reported as unobservable, not as a failure to reconnect",
+            "could not be observed",
+            grade_outage(
+                clickhouse,
+                readiness={"lake_writer": False},
+                readiness_status=200,
+                dependents_responding={"fusion": True, "api": True},
+                recovered=False,
+                recovery_observable=False,
+            ),
+        ),
+        (
+            "a silent readiness surface is reported as answering nothing, not as omitting a key",
+            "answered nothing at all",
+            grade_outage(
+                kafka,
+                readiness={},
+                readiness_status=None,
+                dependents_responding={"ingest": False, "fusion": False},
+                recovered=True,
+            ),
+        ),
+    ]
+    for name, fragment, result in named:
+        ok = any(fragment in finding for finding in result.findings)
+        print(f"  self-test [{'ok' if ok else 'FAIL'}] {name}")
+        if not ok:
+            failures += 1
+            for finding in result.findings:
+                print(f"      {finding}")
+
+    # The unobservable case must NOT also claim the dependents failed to
+    # reconnect: two findings for one fact is how a report stops being read.
+    unobservable = named[2][2]
+    exclusive = not any("did not reconnect" in finding for finding in unobservable.findings)
+    print(f"  self-test [{'ok' if exclusive else 'FAIL'}] an unobservable recovery is reported once, not twice")
+    if not exclusive:
+        failures += 1
+
     # Every store must declare a behaviour the grader implements, or it
     # silently grades nothing.
     for store in STORES:
@@ -397,8 +639,73 @@ def _self_test() -> int:
             print(f"  self-test [FAIL] {store.store} declares unknown behaviour {store.behaviour!r}")
             failures += 1
 
+    failures += _probe_self_test()
+
     print(f"store_outage: self-test {'OK' if not failures else 'FAILED'} — {len(STORES)} stores declared")
     return 1 if failures else 0
+
+
+def _probe_self_test() -> int:
+    """The probe split, against a real local HTTP server (stdlib, no containers).
+
+    The behaviours under test are the ones the live run depends on:
+
+    * ``_probe`` reads the JSON body of a **503** — a block store failing
+      readiness with a reason is correct behaviour, not silence.
+    * ``_probe`` returns the **status line** alongside it, because the
+      behaviour contract is graded on both halves.
+    * ``_responding`` refuses that same 503 — a dependent that is alive but
+      cannot do its job is not serving.
+    """
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802 - stdlib handler contract
+            if self.path == "/ready-200":
+                body = json.dumps({"status": "ready", "database": True}).encode()
+                self.send_response(200)
+            elif self.path == "/ready-503":
+                body = json.dumps({"status": "not_ready", "database": False}).encode()
+                self.send_response(503)
+            else:
+                body = b"not json"
+                self.send_response(503)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args: Any) -> None:  # keep the self-test quiet
+            return None
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    failures = 0
+    try:
+        cases = [
+            ("_probe reads a 200 body", _probe(f"{base}/ready-200") == (200, {"status": "ready", "database": True})),
+            (
+                "_probe reads the JSON body of a 503 (a refusal with a reason is not silence)",
+                _probe(f"{base}/ready-503") == (503, {"status": "not_ready", "database": False}),
+            ),
+            (
+                "_probe keeps the status line of a non-JSON error body (an answer with an unreadable body is still an answer)",
+                _probe(f"{base}/ready-junk") == (503, None),
+            ),
+            ("_probe reports a dead socket as no answer at all", _probe("http://127.0.0.1:1/ready") == (None, None)),
+            ("_responding accepts a 200", _responding(f"{base}/ready-200") is True),
+            ("_responding refuses a 503 (alive but not doing its job is not serving)", _responding(f"{base}/ready-503") is False),
+            ("_responding refuses a dead socket", _responding("http://127.0.0.1:1/ready") is False),
+        ]
+        for name, ok in cases:
+            print(f"  self-test [{'ok' if ok else 'FAIL'}] {name}")
+            if not ok:
+                failures += 1
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+    return failures
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -416,34 +723,51 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--store and --readiness-url are required unless --self-test")
 
     expectation = next(s for s in STORES if s.store == args.store)
+    if _resolve_container(expectation.container) is None:
+        print(
+            f"store_outage: container {expectation.container!r} is not running in this stack — "
+            "the store is probably behind a compose profile this job did not start "
+            "(clickhouse and neo4j live behind `--profile full`). Grading nothing is not a pass."
+        )
+        return 2
     if not _container_action(expectation.container, "stop"):
         print(f"store_outage: could not stop container {expectation.container!r} — docker unavailable?")
         return 2
 
     try:
         time.sleep(args.settle_seconds)
-        readiness = _probe(args.readiness_url) or {}
+        readiness_status, readiness_body = _probe(args.readiness_url)
+        readiness = readiness_body or {}
         responding: dict[str, bool] = {}
         for pair in args.dependent_url:
             name, _, url = pair.partition("=")
-            responding[name] = _probe(url) is not None
+            responding[name] = _responding(url)
     finally:
         _container_action(expectation.container, "start")
 
     started = time.monotonic()
     recovered = False
+    # Whether the readiness surface ever named the key at all during the
+    # recovery poll. An endpoint that never mentions it cannot be used to
+    # watch a reconnection, and scoring that silence as recovery is the
+    # defect this flag exists to make visible rather than to hide.
+    recovery_observable = expectation.readiness_key in readiness
     while time.monotonic() - started < 120:
-        probe = _probe(args.readiness_url)
-        if probe and probe.get(expectation.readiness_key) not in (False, "down", "degraded"):
-            recovered = True
-            break
+        _status, probe = _probe(args.readiness_url)
+        if probe is not None and expectation.readiness_key in probe:
+            recovery_observable = True
+            if probe[expectation.readiness_key] in _RECOVERED_VALUES:
+                recovered = True
+                break
         time.sleep(3)
 
     result = grade_outage(
         expectation,
         readiness=readiness,
+        readiness_status=readiness_status,
         dependents_responding=responding,
         recovered=recovered,
+        recovery_observable=recovery_observable,
         recovery_seconds=round(time.monotonic() - started, 1) if recovered else None,
     )
     print(json.dumps(result.as_dict(), indent=2))

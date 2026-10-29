@@ -44,6 +44,9 @@ class FakeScalarResult:
     def mappings(self) -> list[dict[str, Any]]:
         return self._value if isinstance(self._value, list) else []
 
+    def all(self) -> list[tuple[Any, ...]]:
+        return self._value if isinstance(self._value, list) else []
+
 
 class FakeSession:
     """Records every statement so tenant scoping can be asserted, not assumed."""
@@ -53,9 +56,16 @@ class FakeSession:
         policies: list[dict[str, Any]],
         alert_counts: dict[str, int],
         bound_tenant: str | None = None,
+        holds: dict[str, list[tuple[Any, ...]]] | None = None,
     ) -> None:
         self._policies = policies
         self._alert_counts = alert_counts
+        #: Live legal holds per tenant. The worker reads these before every
+        #: purge (depth plan 4.3), and a double that cannot answer the query
+        #: makes the worker fail closed — correct behaviour, and it would
+        #: present here as "the purge stopped working" rather than as a
+        #: missing fake.
+        self._holds = holds or {}
         #: What ``current_setting('app.current_tenant_id', true)`` answers.
         #: ``None`` is the cross-tenant case the worker requires.
         self._bound_tenant = bound_tenant
@@ -72,10 +82,21 @@ class FakeSession:
     async def execute(self, stmt: Any, params: dict[str, Any] | None = None) -> Any:
         sql = str(stmt)
         self.statements.append((sql, dict(params or {})))
+        if "FROM legal_holds" in sql:
+            bound = dict(getattr(stmt, "_bindparams", {}) or {})
+            tenant = str(bound["t"].value) if "t" in bound else str((params or {}).get("t", ""))
+            return FakeScalarResult(self._holds.get(tenant, []))
         if "FROM retention_policies" in sql:
             return FakeScalarResult(self._policies)
         if sql.strip().upper().startswith("SELECT COUNT(*) FROM ALERTS"):
             return FakeScalarResult(self._alert_counts.get(str((params or {}).get("tenant_id")), 0))
+        if "FROM audit_log" in sql:
+            # Depth 8.1 gave the worker an audit leg (`_purge_audit` counts and
+            # then calls `audit_retention_truncate`). Zero rows past the window
+            # keeps the leg quiet here — these cases pin the lake and alert
+            # stores' behaviour, and a double that cannot answer this query
+            # reads as an audit-store failure in every pinned error list.
+            return FakeScalarResult(0)
         return FakeScalarResult(None)
 
     async def commit(self) -> None:

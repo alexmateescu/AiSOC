@@ -5,12 +5,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
+	"github.com/beenuar/aisoc/services/ingest/internal/activity"
 	"github.com/beenuar/aisoc/services/ingest/internal/attck"
 	"github.com/beenuar/aisoc/services/ingest/internal/config"
 	"github.com/beenuar/aisoc/services/ingest/internal/enrichment"
+	"github.com/beenuar/aisoc/services/ingest/internal/eventcatalog"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 )
@@ -77,6 +80,8 @@ type Normalizer struct {
 	version    string
 	shodan     *enrichment.ShodanEnricher
 	vulnCorrel *enrichment.VulnCorrelator
+	catalog    *eventcatalog.Catalog
+	ipEnricher *activity.IPEnricher
 
 	// VulnMatches is a channel where VULNERABILITY_MATCH events are published.
 	// Nil if vuln correlation is disabled.
@@ -108,9 +113,17 @@ var connectorProfiles = map[string]connectorProfile{
 			"Critical": 5, "High": 4, "Medium": 3, "Low": 2, "Informational": 1,
 		},
 	},
+	// 2001 and not 2002: the profile declared uid 2002 beside the caption
+	// "Security Finding", and 2002 is Vulnerability Finding in every OCSF
+	// version this service targets. A Sentinel incident is a detection, not
+	// a vulnerability. Nothing downstream read the uid closely enough to
+	// notice — both are category 2, so promotion was unaffected — but the
+	// class_uid and class_name on every Sentinel event in the lake
+	// contradicted each other, and a lake query filtering on 2002 would have
+	// returned Sentinel incidents alongside Qualys and Tenable findings.
 	"microsoft_sentinel": {
 		product:   OcsfProduct{Name: "Sentinel", VendorName: "Microsoft"},
-		classUID:  2002,
+		classUID:  2001,
 		className: "Security Finding",
 		fieldMap: map[string]string{
 			"TimeGenerated":     "time",
@@ -198,9 +211,15 @@ var connectorProfiles = map[string]connectorProfile{
 		classUID:  2001,
 		className: "Security Finding",
 		fieldMap: map[string]string{
-			"UpdatedAt":      "time",
-			"Title":          "message",
-			"Description":    "raw_data",
+			"UpdatedAt": "time",
+			"Title":     "message",
+			// Not `raw_data`: Normalize overwrites that slot unconditionally
+			// with the serialized payload a few dozen lines after the field
+			// map runs, so the Description was mapped and then discarded
+			// every time (issue #1244). `finding.desc` is where every other
+			// profile puts a vendor description and is what the fusion
+			// promoter reads.
+			"Description":    "finding.desc",
 			"Severity.Label": "severity",
 		},
 		severityMap: map[string]int{
@@ -407,9 +426,33 @@ func New(cfg *config.Config) (*Normalizer, error) {
 		log.Warn().Err(err).Msg("ATT&CK corpus unavailable; technique enrichment disabled")
 	}
 
+	// The event catalogue, at boot. A parse failure is fatal rather than
+	// logged: a half-loaded catalogue answers "never seen" for every type
+	// in the file that failed, which is indistinguishable from a source
+	// nobody has classified, and the warning that said so would have
+	// scrolled past weeks earlier.
+	catalog, err := eventcatalog.Load()
+	if err != nil {
+		return nil, fmt.Errorf("event catalogue: %w", err)
+	}
+	log.Info().
+		Int("sources", len(catalog.Sources())).
+		Int("event_types", catalog.Size()).
+		Msg("event classification catalogue loaded")
+
 	n := &Normalizer{
 		cfg:     cfg,
 		version: "1.1.0",
+		catalog: catalog,
+		ipEnricher: activity.NewIPEnricher(
+			cfg.EnrichmentServiceURL,
+			cfg.ServiceToken,
+			time.Duration(cfg.EnrichmentCacheTTLSecs)*time.Second,
+			time.Duration(cfg.EnrichmentTimeoutSeconds)*time.Second,
+		),
+	}
+	if n.ipEnricher != nil {
+		log.Info().Str("url", cfg.EnrichmentServiceURL).Msg("IP geography/ASN/reputation enrichment enabled for the activity projection")
 	}
 
 	// Set up Shodan enrichment if configured
@@ -500,6 +543,15 @@ var _canonicalAliases = []struct {
 	// to the vendor profiles without giving them a second mechanism.
 	{"message", []string{"title"}},
 	{"finding.uid", []string{"external_id"}},
+	// Issue #1244. Nothing mapped a top-level `description` onto any OCSF
+	// slot outside the handful of profiles that name it, so a pushed event
+	// carrying both a title and a description arrived with only the title —
+	// and the fusion promoter, finding no description anywhere, fell back to
+	// `message`, which is the title. The alert then showed one sentence
+	// twice. `finding.desc` is the destination the profiles that *do* map it
+	// already use (aisoc_sample, ai_guardrail, email_inbox, cloudtrail), and
+	// it is the first slot promoter._description reads after the payload.
+	{"finding.desc", []string{"description"}},
 }
 
 // connectorTypeAliases maps a connector identifier the connectors service
@@ -541,7 +593,7 @@ var connectorTypeAliases = map[string]string{
 // them safe: the connector's own connector_name is the long form (`qradar` is
 // "IBM QRadar", `chronicle` is "Google Chronicle", `syslog_cef` is
 // "Syslog / CEF"). Resolution happens once, at the top of Normalize, so the
-// profile lookup, the alias map, canonicalClassByConnector and the product
+// profile lookup, the alias map, connectorOCSFClass and the product
 // identity on the canonical path all agree on one name.
 //
 // `palo_alto_cortex` was the one entry that named a vendor rather than a
@@ -576,20 +628,6 @@ func canonicalConnectorType(connectorType string) string {
 		return canonical
 	}
 	return connectorType
-}
-
-// canonicalClassByConnector overrides the default Security Finding class for
-// connector types whose canonical alerts are better modeled as another OCSF
-// class (identity providers -> Authentication 3002).
-var canonicalClassByConnector = map[string]struct {
-	classUID  int
-	className string
-}{
-	"okta":         {3002, "Authentication"},
-	"azure_entra":  {3002, "Authentication"},
-	"auth0":        {3002, "Authentication"},
-	"duo_security": {3002, "Authentication"},
-	"onepassword":  {3002, "Authentication"},
 }
 
 func isCanonicalEnvelope(p map[string]interface{}) bool {
@@ -676,10 +714,20 @@ func unpromotableWarning(classUID int, severityID interface{}) string {
 	)
 }
 
+// canonicalProfile builds the profile for a connector-normalized envelope.
+//
+// The class comes from `connectorOCSFClass` in ocsf_classes.go, which carries
+// a decision for every connector the registry declares — either the OCSF
+// class its telemetry is, or a recorded reason it stays on the Security
+// Finding default. That default is category 2, which fusion promotes
+// unconditionally, so a source left on it silently turns every routine record
+// it emits into an alert. The table replaced a five-entry override map; see
+// the file header for the promotion mechanism and
+// `scripts/check_ocsf_class_coverage.py` for the gate that keeps it complete.
 func canonicalProfile(connectorType string) connectorProfile {
-	classUID, className := 2001, "Security Finding"
-	if override, ok := canonicalClassByConnector[connectorType]; ok {
-		classUID, className = override.classUID, override.className
+	classUID, className := classSecurityFinding, "Security Finding"
+	if class, ok := ocsfClassForConnector(connectorType); ok {
+		classUID, className = class.uid, class.caption
 	}
 	name := connectorType
 	if name == "" {
@@ -816,6 +864,29 @@ func (n *Normalizer) Normalize(raw *RawEvent) (*NormalizedEvent, error) {
 		warnings = append(warnings, w)
 	}
 
+	// The event classification, from the catalogue read at boot.
+	if classification, warning := n.classify(connectorType, raw.Payload); classification != nil {
+		ocsf["event_classification"] = classification
+	} else if warning != "" {
+		warnings = append(warnings, warning)
+	}
+
+	// The activity projection: who acted, what kind of actor they were, what
+	// they did, to which resource, from where, with what outcome.
+	//
+	// Built after the field map and the identity aliases have run, because
+	// it reads the reconciled OCSF identity alongside the vendor's own
+	// record — the vendor record is the only place the identity-type fields
+	// live, and the OCSF event is the only place the cross-vendor aliasing
+	// has already happened.
+	act := activity.Project(connectorType, raw.Payload, ocsf)
+	if n.ipEnricher != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		n.ipEnricher.Enrich(ctx, &act.Location)
+		cancel()
+	}
+	ocsf["activity"] = act
+
 	// Set metadata
 	ocsf["metadata"] = map[string]interface{}{
 		"version":       n.version,
@@ -837,24 +908,40 @@ func (n *Normalizer) Normalize(raw *RawEvent) (*NormalizedEvent, error) {
 		ocsf["raw_data"] = string(rawBytes)
 	}
 
-	// ATT&CK technique enrichment
-	if attck.Loaded() {
-		if techIDs := extractTechniqueIDs(raw.Payload); len(techIDs) > 0 {
-			var enriched []map[string]interface{}
-			for _, tid := range techIDs {
-				if tech := attck.Lookup(tid); tech != nil {
-					enriched = append(enriched, map[string]interface{}{
-						"technique_id":   tech.ID,
-						"technique_name": tech.Name,
-						"tactic_ids":     tech.TacticIDs,
-						"tactic_names":   tech.TacticNames,
-						"url":            tech.URL,
-					})
-				}
+	// ATT&CK technique enrichment.
+	//
+	// The whole block used to sit behind `attck.Loaded()` and each id behind
+	// `attck.Lookup(tid) != nil`, so a deployment that cannot reach
+	// raw.githubusercontent.com — air-gapped, egress-filtered, or simply
+	// offline at boot — published `mitre_techniques: []` on every event
+	// forever, whatever the vendor sent (issue #1244).
+	//
+	// A well-formed id is now carried either way. What the corpus adds is the
+	// technique name, its tactics and its URL; what the vendor asserted is
+	// the id, and dropping the vendor's assertion because we could not look
+	// it up loses information we were handed. `verified` says which is which
+	// so a reader is never told an unconfirmed id was confirmed.
+	if techIDs := extractTechniqueIDs(raw.Payload); len(techIDs) > 0 {
+		var enriched []map[string]interface{}
+		for _, tid := range techIDs {
+			if tech := attck.Lookup(tid); tech != nil {
+				enriched = append(enriched, map[string]interface{}{
+					"technique_id":   tech.ID,
+					"technique_name": tech.Name,
+					"tactic_ids":     tech.TacticIDs,
+					"tactic_names":   tech.TacticNames,
+					"url":            tech.URL,
+					"verified":       true,
+				})
+				continue
 			}
-			if len(enriched) > 0 {
-				ocsf["mitre_attck"] = enriched
-			}
+			enriched = append(enriched, map[string]interface{}{
+				"technique_id": tid,
+				"verified":     false,
+			})
+		}
+		if len(enriched) > 0 {
+			ocsf["mitre_attck"] = enriched
 		}
 	}
 
@@ -904,9 +991,17 @@ func extractTechniqueIDs(payload map[string]interface{}) []string {
 	seen := map[string]struct{}{}
 	var results []string
 
+	// `techniques` and `technique` are the bare forms a pushed payload uses
+	// (issue #1244: a CrowdStrike-shaped event sending
+	// `techniques: ["T1003.001"]` produced `mitre_techniques: []`). The list
+	// was all prefixed or suffixed spellings and had no entry for the plain
+	// noun, singular or plural.
+	//
+	// `tactic_id` is kept for the payload that files a technique under it,
+	// but a genuine tactic id no longer survives normalizeTechniqueID.
 	candidateKeys := []string{
 		"technique_id", "mitre_technique", "attck_technique", "tactic_id",
-		"mitre_techniques", "attack_technique",
+		"mitre_techniques", "attack_technique", "techniques", "technique",
 	}
 	for _, key := range candidateKeys {
 		val, ok := payload[key]
@@ -937,15 +1032,22 @@ func extractTechniqueIDs(payload map[string]interface{}) []string {
 	return results
 }
 
+// techniqueIDRe is the exact ATT&CK technique shape: T followed by four
+// digits, optionally a three-digit sub-technique.
+//
+// The check used to be a length range ("leading T, 5–7 characters before the
+// dot"), which also accepted `TA0006` — a *tactic* id — and `T10591`. That
+// was harmless only because every id then had to survive attck.Lookup, which
+// has no entry for either, so the loose ones were filtered downstream. Since
+// issue #1244 a well-formed id is carried even when the corpus cannot confirm
+// it, so the shape check is now the only filter and has to be exact.
+var techniqueIDRe = regexp.MustCompile(`^T\d{4}(?:\.\d{3})?$`)
+
 // normalizeTechniqueID extracts a clean ATT&CK technique ID from a string.
 func normalizeTechniqueID(s string) string {
 	s = strings.TrimSpace(strings.ToUpper(s))
-	// Accept T1234 or T1234.001
-	if len(s) >= 5 && s[0] == 'T' {
-		parts := strings.SplitN(s, ".", 2)
-		if len(parts[0]) >= 5 && len(parts[0]) <= 7 {
-			return s
-		}
+	if techniqueIDRe.MatchString(s) {
+		return s
 	}
 	return ""
 }

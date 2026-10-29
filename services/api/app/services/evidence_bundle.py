@@ -87,6 +87,7 @@ __all__ = [
     "build_bundle",
     "canonical_bytes",
     "serialize_bundle",
+    "sign_envelope",
     "verify_bundle",
 ]
 
@@ -132,6 +133,43 @@ def _digest(payload: dict[str, Any]) -> str:
 
 def _sign(payload: dict[str, Any], key: str) -> str:
     return hmac.new(key.encode("utf-8"), canonical_bytes(payload), hashlib.sha256).hexdigest()
+
+
+def sign_envelope(payload: dict[str, Any], *, signing_key: str) -> dict[str, Any]:
+    """The integrity block for any signed payload this tree exports.
+
+    Public, and the only producer of one, so a second bundle format cannot
+    arrive with a signature computed over a different serialisation than
+    :func:`verify_bundle` recomputes. The replay evidence bundle carries a
+    different payload shape and the same envelope for exactly that reason.
+
+    Refuses an empty key rather than signing with one. An HMAC over the
+    empty string is a valid signature that anybody can forge, and a bundle
+    carrying one looks signed to every reader who does not check.
+    """
+    if not signing_key:
+        raise ValueError(
+            "refusing to sign with an empty key: the result would verify for anyone, which is worse "
+            "than an unsigned bundle because it reads as tamper-evident"
+        )
+    digest = _digest(payload)
+    return {
+        "algorithm": SIGNATURE_ALGORITHM,
+        "algorithm_note": (
+            "Tamper-evidence, not non-repudiation. Anyone holding the deployment's signing "
+            "key can produce a valid signature, so this proves the bundle was not altered "
+            "after export — not that AiSOC and only AiSOC produced it."
+        ),
+        "payload_sha256": digest,
+        "signature": _sign(payload, signing_key),
+        # The OCSF record-integrity view of the same two values.
+        "attestation_list": [
+            {
+                "fingerprint": {"algorithm": "SHA-256", "algorithm_id": 3, "value": digest},
+                "signatures": [{"algorithm": SIGNATURE_ALGORITHM, "algorithm_id": 99}],
+            }
+        ],
+    }
 
 
 def _hash_prompt(text: str | None) -> str | None:
@@ -305,28 +343,11 @@ def build_bundle(
     }
     payload["ocsf"] = _ocsf_block(run, agent_names)
 
-    digest = _digest(payload)
     return {
         "payload": payload,
         # The envelope is deliberately outside the signed payload: a
         # signature cannot cover itself.
-        "integrity": {
-            "algorithm": SIGNATURE_ALGORITHM,
-            "algorithm_note": (
-                "Tamper-evidence, not non-repudiation. Anyone holding the deployment's signing "
-                "key can produce a valid signature, so this proves the bundle was not altered "
-                "after export — not that AiSOC and only AiSOC produced it."
-            ),
-            "payload_sha256": digest,
-            "signature": _sign(payload, signing_key),
-            # The OCSF record-integrity view of the same two values.
-            "attestation_list": [
-                {
-                    "fingerprint": {"algorithm": "SHA-256", "algorithm_id": 3, "value": digest},
-                    "signatures": [{"algorithm": SIGNATURE_ALGORITHM, "algorithm_id": 99}],
-                }
-            ],
-        },
+        "integrity": sign_envelope(payload, signing_key=signing_key),
     }
 
 

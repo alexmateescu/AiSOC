@@ -53,6 +53,14 @@ so the case is not counted as terminal and active at once. Only `closed` can
 be reopened; `resolved` still has a forward edge, so the route answers `409`
 and tells you to use `PATCH`.
 
+Reading is permissioned too: every cases `GET` route requires `cases:read`
+(v20.0.0), so an API key scoped to `alerts:read` alone cannot list cases or
+read their comments, timeline and evidence chain. Case comments carry an
+`is_system` flag in responses, but it is server-assigned only — the create
+request stopped accepting it in v20.0.0, because a caller-supplied value let
+any `cases:write` holder author a comment the console renders as an
+unattributed "System note".
+
 `reopen_count` exists because `reopened_at` is overwritten each time: a case
 reopened four times is a different conversation from one reopened once, and a
 single timestamp cannot tell them apart.

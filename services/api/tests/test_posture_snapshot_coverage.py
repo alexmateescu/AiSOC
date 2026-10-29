@@ -1,45 +1,47 @@
 """Which providers can resolve permissions *live* must be stated, not implied.
 
-All five resolvers (AWS, Azure, GCP, Okta, Google Workspace) are implemented
-and report ``coverage: "full"``. That describes the resolver, which is a pure
-function over a provider snapshot — and says nothing about whether a snapshot
-can be obtained.
+A resolver reporting ``coverage: "full"`` describes a pure function over a
+provider snapshot and says nothing about whether a snapshot can be obtained.
+For most of this subsystem's life no connector could produce one for any
+cloud provider, so every live call answered 412 while the endpoint advertised
+full coverage — and nothing in the tree recorded the difference.
 
-Only Okta's is assembled from a live connector. The other four expect a
-connector to answer the ``__posture_snapshot__`` sentinel from
-``get_resource_config``, and **no connector implements it**, so with
-``AISOC_EFFECTIVE_PERMISSIONS_LIVE=1`` they return 412 rather than a
-fabricated snapshot.
+Depth-plan 2.5 closed that: all six providers now have a connector that
+answers the ``__posture_snapshot__`` sentinel. These tests hold the closed
+state closed. The *behavioural* proof that each connector really collects
+lives in ``services/connectors/tests/test_posture_collectors.py``, which
+drives ``get_resource_config`` through a stubbed transport; this file can
+only assert the declarations, because ``services/api`` and
+``services/connectors`` both name their top-level package ``app`` and
+importing one in a process shadows the other.
 
-That is an honest state, but nothing recorded it, so "coverage: full" was the
-only number a reader saw. These tests pin the real shape of the gap: if a
-connector implements the sentinel, the allow-list below must shrink, and if a
-resolver is registered without one, that fails too. The gap is allowed to
-exist; it is not allowed to be invisible.
+A note on the detector that used to live here, because the lesson outlasted
+it. The previous version read each connector's source and asserted the
+sentinel string was absent, as a reverse check that the documented gap was
+still real. After all five connectors were wired it still passed on four of
+them: a connector that imports the shared ``POSTURE_SNAPSHOT_ID`` constant
+does not contain the literal ``__posture_snapshot__``, so the grep could only
+ever recognise the hardcoded spelling — the one nobody should write. A
+source-reading test cannot notice whether the code runs, and this one could
+not even notice whether it existed.
 """
 
 from __future__ import annotations
 
 import inspect
-from pathlib import Path
 
-import pytest
 from app.services.effective_permissions.posture_loader import (
     POSTURE_SNAPSHOT_ID,
     PROVIDER_CONNECTOR,
 )
 from app.services.effective_permissions.service import SUPPORTED_PROVIDERS
 
-#: Providers whose snapshot cannot yet be collected live, with the reason.
-#: Shrink this as connectors implement the sentinel; never grow it silently.
-NO_LIVE_SNAPSHOT = {
-    "aws": "aws_security_hub does not answer __posture_snapshot__",
-    "azure": "azure_entra implements no get_resource_config at all",
-    "gcp": "gcp_scc treats the id as an SCC finding name, not a posture request",
-    "gws": "google_workspace implements no get_resource_config at all",
-}
-
-CONNECTORS_DIR = Path(__file__).resolve().parents[2] / "connectors" / "app" / "connectors"
+#: Providers whose snapshot cannot be collected live, with the reason.
+#: Empty since 2.5. A provider may be added back when a real gap appears,
+#: but never silently: `test_every_registered_resolver_can_collect_a_snapshot`
+#: fails on a resolver that has no declared source at all, and this list is
+#: the only way to record a source that exists and does not work.
+NO_LIVE_SNAPSHOT: dict[str, str] = {}
 
 
 def test_every_registered_resolver_has_a_snapshot_source_declared() -> None:
@@ -49,31 +51,41 @@ def test_every_registered_resolver_has_a_snapshot_source_declared() -> None:
     assert not missing, f"{sorted(missing)} have a resolver but no declared snapshot source"
 
 
-def test_the_live_gap_is_exactly_the_four_cloud_providers() -> None:
-    """Okta is the only provider assembled end-to-end today."""
-    live = set(PROVIDER_CONNECTOR) - set(NO_LIVE_SNAPSHOT)
-    assert live == {"okta"}, f"the set of live-capable providers changed to {sorted(live)} — update NO_LIVE_SNAPSHOT and the docs"
+def test_every_registered_resolver_can_collect_a_snapshot() -> None:
+    """The inverse of the gap list, which is the direction that rots.
 
-
-@pytest.mark.skipif(not CONNECTORS_DIR.is_dir(), reason="services/connectors is not in this checkout")
-@pytest.mark.parametrize("provider", sorted(NO_LIVE_SNAPSHOT))
-def test_a_provider_on_the_gap_list_really_cannot_collect_a_snapshot(provider: str) -> None:
-    """The reverse direction, which is the one that rots.
-
-    A one-directional gate would only check that listed providers stay
-    listed. This asserts the listing is still *true*: if the connector starts
-    handling the sentinel, the allow-list is stale and must shrink — otherwise
-    a capability that now works keeps being reported as missing.
+    Before 2.5 this read "only okta". Keeping the assertion pointed at the
+    *whole* provider set means adding a seventh resolver without a collector
+    fails here rather than shipping as another silent 412.
     """
-    connector_id = PROVIDER_CONNECTOR[provider]
-    source_file = CONNECTORS_DIR / f"{connector_id}.py"
-    if not source_file.is_file():
-        pytest.fail(f"{provider} maps to connector '{connector_id}', which has no module at {source_file}")
+    uncollectable = set(SUPPORTED_PROVIDERS) & set(NO_LIVE_SNAPSHOT)
+    assert not uncollectable, f"{sorted(uncollectable)} cannot collect a live snapshot: " + "; ".join(
+        f"{p}: {NO_LIVE_SNAPSHOT[p]}" for p in sorted(uncollectable)
+    )
 
-    source = source_file.read_text(encoding="utf-8")
-    assert POSTURE_SNAPSHOT_ID not in source, (
-        f"{connector_id} now references {POSTURE_SNAPSHOT_ID}, so '{provider}' may be able to "
-        f"collect a live snapshot. Remove it from NO_LIVE_SNAPSHOT and update the endpoint docstring."
+
+def test_the_sentinel_is_spelled_the_same_on_both_sides() -> None:
+    """The API loader and the connectors package each declare the constant.
+
+    They cannot import from one another — two different services, both with
+    a top-level package called ``app`` — so the one thing that stops them
+    drifting to two spellings is this assertion. A mismatch would make every
+    cloud provider 412 again, with each side's unit tests still green.
+    """
+    connectors_init = (
+        __import__("pathlib").Path(__file__).resolve().parents[2] / "connectors" / "app" / "connectors" / "posture" / "__init__.py"
+    )
+    if not connectors_init.is_file():
+        # services/connectors is not in every checkout of this service.
+        return
+
+    source = connectors_init.read_text(encoding="utf-8")
+    declared = next(
+        line.split("=", 1)[1].strip().strip('"').strip("'") for line in source.splitlines() if line.startswith("POSTURE_SNAPSHOT_ID")
+    )
+    assert declared == POSTURE_SNAPSHOT_ID, (
+        f"the connectors package declares {declared!r} and the API loader declares "
+        f"{POSTURE_SNAPSHOT_ID!r}; every cloud provider would 412 with both sides green"
     )
 
 

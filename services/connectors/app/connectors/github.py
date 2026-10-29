@@ -28,6 +28,8 @@ import httpx
 import structlog
 
 from app.connectors.base import BaseConnector, Capability, ConnectorSchema, Field, OAuthHints
+from app.connectors.posture import POSTURE_SNAPSHOT_ID
+from app.connectors.posture import github as github_posture
 
 logger = structlog.get_logger()
 
@@ -249,11 +251,17 @@ class GitHubConnector(BaseConnector):
         "org.update_member",  # role changes (member → owner is the canary)
         "org.transfer",
         # access tokens / SSH / SSO
-        "personal_access_token.create",
+        #
+        # Two strings this list used to carry name actions GitHub never
+        # emits (issue #1545): `deploy_key.create` — deploy keys do not have
+        # their own audit category, an add is logged as `public_key.create`
+        # (below) — and `personal_access_token.create` — the documented
+        # lifecycle is for fine-grained tokens, where the risk moment is
+        # `access_granted` (below). A severity list naming actions the
+        # vendor never emits is a claim nothing can test.
         "personal_access_token.access_granted",
         "oauth_authorization.create",
         "public_key.create",
-        "deploy_key.create",
         "two_factor_authentication.disabled",
         # branch protection bypass / deletion
         "protected_branch.destroy",
@@ -371,9 +379,13 @@ class GitHubConnector(BaseConnector):
     #
     # We bundle all three into a single dict so the graph writer's
     # :Configuration node carries everything the operator needs in one
-    # MERGE. ``ts`` is informational — GitHub's REST API doesn't expose
+    # MERGE. ``at_ts`` is informational — GitHub's REST API doesn't expose
     # a point-in-time view, so we tag the response ``snapshot_freshness="live"``.
-    async def get_resource_config(self, resource_id: str, ts: str) -> dict[str, Any]:
+    async def get_resource_config(self, resource_id: str, at_ts: str | None = None) -> dict[str, Any]:
+        if resource_id == POSTURE_SNAPSHOT_ID:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                collected = await github_posture.collect(client, self._headers(), self._org)
+            return collected.to_resource_config()
         if not resource_id or "/" not in resource_id:
             return {"error": "resource_id must be 'owner/repo'"}
         owner_repo = resource_id
@@ -428,5 +440,5 @@ class GitHubConnector(BaseConnector):
             "branch_protection": protection,
             "actions_permissions": actions_perms,
             "snapshot_freshness": "live",
-            "snapshot_taken_at": ts,
+            "snapshot_taken_at": at_ts,
         }

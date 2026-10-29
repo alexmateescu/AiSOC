@@ -38,9 +38,50 @@ async def health():
 
 @router.get("/metrics")
 async def metrics():
+    """Consumer counters, plus the two durability backlogs.
+
+    ``LakeWriter.metrics()`` existed and nothing read it, so the archive
+    backlog, the capacity pressure and the quarantined rows were computed on
+    every call to a method with no caller. A gap nobody can see is the same
+    as a gap nobody reported, which is the shape this service has shipped
+    before.
+
+    ``None`` in either section means "could not be read", never zero: an
+    unreadable backlog rendered as an empty one is how a stuck relay and a
+    stalled archive both look healthy.
+    """
     if _worker_ref is None:
         return {"status": "worker not started"}
-    return {"status": "ok", "metrics": FusionWorker.get_metrics()}
+    body: dict = {"status": "ok", "metrics": _worker_ref.get_metrics()}
+
+    lake = _worker_ref.lake
+    body["lake"] = lake.metrics() | {"degraded": lake.archive_degraded} if lake is not None else None
+
+    pending, oldest_seconds, by_tenant = await _worker_ref.pending_notifications()
+    body["notifications"] = {"pending": pending, "oldest_seconds": oldest_seconds, "by_tenant": by_tenant}
+    return body
+
+
+@router.get("/scale-hint")
+async def scale_hint():
+    """Lag-based autoscaling signal (parity 6.9 / depth 4.4).
+
+    AiSOC publishes this and does not act on it. An autoscaler belongs to
+    the cluster, not to the application; ADR-0012 records why, and
+    `apps/docs/docs/operations/performance.md` shows the KEDA
+    `ScaledObject` that consumes it.
+
+    Unauthenticated for the same reason `/metrics` is: a scaler scrapes
+    it on the cluster network and it carries no tenant data — a lag count
+    and a replica suggestion.
+    """
+    if _worker_ref is None:
+        # Not a zero. A hint of "one replica, no backlog" from a service
+        # whose worker never started is a scaler being told everything is
+        # fine by a process that is not consuming anything.
+        return {"status": "worker not started", "lag_measured": False}
+    hint = await _worker_ref.scale_hint()
+    return {"status": "ok", **hint}
 
 
 @router.get("/ml/status")

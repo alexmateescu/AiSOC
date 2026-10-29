@@ -228,6 +228,7 @@ async def execute_lake_query(
     timeout_seconds: float | None = None,
     extra_settings: dict[str, Any] | None = None,
     params: dict[str, Any] | None = None,
+    query_id: str | None = None,
 ) -> LakeQueryResult:
     """Run a rewritten lake SQL statement and return columns + rows.
 
@@ -307,12 +308,19 @@ async def execute_lake_query(
     def _run() -> tuple[list[list[Any]], list[tuple[str, str]]]:
         # ``with_column_types=True`` returns ``(rows, [(name, type), ...])``
         # which we need so the API can echo a stable column ordering.
-        return client.execute(
-            sql,
-            params or {},
-            with_column_types=True,
-            settings=merged_settings,
-        )
+        #
+        # ``query_id`` is passed only when the caller set one. It is part
+        # of the protocol's query envelope rather than a server setting,
+        # which is why it is an argument here and not merged into
+        # ``settings`` — and it is what makes a long scan's progress
+        # readable from ``system.processes``.
+        kwargs: dict[str, Any] = {
+            "with_column_types": True,
+            "settings": merged_settings,
+        }
+        if query_id is not None:
+            kwargs["query_id"] = query_id
+        return client.execute(sql, params or {}, **kwargs)
 
     try:
         rows, column_meta = await asyncio.wait_for(asyncio.to_thread(_run), timeout=asyncio_cap)
@@ -346,6 +354,42 @@ async def execute_lake_query(
         rows=materialised,
         row_count=len(materialised),
         elapsed_ms=elapsed_ms,
+    )
+
+
+async def execute_lake_query_with_id(
+    sql: str,
+    *,
+    query_id: str,
+    timeout_seconds: float,
+    params: dict[str, Any] | None = None,
+    extra_settings: dict[str, Any] | None = None,
+) -> LakeQueryResult:
+    """Run a query under a caller-chosen ClickHouse query id.
+
+    The id is what makes progress readable: ``system.processes`` is keyed
+    on it, so a poller can ask the server how far a running scan has got
+    rather than guessing from elapsed time. Without it a long cold-tier
+    query is a black box that either returns or times out, which is the
+    behaviour depth item 4.3 exists to replace.
+
+    Thin on purpose — it is :func:`execute_lake_query` with the id
+    threaded through, so the two cannot drift in how they clamp the
+    timeout or normalise driver exceptions.
+
+    The id goes to the driver's own ``query_id`` argument rather than
+    into ``settings``: ``query_id`` is part of the protocol's query
+    envelope and is not a server setting, so putting it in the settings
+    map would either be rejected as unknown or silently ignored,
+    depending on the driver version — and a progress poller keyed on an
+    id the server never saw returns "not running" for a query that is.
+    """
+    return await execute_lake_query(
+        sql,
+        timeout_seconds=timeout_seconds,
+        extra_settings=extra_settings,
+        params=params,
+        query_id=query_id,
     )
 
 

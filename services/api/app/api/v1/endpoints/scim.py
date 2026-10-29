@@ -209,6 +209,7 @@ async def _render_user(db: AsyncSession, user: User, meta: ScimUser | None) -> d
         created_at=user.created_at,
         updated_at=meta.updated_at if meta else user.created_at,
         groups=await _user_groups(db, user.tenant_id, user.id),
+        manager_ref=meta.manager_ref if meta else None,
     )
 
 
@@ -269,6 +270,36 @@ def _extract_names(body: dict[str, Any]) -> tuple[str | None, str | None]:
         elif folded == "familyname":
             family = _string_attr(value)
     return given, family
+
+
+#: The SCIM enterprise user extension, where `manager` lives. Matched
+#: case-insensitively because providers differ on the casing of the URN's
+#: final segment and a case-sensitive read silently finds nothing.
+_ENTERPRISE_SCHEMA = "urn:ietf:params:scim:schemas:extension:enterprise:2.0:user"
+
+
+def _extract_manager(body: dict[str, Any]) -> str | None:
+    """``manager.value`` from the enterprise extension, if the IdP sent one.
+
+    Both shapes are accepted because both are in the wild: ``manager`` as an
+    object with a ``value`` (the specification's complex attribute) and as a
+    bare string (what several providers send when the directory stores a
+    username rather than an id). Reading only the first finds nothing on the
+    second, which looks identical to "this person has no manager" — and that
+    distinction is load-bearing for the escalation that reads this column.
+    """
+    for key, extension in body.items():
+        if not isinstance(key, str) or key.casefold() != _ENTERPRISE_SCHEMA:
+            continue
+        if not isinstance(extension, dict):
+            return None
+        for attribute, value in extension.items():
+            if not isinstance(attribute, str) or attribute.casefold() != "manager":
+                continue
+            if isinstance(value, dict):
+                return _string_attr(value.get("value")) or _string_attr(value.get("$ref"))
+            return _string_attr(value)
+    return None
 
 
 def _extract_username(body: dict[str, Any]) -> str | None:
@@ -422,6 +453,7 @@ async def create_user(body: dict[str, Any], principal: ScimAuth, db: ScimDB, req
         external_id=external_id,
         given_name=given,
         family_name=family,
+        manager_ref=_extract_manager(body),
         token_id=principal.token_id,
     )
     db.add(meta)
@@ -482,6 +514,10 @@ async def replace_user(user_id: str, body: dict[str, Any], principal: ScimAuth, 
     given, family = _extract_names(body)
     meta.given_name = given
     meta.family_name = family
+    # Overwritten rather than merged, like the names above: a PUT replaces
+    # the resource, so an IdP that stopped sending a manager is saying the
+    # reporting line is gone.
+    meta.manager_ref = _extract_manager(body)
     external_id = _string_attr(body.get("externalId"))
     if external_id is not None:
         meta.external_id = external_id
@@ -570,6 +606,18 @@ async def patch_user(user_id: str, body: dict[str, Any], principal: ScimAuth, db
                 db.add(meta)
             meta.external_id = _string_attr(op.value)
             changes["external_id"] = meta.external_id
+        elif attribute.endswith("manager") or attribute.endswith("manager.value"):
+            # The enterprise extension's attribute arrives with its URN
+            # prefix intact on some providers and stripped on others, so
+            # this matches the suffix. Without it a manager change is
+            # silently filed under `ignored_attributes` and the escalation
+            # keeps asking last year's manager.
+            if meta is None:
+                meta = ScimUser(user_id=user.id, tenant_id=principal.tenant_id, token_id=principal.token_id)
+                db.add(meta)
+            value = op.value
+            meta.manager_ref = _string_attr(value.get("value")) if isinstance(value, dict) else _string_attr(value)
+            changes["manager_ref"] = meta.manager_ref
         elif attribute == "name":
             # A pathless replace sends the whole complex attribute.
             if isinstance(op.value, dict):

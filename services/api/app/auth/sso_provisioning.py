@@ -434,6 +434,53 @@ async def provision_user(
     return {"id": user_id, "email": email, "role": role, "created": True, "previous_role": None}
 
 
+# Authentication-method values that mean "the identity provider already
+# performed multi-factor authentication". OIDC sends them in `amr`
+# (RFC 8176); SAML sends an `AuthnContextClassRef`, and the two spellings
+# below are the ones in the SAML 2.0 authentication context specification
+# that denote more than one factor.
+#
+# Deliberately short. `pwd`, `sms` and `tel` are **not** here: a password
+# is the factor the console already has, and a one-time code over SMS or a
+# phone call is the factor every published guidance tells an operator to
+# stop relying on. An allowlist that grows by accident is a policy that
+# turns itself off.
+MULTI_FACTOR_AUTHN_METHODS: frozenset[str] = frozenset(
+    {
+        "mfa",
+        "otp",
+        "hwk",
+        "swk",
+        "urn:oasis:names:tc:SAML:2.0:ac:classes:MobileTwoFactorContract",
+        "urn:oasis:names:tc:SAML:2.0:ac:classes:TimeSyncToken",
+        "urn:oasis:names:tc:SAML:2.0:ac:classes:SmartcardPKI",
+    }
+)
+
+
+def idp_asserted_multi_factor(authn_methods: list[str] | None) -> bool:
+    """Whether the assertion states the provider performed MFA itself.
+
+    `None` and `[]` both mean "did not say", which is not the same as
+    "did not" — and is treated the same way, because the console cannot
+    tell the difference and the safe reading of silence is that no second
+    factor has been proved.
+    """
+    return any(str(method).strip() in MULTI_FACTOR_AUTHN_METHODS for method in (authn_methods or []))
+
+
+async def _second_factor_challenge(db: AsyncSession, *, tenant_id: Any, user_id: Any, role: str) -> dict[str, Any] | None:
+    """The challenge this SSO sign-in still owes, or `None`.
+
+    Delegates to the same two helpers `POST /auth/login` uses, so the
+    password door and the SSO door cannot come to different conclusions
+    about one policy. A reimplementation here is how they would drift.
+    """
+    from app.api.v1.endpoints.auth import mfa_challenge_for  # noqa: PLC0415
+
+    return await mfa_challenge_for(db, user_id=user_id, tenant_id=tenant_id, role=role)
+
+
 async def complete_sso_login(
     db: AsyncSession,
     *,
@@ -444,10 +491,29 @@ async def complete_sso_login(
     email_verified: bool | None,
     name: str | None = None,
     groups: list[str] | None = None,
+    authn_methods: list[str] | None = None,
 ) -> dict[str, Any]:
     """The whole path: assertion to a token the API actually verifies.
 
-    Returns `{access_token, refresh_token, role, user_id, tenant_id}`.
+    Returns `{access_token, refresh_token, role, user_id, tenant_id}` —
+    **or**, when the tenant's MFA policy covers the role this sign-in
+    resolved to and the identity provider did not say it performed
+    multi-factor authentication, `{mfa_required, mfa_token, methods,
+    role, user_id, tenant_id}` and no session at all.
+
+    Depth 8.1. Before it, the policy was consulted by `POST /auth/login`
+    and by nothing else, so a tenant that required a second factor of its
+    administrators got one from anybody who typed a password and from
+    nobody who arrived through SSO. Callers must handle the challenge
+    shape; the two in this repository redirect to the console's
+    second-factor page carrying `mfa_token` in the URL fragment.
+
+    `authn_methods` is what the assertion said about how the user
+    authenticated — OIDC's `amr`, or the SAML `AuthnContextClassRef`.
+    Where the provider states it already performed multi-factor
+    authentication, asking for a second one is asking the same person for
+    the same assurance twice. Absence means not evidenced, never
+    satisfied.
     """
     if not email:
         raise SsoProvisioningError("the assertion carried no email, so no local user can be named")
@@ -556,6 +622,25 @@ async def complete_sso_login(
     except Exception as audit_exc:  # noqa: BLE001
         await db.rollback()
         logger.warning("sso.login_audit_failed error=%s", _sanitize(audit_exc))
+
+    # Depth 8.1. The second factor, if this tenant requires one of this
+    # role and the provider did not already supply one.
+    #
+    # Checked *after* provisioning on purpose: the account and its
+    # identity binding are the record of who signed in, and they are
+    # correct whether or not a session is issued. Checking first would
+    # mean a user covered by the policy never gets an account, so the
+    # administrator enforcing the policy cannot see them to help them.
+    if not idp_asserted_multi_factor(authn_methods):
+        challenge = await _second_factor_challenge(db, tenant_id=connection["tenant_id"], user_id=user["id"], role=role)
+        if challenge is not None:
+            return {
+                **challenge,
+                "role": role,
+                "user_id": str(user["id"]),
+                "tenant_id": str(connection["tenant_id"]),
+                "provisioned": user["created"],
+            }
 
     claims = {
         "sub": str(user["id"]),

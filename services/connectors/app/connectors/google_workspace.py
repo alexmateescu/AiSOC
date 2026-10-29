@@ -33,12 +33,26 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 
 from app.connectors.base import BaseConnector, Capability, ConnectorSchema, Field, OAuthHints
+from app.connectors.posture import POSTURE_SNAPSHOT_ID, Collected
+from app.connectors.posture import gws as gws_posture
 
 logger = structlog.get_logger()
 
 _TOKEN_URL = "https://oauth2.googleapis.com/token"
 _REPORTS_BASE = "https://admin.googleapis.com/admin/reports/v1/activity"
 _SCOPE = "https://www.googleapis.com/auth/admin.reports.audit.readonly"
+
+# Posture collection reads the directory, which the audit-log scope above
+# does not cover. These are requested as a separate token so an operator who
+# has only authorised the reports scope keeps working alert polling and sees
+# a clear failure on the posture call alone.
+_DIRECTORY_SCOPE = " ".join(
+    (
+        "https://www.googleapis.com/auth/admin.directory.user.readonly",
+        "https://www.googleapis.com/auth/admin.directory.rolemanagement.readonly",
+        "https://www.googleapis.com/auth/admin.directory.orgunit.readonly",
+    )
+)
 
 _DEFAULT_APPS = ("login", "admin", "drive", "token", "mobile")
 _PAGE_SIZE = 500
@@ -104,8 +118,12 @@ class GoogleWorkspaceConnector(BaseConnector):
     def __init__(self, admin_email: str, service_account_json: str):
         self._admin_email = admin_email
         self._sa_info = self._parse_sa(service_account_json)
-        self._access_token: str | None = None
-        self._token_expiry: float = 0.0
+        # Keyed by scope: audit-log polling and posture collection need
+        # different Google scopes, and a domain-wide-delegation token request
+        # fails outright for any scope the operator has not authorised. One
+        # shared token would therefore make posture collection able to break
+        # alert polling, so each scope holds its own.
+        self._tokens: dict[str, tuple[str, float]] = {}
 
     # --------------------------- auth ---------------------------
 
@@ -120,14 +138,14 @@ class GoogleWorkspaceConnector(BaseConnector):
                 raise ValueError(f"service_account_json missing required field: {required}")
         return sa
 
-    def _build_jwt(self) -> str:
+    def _build_jwt(self, scope: str = _SCOPE) -> str:
         """Build a JWT with the ``sub`` claim set to the impersonated admin —
         this is what makes domain-wide delegation actually work."""
         now = int(time.time())
         header = {"alg": "RS256", "typ": "JWT"}
         claims = {
             "iss": self._sa_info["client_email"],
-            "scope": _SCOPE,
+            "scope": scope,
             "aud": self._sa_info.get("token_uri", _TOKEN_URL),
             "iat": now,
             "exp": now + 3600,
@@ -149,26 +167,31 @@ class GoogleWorkspaceConnector(BaseConnector):
         )
         return signing_input.decode("ascii") + "." + _b64url(signature)
 
-    async def _authenticate(self) -> str:
-        if self._access_token and time.time() < self._token_expiry - 60:
-            return self._access_token
+    async def _authenticate(self, scope: str = _SCOPE) -> str:
+        cached = self._tokens.get(scope)
+        if cached and time.time() < cached[1] - 60:
+            return cached[0]
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.post(
                 self._sa_info.get("token_uri", _TOKEN_URL),
                 data={
                     "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
-                    "assertion": self._build_jwt(),
+                    "assertion": self._build_jwt(scope),
                 },
             )
             resp.raise_for_status()
             payload = resp.json()
-            self._access_token = payload["access_token"]
-            self._token_expiry = time.time() + int(payload.get("expires_in", 3600))
-            return self._access_token
+            token = payload["access_token"]
+            self._tokens[scope] = (token, time.time() + int(payload.get("expires_in", 3600)))
+            return token
 
-    def _headers(self) -> dict[str, str]:
+    def _invalidate(self, scope: str = _SCOPE) -> None:
+        self._tokens.pop(scope, None)
+
+    def _headers(self, scope: str = _SCOPE) -> dict[str, str]:
+        token, _ = self._tokens.get(scope, ("", 0.0))
         return {
-            "Authorization": f"Bearer {self._access_token}",
+            "Authorization": f"Bearer {token}",
             "Accept": "application/json",
         }
 
@@ -215,7 +238,7 @@ class GoogleWorkspaceConnector(BaseConnector):
                     params={"startTime": start_time, "maxResults": _PAGE_SIZE},
                 )
                 if resp.status_code == 401:
-                    self._access_token = None
+                    self._invalidate()
                     await self._authenticate()
                     resp = await client.get(
                         f"{_REPORTS_BASE}/users/all/applications/{app_name}",
@@ -239,6 +262,37 @@ class GoogleWorkspaceConnector(BaseConnector):
                     events.append(item)
 
         return [self.normalize(e) for e in events]
+
+    # ------------------------- posture --------------------------
+
+    async def get_resource_config(self, resource_id: str, at_ts: str | None = None) -> dict[str, Any]:
+        """Return the Workspace directory posture snapshot for the sentinel id.
+
+        This connector reads the Reports API and the directory, neither of
+        which addresses an individual "resource" the way a cloud connector
+        does, so any other id raises rather than returning an empty config
+        that would read as "this resource has no settings".
+        """
+        if resource_id != POSTURE_SNAPSHOT_ID:
+            raise NotImplementedError(
+                f"{self.connector_id} describes the Workspace directory, not individual resources; "
+                f"the only id it answers is {POSTURE_SNAPSHOT_ID!r}"
+            )
+        try:
+            await self._authenticate(_DIRECTORY_SCOPE)
+        except httpx.HTTPStatusError as exc:
+            # Almost always an operator who authorised the reports scope and
+            # not the directory ones. Saying which scopes are missing is the
+            # difference between a two-minute fix and a support thread.
+            collected = Collected(snapshot={})
+            collected.note(
+                f"could not mint a directory token (HTTP {exc.response.status_code}). The service "
+                f"account's domain-wide delegation must also authorise: {_DIRECTORY_SCOPE}"
+            )
+            return collected.to_resource_config()
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            collected = await gws_posture.collect(client, self._headers(_DIRECTORY_SCOPE))
+        return collected.to_resource_config()
 
     # ----------------------- normalize --------------------------
 

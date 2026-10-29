@@ -68,11 +68,12 @@ the secret once.
 ## Severity mapping
 
 Lacework alerts use a numeric severity (1 = critical, 5 = info). AiSOC
-maps these into the canonical 4-tier ladder:
+maps these into the canonical five-tier ladder without downgrading critical
+findings:
 
 | Lacework severity | AiSOC severity |
 |---|---|
-| `1` — Critical | `high` |
+| `1` — Critical | `critical` |
 | `2` — High | `high` |
 | `3` — Medium | `medium` |
 | `4` — Low | `low` |

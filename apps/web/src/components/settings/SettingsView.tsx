@@ -37,6 +37,7 @@ import {
   type FullTenant,
   type LlmCredentialUpsert,
   type LlmCredentialView,
+  type LlmModelDiscoveryResult,
   type LlmProvider,
   type LlmStatus,
   type LlmWritableProvider,
@@ -48,6 +49,7 @@ import { EmptyState } from '@/components/ui/EmptyState';
 import { AutonomyPolicyPanel } from '@/components/settings/AutonomyPolicy';
 import { AssignRoleModal } from '@/components/settings/AssignRoleModal';
 import { RetroHuntSettingsPanel } from './RetroHuntSettings';
+import { ScimTokensPanel } from './ScimTokensPanel';
 import { useTheme, type ThemePreference } from '@/components/theme/ThemeProvider';
 import { canUseDemoData } from '@/lib/demoFallback';
 import { rbacApi, authApi } from '@/lib/api';
@@ -60,6 +62,7 @@ type TabId =
   | 'integrations'
   | 'autonomy'
   | 'api-keys'
+  | 'scim'
   | 'notifications'
   | 'appearance'
   | 'deployment'
@@ -316,6 +319,12 @@ const TABS: { id: TabId; label: string; description: string }[] = [
     description: 'Programmatic access for pipelines and integrations.',
   },
   {
+    id: 'scim',
+    label: 'SCIM provisioning',
+    description:
+      'Bearer credentials your identity provider uses to create and deprovision principals.',
+  },
+  {
     id: 'notifications',
     label: 'Notifications',
     description: 'How and when AiSOC should ping you.',
@@ -412,6 +421,7 @@ export function SettingsView() {
                 </div>
               )}
               {tab === 'api-keys' && <ApiKeysPanel />}
+              {tab === 'scim' && <ScimTokensPanel />}
               {tab === 'notifications' && <NotificationsPanel />}
               {tab === 'appearance' && <AppearancePanel />}
               {tab === 'deployment' && <DeploymentAIPanel />}
@@ -1646,6 +1656,14 @@ function LlmCard({
   const providerLabel = PROVIDER_LABEL[llm.provider] ?? llm.provider;
   const isFallback = llm.effective_path === 'fallback';
   const blockedByAirgap = llm.airgap_enabled && !llm.airgap_compliant;
+  // `effective_path` is configuration: it answers "would a call be attempted",
+  // not "did one come back". Deciding the pill from it alone is why a
+  // deployment timing out on every call rendered emerald Live (issue #1241).
+  //
+  // Fallback still wins: on the deterministic path no call is attempted, so
+  // there is no provider outcome to report and "Degraded" would blame a
+  // provider that was never asked.
+  const isDegraded = !isFallback && llm.recent_health === 'degraded';
 
   return (
     <section
@@ -1669,6 +1687,8 @@ function LlmCard({
           )}
           {isFallback ? (
             <StatusPill tone="amber" label="Fallback path" />
+          ) : isDegraded ? (
+            <StatusPill tone="red" label="Degraded" />
           ) : (
             <StatusPill tone="emerald" label="Live" />
           )}
@@ -1703,8 +1723,29 @@ function LlmCard({
         </div>
       ) : null}
 
+      {isDegraded ? (
+        <div
+          role="alert"
+          className="mt-4 rounded-lg border border-red-500/40 bg-red-500/10 p-3 text-xs text-red-200"
+        >
+          <p className="font-semibold text-red-100">
+            The provider is configured but recent calls are failing.
+          </p>
+          <p className="mt-1">{llm.recent_note}</p>
+        </div>
+      ) : null}
+
       <dl className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
         <KeyValue label="Provider">{providerLabel}</KeyValue>
+        {/* Shown whenever the alert block above is not already carrying it, so
+            the evidence behind the badge is visible in every state — including
+            `unknown`. A panel that shows a badge and hides what it rests on is
+            how "Live" came to mean "configured" without anyone noticing. */}
+        {isDegraded ? null : (
+          <KeyValue label="Recent calls">
+            <span className="text-xs text-gray-300">{llm.recent_note}</span>
+          </KeyValue>
+        )}
         <KeyValue label="Model">
           {llm.model ? (
             <code className="font-mono text-xs text-gray-100">{llm.model}</code>
@@ -1878,6 +1919,14 @@ function BYOKCard({
   const [apiKey, setApiKey] = useState('');
   const [enabled, setEnabled] = useState(true);
   const [formError, setFormError] = useState<string | null>(null);
+  const [discovering, setDiscovering] = useState(false);
+  // Remembers which base URL the list came from: a list fetched for one
+  // endpoint says nothing about another, so it is shown only while that base
+  // URL is still the one in the form.
+  const [discovery, setDiscovery] = useState<{
+    baseUrl: string;
+    result: LlmModelDiscoveryResult;
+  } | null>(null);
 
   // Reset form whenever we enter edit mode (or the underlying credential
   // moves while editing). Never preload the API key — it lives only in
@@ -1953,6 +2002,42 @@ function BYOKCard({
   const onCancel = () => {
     setEditing(false);
   };
+
+  // Ask the custom endpoint which chat models it serves. Uses what is in the
+  // form, so it works before the credential is saved; a blank key means "use
+  // the stored one", which the server sends only to the stored base URL. On
+  // any failure the list stays empty and the typed model id is what is saved.
+  const onDiscoverClick = async () => {
+    const target = baseUrl.trim();
+    setDiscovering(true);
+    try {
+      const result = await deploymentApi.discoverLlmModels({
+        base_url: target ? target : null,
+        api_key: apiKey.trim() ? apiKey.trim() : null,
+      });
+      setDiscovery({ baseUrl: target, result });
+    } catch (err) {
+      setDiscovery({
+        baseUrl: target,
+        result: {
+          outcome: 'refused',
+          detail: extractApiDetail(err, 'Could not list models.'),
+          models: [],
+          listed: 0,
+          excluded: 0,
+          truncated: false,
+        },
+      });
+    } finally {
+      setDiscovering(false);
+    }
+  };
+
+  const shownDiscovery =
+    provider === 'custom' && discovery && discovery.baseUrl === baseUrl.trim()
+      ? discovery.result
+      : null;
+  const discoveredModels = shownDiscovery?.models ?? [];
 
   // One real call with the saved credential. Reports four outcomes, and
   // `unverified` is deliberately not an error: an air-gapped deployment
@@ -2262,6 +2347,67 @@ function BYOKCard({
           />
         </Field>
       </div>
+      {provider === 'custom' ? (
+        <div className="mt-4 flex flex-col gap-2">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+            <button
+              type="button"
+              onClick={onDiscoverClick}
+              disabled={discovering || submitting || !baseUrl.trim()}
+              className="shrink-0 rounded-md border border-gray-700 bg-gray-900 px-3 py-1.5 text-xs font-medium text-gray-200 hover:bg-gray-800 disabled:opacity-50"
+            >
+              {discovering ? 'Listing models…' : 'List models from endpoint'}
+            </button>
+            {discoveredModels.length > 0 ? (
+              <select
+                aria-label="Discovered chat models"
+                value={discoveredModels.some(m => m.id === model) ? model : ''}
+                onChange={e => {
+                  if (e.target.value) setModel(e.target.value);
+                }}
+                disabled={submitting}
+                className={inputClass()}
+              >
+                <option value="">Choose a discovered model…</option>
+                {discoveredModels.map(m => (
+                  <option key={m.id} value={m.id}>
+                    {m.name && m.name !== m.id ? `${m.id} — ${m.name}` : m.id}
+                  </option>
+                ))}
+              </select>
+            ) : null}
+          </div>
+          {shownDiscovery ? (
+            <p
+              role="status"
+              className={clsx(
+                'text-xs',
+                shownDiscovery.outcome === 'ok' && discoveredModels.length > 0
+                  ? 'text-gray-400'
+                  : 'text-amber-300/80',
+              )}
+            >
+              {shownDiscovery.outcome === 'ok' && discoveredModels.length > 0
+                ? `${discoveredModels.length} chat model${
+                    discoveredModels.length === 1 ? '' : 's'
+                  } of ${shownDiscovery.listed} listed by the endpoint${
+                    shownDiscovery.excluded > 0
+                      ? ` (${shownDiscovery.excluded} image, audio, embedding or other non-chat entries hidden)`
+                      : ''
+                  }.${
+                    shownDiscovery.truncated ? ' Only the first part of a longer list is shown.' : ''
+                  } Pick one, or type any id in the Model field.`
+                : `${shownDiscovery.detail} The Model field still accepts a typed id.`}
+            </p>
+          ) : (
+            <p className="text-xs text-gray-500">
+              Asks the endpoint&apos;s <code className="font-mono">/models</code>{' '}
+              for the chat models it serves. Optional — a typed model id
+              always works.
+            </p>
+          )}
+        </div>
+      ) : null}
       <div className="mt-4">
         <Toggle
           checked={enabled}

@@ -84,6 +84,23 @@ class ActionType(str, Enum):
     # raised the alert. Distinct from ack/suppress because the disposition —
     # not the caller — decides whether the finding is closed or escalated.
     UPDATE_ALERT_DISPOSITION = "update_alert_disposition"
+    # Depth 7.1 — mailbox remediation for reported phish. Present here, and
+    # not only in the capability vocabulary, because the post-action verifier
+    # is keyed by ActionType: a verb absent from this enum can declare a
+    # probe and never have it reached, which the contract gate now refuses.
+    # `purge_email` is the one verb in the product whose blast radius is a
+    # property of the dispatch rather than of the verb, so the entry in
+    # ACTION_BLAST_RADIUS below is its single-mailbox floor and
+    # `capability_contracts.scaled_impact` raises it per campaign.
+    #
+    # `search_mailboxes` is deliberately absent: it is read-only, declares no
+    # verification probe, and so needs nothing this enum provides. Adding it
+    # anyway would put a read on the ungoverned `POST /actions` surface for
+    # no gain. Its arms are native read executors in `investigation_reads`.
+    PURGE_EMAIL = "purge_email"
+    RESTORE_EMAIL = "restore_email"
+    BLOCK_SENDER = "block_sender"
+    UNBLOCK_SENDER = "unblock_sender"
 
 
 class ActionStatus(str, Enum):
@@ -91,9 +108,24 @@ class ActionStatus(str, Enum):
     AWAITING_APPROVAL = "awaiting_approval"
     APPROVED = "approved"
     REJECTED = "rejected"
+    #: Claimed for execution. Written to the durable store *before* the vendor
+    #: is contacted and never only afterwards, so a replica that dies
+    #: mid-dispatch leaves a record that cannot be mistaken for one nobody
+    #: started. The member always existed; nothing wrote it.
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    #: The dispatch did not come back clean and the vendor could not be read
+    #: back, so whether the estate changed is genuinely unknown.
+    #:
+    #: Its absence was the defect. A containment the EDR had accepted, whose
+    #: response was then lost, was recorded as ``failed`` — the reading whose
+    #: obvious remedy is to run it again. Nothing here may be re-approved;
+    #: ``POST /actions/{id}/reconcile`` resolves it by asking the vendor.
+    #:
+    #: Not a terminal success: `services/api`'s usage meter counts `completed`
+    #: as the one status meaning a vendor was touched, and that stays true.
+    RECONCILIATION_REQUIRED = "reconciliation_required"
     ROLLED_BACK = "rolled_back"
 
 
@@ -144,6 +176,16 @@ ACTION_BLAST_RADIUS: dict[ActionType, BlastRadius] = {
     # for: "classified the same as create_notable_event ... it changes a
     # queue item, not an estate", and create_notable_event is LOW.
     ActionType.UPDATE_ALERT_DISPOSITION: BlastRadius.LOW,
+    # Depth 7.1 — mailbox remediation. The purge entry is the floor for one
+    # mailbox; `BlastRadiusGate` reads this table and cannot see a recipient
+    # count, so the campaign-scaled grading happens in the capability
+    # contract where the parameters are in scope. MEDIUM is already above
+    # `_AUTO_EXECUTE_LIMIT`'s sibling tiers for the legacy door's purposes
+    # and `APPROVAL_REQUIRED_ACTIONS` below makes the point unconditional.
+    ActionType.PURGE_EMAIL: BlastRadius.MEDIUM,
+    ActionType.RESTORE_EMAIL: BlastRadius.LOW,
+    ActionType.BLOCK_SENDER: BlastRadius.LOW,
+    ActionType.UNBLOCK_SENDER: BlastRadius.LOW,
 }
 
 # Actions that require explicit human approval
@@ -156,6 +198,13 @@ APPROVAL_REQUIRED_ACTIONS = {
     ActionType.SUSPEND_SESSION,
     ActionType.BLOCK_IOC,
     ActionType.SYNC_DETECTION_RULE,
+    # Removing somebody's mail is never automatic, whatever the autonomy
+    # tier. The capability contract says the same thing through the matrix;
+    # this is the legacy door saying it too, because the two doors
+    # disagreeing about one verb is the defect `test_approval_doors_agree`
+    # exists to catch.
+    ActionType.PURGE_EMAIL,
+    ActionType.BLOCK_SENDER,
 }
 
 
@@ -217,6 +266,23 @@ class ActionRequest(BaseModel):
     # W4.1 — structured invoking identity. Optional for back-compat with the
     # legacy `requested_by` string + system-initiated calls.
     principal: ActionPrincipal | None = None
+    #: Who originally asked for this action, when that is not the caller.
+    #:
+    #: Three identities meet on an approved action and collapsing any two
+    #: breaks a control. `principal` is the *invoking* identity whose
+    #: permissions gate the submit; the approver arrives separately on the
+    #: approve call; and this is the originator, read only for separation of
+    #: duties and provenance, never for authorization.
+    #:
+    #: It exists because `services/api` had nowhere to put the originator and
+    #: sent the deciding console user as `principal`, which became
+    #: `requested_by_user_id`. Separation of duties then compared the approver
+    #: against itself and refused: every approval raised in the responder app
+    #: was answered 403 upstream and surfaced as a 502. The free-text
+    #: `requested_by` beside this is a label and is deliberately not used for
+    #: the comparison — it is caller-supplied and trusting it would make the
+    #: control forgeable in the other direction.
+    requester: ActionPrincipal | None = None
     rationale: str = ""
     auto_rollback: bool = False
     rollback_after_seconds: int | None = None

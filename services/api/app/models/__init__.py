@@ -1,6 +1,7 @@
 """ORM models package - imports all models for Alembic and SQLAlchemy."""
 
 from app.db.database import Base
+from app.models.ai_asset import AiAsset
 from app.models.alert import Alert
 from app.models.asset import AlertAssetCorrelation, Asset, AssetVulnerability
 from app.models.branding import OrgBrandAsset, OrgBranding
@@ -36,6 +37,7 @@ from app.models.organization import (
     OrganizationMemberTenant,
     OrganizationTenant,
 )
+from app.models.outbound_webhook import OutboundDelivery, OutboundWebhook
 from app.models.posture import PostureDriftEvent, PostureFinding, PostureScanRun
 from app.models.published_replay import PublishedReplay
 from app.models.remediation import RemediationGateLog, RemediationMaturity, RemediationWhitelist
@@ -96,9 +98,12 @@ __all__ = [
     "OrganizationMemberTenant",
     "OrganizationTenant",
     "OAuthState",
+    "OutboundDelivery",
+    "OutboundWebhook",
     "TenantInboxToken",
     "TenantLlmCredential",
     "McpServer",
+    "AiAsset",
     "PasskeyCredential",
     "PasskeyChallenge",
     "OnCallStatus",

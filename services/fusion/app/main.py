@@ -6,24 +6,29 @@ from typing import Any
 import redis.asyncio as aioredis
 from fastapi import FastAPI
 
-from app._health import install_health_routes, register_subscription
+from app._health import install_health_routes, register_dependency, register_subscription
 from app.api.router import router, set_worker
 from app.core.config import settings
 from app.core.logging import configure_logging, logger
 from app.memory.provider import MemoryPriorProvider
 from app.services import ioc_match
+from app.services.ai_asset_recorder import AiAssetRecorder
 from app.services.alert_enricher import AlertEnricher
+from app.services.alert_outbox import AlertNotificationOutbox
 from app.services.alert_sink import AlertSink
 from app.services.attack_chain_grouper import AttackChainGrouper
+from app.services.baselines import BaselineStore
 from app.services.confidence import ConfidenceScorer
 from app.services.correlator import Correlator
 from app.services.deduplicator import Deduplicator
 from app.services.detection_engine import DetectionEngine
 from app.services.dlq_sink import PostgresDLQ
 from app.services.entity_risk import EntityRiskEngine
+from app.services.first_seen import FirstSeenStore
 from app.services.fusion_engine import FusionEngine
 from app.services.ioc_match import TenantIocMatcher
 from app.services.lake_writer import LakeWriter
+from app.services.sessions import SessionStore
 from app.services.tenant_overlay import OverlayCache
 from app.services.ueba_signal import UebaSignalCache
 from app.services.windowed_detection import WindowedDetectionEngine
@@ -52,7 +57,16 @@ async def lifespan(app: FastAPI):
     configure_logging()
     logger.info("Starting AiSOC Alert Fusion Service", port=settings.http_port)
 
-    redis_client = aioredis.from_url(settings.redis_url, decode_responses=False)
+    # Short socket timeouts are part of the Redis fallback: a black-holed
+    # connection must fail open into Postgres-backed dedup, not stall the
+    # alert path waiting for a TCP read that never arrives.
+    redis_client = aioredis.from_url(
+        settings.redis_url,
+        decode_responses=False,
+        socket_connect_timeout=settings.redis_connect_timeout_seconds,
+        socket_timeout=settings.redis_socket_timeout_seconds,
+        health_check_interval=30,
+    )
 
     dedup = Deduplicator(redis_client)
     correlator = Correlator(redis_client)
@@ -122,6 +136,13 @@ async def lifespan(app: FastAPI):
     detector = DetectionEngine() if settings.detection_engine_enabled else None
     # Wave 2 — windowed detections share the fusion Redis for sliding-window state.
     windowed_detector = WindowedDetectionEngine(redis_client) if settings.windowed_detection_enabled else None
+    # Depth plan 3.3 — per-tenant first-seen memory, sharing the fusion Redis
+    # the windowed engine already uses for sliding-window state.
+    first_seen = FirstSeenStore(redis_client)
+    # Depth plan 3.4 — per-principal behavioural baselines in CORE, on the
+    # same Redis. ADR-0011 records why this is a fusion module rather than
+    # the `full`-profile UEBA service.
+    baselines = BaselineStore(redis_client)
     # Dead letters go to Postgres so they can be read back. Until now the
     # worker defaulted to LoggingDLQ, so a dropped event produced a log
     # line and nothing else — and an invisible drop is indistinguishable
@@ -130,7 +151,52 @@ async def lifespan(app: FastAPI):
     # The pool is passed as a callable because `sink.start()` opens it
     # during `worker.start()`, after this point; capturing it eagerly would
     # capture None and drop every dead letter.
-    dlq = PostgresDLQ(lambda: sink._pool) if sink is not None else None
+    # `ensure_pool`/`invalidate_pool` matter here: the DLQ shares the sink's
+    # pool, and while the consumer is holding a message neither the alert path
+    # nor anything else reconnects. Without them a Postgres outage that
+    # invalidated the pool would turn the hold into a permanent stall.
+    dlq = (
+        PostgresDLQ(
+            lambda: sink._pool,
+            ensure_pool=sink.ensure_pool,
+            invalidate_pool=sink.invalidate_pool,
+        )
+        if sink is not None
+        else None
+    )
+
+    # Depth 6.1 — the observed AI estate. Shares the alert sink's pool for
+    # the same reason the dead-letter queue does: one Postgres connection
+    # pool per service, opened by `sink.start()` during `worker.start()`.
+    # Passed as a callable because that happens after this point, and
+    # capturing `sink._pool` eagerly would capture None and silently drop
+    # every sighting for the life of the process.
+    ai_assets = AiAssetRecorder(lambda: sink._pool) if sink is not None else None
+
+    # Remediation phase 4 — the recovery record for a fused alert that is
+    # durable in Postgres but whose Kafka notification never landed. Shares
+    # the sink's pool, and is passed as a callable for the same reason the
+    # two above are: `sink.start()` opens it during `worker.start()`, after
+    # this point. Without a sink there is no pool and no alert row either,
+    # so there is nothing for the journal to be about.
+    outbox = (
+        AlertNotificationOutbox(lambda: sink._pool, ensure_pool=sink.ensure_pool)
+        if sink is not None and settings.alert_outbox_enabled
+        else None
+    )
+
+    if sink is None:
+        # Explicit, not inferred: this mode writes no alert rows and has no
+        # durable DLQ. The consumer still retries and holds, but its committed
+        # offsets are not evidence that an alert survived. Development-only.
+        logger.warning(
+            "fusion.alert_persistence_disabled",
+            setting="AISOC_ALERT_SINK_ENABLED=false",
+            detail=(
+                "alerts are not persisted to Postgres and dead letters are log-only; "
+                "Kafka offsets commit after processing, not after durable capture"
+            ),
+        )
 
     worker = FusionWorker(
         engine,
@@ -139,12 +205,21 @@ async def lifespan(app: FastAPI):
         lake=lake,
         detector=detector,
         windowed_detector=windowed_detector,
+        first_seen=first_seen,
+        baselines=baselines,
         # Parity 5.4. Per-tenant detection tuning as a versioned overlay
         # with hot reload. Without it the engine evaluated the shared
         # corpus and nothing else, so a tenant who disabled a noisy rule
         # in the console kept receiving its alerts.
-        overlays=OverlayCache(_overlay_pool()),
+        overlays=OverlayCache(_fusion_pool()),
+        # Depth plan 2.4. Sessions per principal: the stateful half of the
+        # projection `session.go` derives per event. Disabled by the same
+        # switch as the alert sink, because a session row nothing can join
+        # an alert to is a row nobody reads.
+        sessions=SessionStore(_fusion_pool()) if settings.alert_sink_enabled else None,
         ueba_cache=ueba_cache,
+        ai_assets=ai_assets,
+        outbox=outbox,
     )
     set_worker(worker)
 
@@ -158,6 +233,13 @@ async def lifespan(app: FastAPI):
     worker_task = asyncio.create_task(worker.start())
     worker_task.add_done_callback(_log_worker_exit)
     register_subscription(app, "alerts+raw_events", lambda: worker.attached)
+    # Two different questions, which is why they are two probes and not one
+    # flag read twice. The subscription above is "am I consuming"; the
+    # dependency below is "can I reach the broker", and only the second can
+    # describe an outage -- `attached` stays true across one, because
+    # aiokafka's retry lives inside `__anext__` and the `async for` never
+    # exits. See `FusionWorker.broker_reachable`.
+    register_dependency(app, "kafka", worker.broker_reachable)
     app.state.worker_task = worker_task
     app.state.redis = redis_client
 
@@ -211,19 +293,64 @@ _mark_ready, _mark_not_ready = install_health_routes(app, service_name="aisoc-fu
 app.state.mark_ready = _mark_ready
 app.state.mark_not_ready = _mark_not_ready
 
+
+async def _postgres_ready() -> bool:
+    import asyncpg
+
+    dsn = settings.database_url
+    for prefix in ("postgresql+asyncpg://", "postgres+asyncpg://"):
+        if dsn.startswith(prefix):
+            dsn = "postgresql://" + dsn[len(prefix) :]
+            break
+    conn = await asyncpg.connect(dsn, timeout=1.4)
+    await conn.close()
+    return True
+
+
+def _clickhouse_ready() -> bool:
+    if not settings.lake_writer_enabled:
+        return False
+    from clickhouse_driver import Client
+
+    client = Client(
+        host=settings.clickhouse_host,
+        port=settings.clickhouse_port,
+        database=settings.clickhouse_database,
+        user=settings.clickhouse_user,
+        password=settings.clickhouse_password or "",
+        connect_timeout=0.7,
+        send_receive_timeout=0.7,
+    )
+    try:
+        return client.execute("SELECT 1", settings={"max_execution_time": 1}) == [(1,)]
+    finally:
+        client.disconnect()
+
+
+register_dependency(app, "database", _postgres_ready)
+register_dependency(app, "lake_writer", _clickhouse_ready, required=False)
+
 app.include_router(router)
 
 
 _OVERLAY_POOL: Any = None
 
 
-def _overlay_pool() -> Any:
-    """A lazy pool for the tenant-tuning overlay.
+def _fusion_pool() -> Any:
+    """One lazy Postgres pool, shared by the consumer's side readers.
 
     Built on first use rather than at import, because `main` runs before
-    an event loop exists and `asyncpg.create_pool` needs one. The cache
-    tolerates `None` and returns the empty overlay, so a deployment with
-    no database reachable detects exactly as it did before 5.4.
+    an event loop exists and `asyncpg.create_pool` needs one. The overlay
+    cache tolerates `None` and returns the empty overlay, so a deployment
+    with no database reachable detects exactly as it did before 5.4, and
+    the session store logs and returns None for the same reason.
+
+    Shared rather than one pool each: both sit on the consumer's hot path
+    against the same database, and two pools is two connection budgets to
+    size instead of one. Renamed from `_overlay_pool` when the session
+    store (depth plan 2.4) became the second reader, because a name that
+    says "overlay" while two things use it is how the next contributor
+    opens a third.
     """
     global _OVERLAY_POOL  # noqa: PLW0603
     if _OVERLAY_POOL is None:

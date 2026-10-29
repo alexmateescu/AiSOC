@@ -24,21 +24,21 @@
  * itself, which gives us a single place to tune contrast for both themes.
  */
 
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render } from '@testing-library/react';
-import { axe } from 'vitest-axe';
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { cleanup, render } from "@testing-library/react";
+import { axe } from "vitest-axe";
 
 // Shared mocks ----------------------------------------------------------
 
 // Parity 4.7. The operator views below fetch through SWR, and without
 // this they would render a loading spinner: axe would pass on a spinner
 // and the suite would report coverage it does not have.
-vi.mock('swr', () => ({
+vi.mock("swr", () => ({
   // The key may be a string or a tuple: the Investigation Rail keys on
   // `['alerts', id, 'rail']`, and reading only the string form gave it
   // `undefined`, so it rendered its error state and axe passed on that.
   default: (key: unknown) => ({
-    data: swrFixture(Array.isArray(key) ? key.join('/') : typeof key === 'string' ? key : ''),
+    data: swrFixture(Array.isArray(key) ? key.join("/") : typeof key === "string" ? key : ""),
     error: undefined,
     isLoading: false,
     mutate: vi.fn(),
@@ -47,7 +47,7 @@ vi.mock('swr', () => ({
   useSWRConfig: () => ({ mutate: vi.fn() }),
 }));
 
-vi.mock('next/link', () => ({
+vi.mock("next/link", () => ({
   default: ({
     children,
     href,
@@ -62,17 +62,21 @@ vi.mock('next/link', () => ({
   ),
 }));
 
-const pathnameMock = vi.fn(() => '/dashboard');
+const pathnameMock = vi.fn(() => "/dashboard");
 
-vi.mock('next/navigation', () => ({
+vi.mock("next/navigation", () => ({
   usePathname: () => pathnameMock(),
   useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
+  // `CaseWorkspace` reads `?tab=` to deep-link a workspace tab. Without
+  // this it throws before rendering anything and axe would be handed an
+  // empty container.
+  useSearchParams: () => new URLSearchParams(""),
 }));
 
 // framer-motion's `motion.x` returns a real DOM tag and forwards refs. The
 // production build pulls in IntersectionObserver and animation timers we
 // don't need for static-DOM accessibility checks, so stub it out.
-vi.mock('framer-motion', () => {
+vi.mock("framer-motion", () => {
   const factory = (Tag: React.ElementType) =>
     function MotionStub(props: Record<string, unknown>) {
       const { children, ...rest } = props as {
@@ -92,11 +96,11 @@ vi.mock('framer-motion', () => {
   };
 });
 
-vi.mock('react-hot-toast', () => ({
+vi.mock("react-hot-toast", () => ({
   default: { error: vi.fn(), success: vi.fn() },
 }));
 
-vi.mock('@/lib/api', () => ({
+vi.mock("@/lib/api", () => ({
   authApi: {
     isAuthenticated: () => false,
     login: vi.fn(),
@@ -108,32 +112,45 @@ vi.mock('@/lib/api', () => ({
     getHistory: vi.fn(() => Promise.resolve([])),
   },
   tenantsApi: {
-    me: vi.fn(() => Promise.reject(new Error('unauthenticated'))),
+    me: vi.fn(() => Promise.reject(new Error("unauthenticated"))),
   },
   msspApi: {
     listChildren: vi.fn(() => Promise.resolve([])),
   },
-  getActiveTenantId: vi.fn(() => ''),
+  casesApi: {
+    list: vi.fn(() => Promise.resolve({ cases: [], total: 0 })),
+    get: vi.fn(() => Promise.resolve(null)),
+    getTimeline: vi.fn(() => Promise.resolve({ events: [] })),
+    update: vi.fn(),
+  },
+  graphApi: {
+    attackPath: vi.fn(() => Promise.resolve(null)),
+  },
+  realtimeApi: {
+    subscribe: vi.fn(() => () => {}),
+  },
+  apiFetch: vi.fn(() => Promise.resolve(null)),
+  getActiveTenantId: vi.fn(() => ""),
   setActiveTenantId: vi.fn(),
 }));
 
 // Sidebar reads version from package.json — mock it so the import doesn't
 // fail when running outside the actual apps/web working directory.
-vi.mock('../../../package.json', () => ({
-  default: { version: '0.0.0-test' },
+vi.mock("../../../package.json", () => ({
+  default: { version: "0.0.0-test" },
 }));
 
 // Component imports go after the mocks so the mocks are resolved first.
-import { Hero } from '../components/landing/Hero';
-import { StartHero } from '../components/onboarding/StartHero';
-import { ThemeToggle } from '../components/theme/ThemeToggle';
-import { ThemeProvider } from '../components/theme/ThemeProvider';
-import { TopBar } from '../components/layout/TopBar';
-import { TimeWindowProvider } from '../components/layout/TimeWindowProvider';
-import { TenantProvider } from '../components/layout/TenantProvider';
-import { Sidebar } from '../components/layout/Sidebar';
-import { EmptyState } from '../components/ui/EmptyState';
-import { CopilotDock } from '../components/copilot/CopilotDock';
+import { Hero } from "../components/landing/Hero";
+import { StartHero } from "../components/onboarding/StartHero";
+import { ThemeToggle } from "../components/theme/ThemeToggle";
+import { ThemeProvider } from "../components/theme/ThemeProvider";
+import { TopBar } from "../components/layout/TopBar";
+import { TimeWindowProvider } from "../components/layout/TimeWindowProvider";
+import { TenantProvider } from "../components/layout/TenantProvider";
+import { Sidebar } from "../components/layout/Sidebar";
+import { EmptyState } from "../components/ui/EmptyState";
+import { CopilotDock } from "../components/copilot/CopilotDock";
 
 afterEach(() => {
   cleanup();
@@ -144,7 +161,7 @@ afterEach(() => {
 // is the single source of truth for contrast and is reviewed manually.
 const axeOptions = {
   rules: {
-    'color-contrast': { enabled: false },
+    "color-contrast": { enabled: false },
   },
 };
 
@@ -152,78 +169,129 @@ const axeOptions = {
  * empty state. Deliberately small: this suite measures accessibility, not
  * data handling, and a large fixture would make a failure hard to read. */
 function swrFixture(key: string): unknown {
-  if (key.startsWith('alerts/') || (key.includes('/alerts/') && !key.endsWith('/alerts'))) {
+  if (key.startsWith("alerts/") || (key.includes("/alerts/") && !key.endsWith("/alerts"))) {
     return {
-      id: 'a1',
-      title: 'Encoded PowerShell from Office',
-      severity: 'high',
-      status: 'new',
+      id: "a1",
+      title: "Encoded PowerShell from Office",
+      severity: "high",
+      status: "new",
       confidence: 72,
       // camelCase: `normalizeAlert` has already run by the time the rail
       // reads this, so the fixture has to be the normalised shape rather
       // than the API's.
-      createdAt: '2026-10-01T12:00:00Z',
+      createdAt: "2026-10-01T12:00:00Z",
       riskScore: 68,
-      narrative: 'A macro-enabled document spawned an encoded PowerShell command.',
-      entities: [{ group: 'host', kind: 'hostname', value: 'WIN-FIN-01', label: 'WIN-FIN-01' }],
-      timeline: [{ id: 'e1', timestamp: '2026-10-01T12:00:00Z', title: 'Process created' }],
-      recommended_actions: [{ id: 'r1', title: 'Isolate the host', risk: 'high' }],
+      narrative: "A macro-enabled document spawned an encoded PowerShell command.",
+      entities: [{ group: "host", kind: "hostname", value: "WIN-FIN-01", label: "WIN-FIN-01" }],
+      timeline: [{ id: "e1", timestamp: "2026-10-01T12:00:00Z", title: "Process created" }],
+      recommended_actions: [{ id: "r1", title: "Isolate the host", risk: "high" }],
     };
   }
-  if (key.endsWith('/alerts') || key.includes('/alerts?')) {
+  if (key.endsWith("/alerts") || key.includes("/alerts?")) {
     return {
       items: [
         {
-          id: 'a1',
-          title: 'Encoded PowerShell from Office',
-          severity: 'high',
-          status: 'new',
-          created_at: '2026-10-01T12:00:00Z',
-          connector_type: 'CrowdStrike Falcon',
+          id: "a1",
+          title: "Encoded PowerShell from Office",
+          severity: "high",
+          status: "new",
+          created_at: "2026-10-01T12:00:00Z",
+          connector_type: "CrowdStrike Falcon",
         },
       ],
       total: 1,
     };
   }
-  if (key.includes('/cases/')) {
+  // `CasesView` keys on `['cases', status, severity]`, so the joined form
+  // is `cases/all/all` rather than a path. Matching on a leading segment
+  // rather than on a slash-wrapped fragment is what makes both the list
+  // and the single-case keys reachable.
+  // `CasesView` keys on `['cases', status, severity]`, so the joined form
+  // is `cases/all/all` rather than a path. Matching on a leading segment
+  // rather than on a slash-wrapped fragment is what makes both the list
+  // and the single-case keys reachable.
+  //
+  // camelCase throughout, like the alert fixture above: the API's
+  // snake_case has already been normalised by the time a component reads
+  // it, and a snake_case fixture leaves every date `Invalid time value`
+  // and every view rendering an error instead of itself.
+  if (key === "cases" || key.startsWith("cases/")) {
     return {
-      id: 'c1',
-      title: 'Suspected macro delivery',
-      status: 'open',
-      severity: 'high',
-      created_at: '2026-10-01T12:00:00Z',
-      alerts: [],
+      cases: [
+        {
+          id: "c1",
+          caseNumber: "CASE-0001",
+          title: "Suspected macro delivery",
+          summary: "A macro-enabled document spawned an encoded PowerShell command.",
+          status: "open",
+          severity: "high",
+          createdAt: "2026-10-01T12:00:00Z",
+          updatedAt: "2026-10-01T12:30:00Z",
+          assignee: "alice@corp.example",
+          alertCount: 1,
+          confidence: 72,
+          tags: ["phishing"],
+        },
+      ],
+      total: 1,
+      page: 1,
+      pageSize: 25,
+    };
+  }
+  if (key === "war-rooms" || key.startsWith("war-rooms/")) {
+    // Depth 9.4 panel: a list, and empty is the state every stock install is
+    // in. The panel's empty state is what axe should see.
+    return [];
+  }
+  if (key === "case" || key.startsWith("case/") || key.includes("/cases/")) {
+    return {
+      id: "c1",
+      caseNumber: "CASE-0001",
+      title: "Suspected macro delivery",
+      description: "A macro-enabled document spawned an encoded PowerShell command.",
+      status: "open",
+      severity: "high",
+      createdAt: "2026-10-01T12:00:00Z",
+      updatedAt: "2026-10-01T12:30:00Z",
+      dueAt: null,
+      assignee: "alice@corp.example",
+      alertCount: 1,
+      alertIds: ["a1"],
+      resolution: null,
+      mitre: [],
+      tags: ["phishing"],
+      tasks: [],
       timeline: [],
     };
   }
   return undefined;
 }
 
-describe('WCAG 2.1 AA — high-traffic surfaces', () => {
-  it('Landing Hero has no accessibility violations', async () => {
+describe("WCAG 2.1 AA — high-traffic surfaces", () => {
+  it("Landing Hero has no accessibility violations", async () => {
     const { container } = render(<Hero />);
     const results = await axe(container, axeOptions);
     expect(results).toHaveNoViolations();
   });
 
-  it('Onboarding StartHero has no accessibility violations', async () => {
+  it("Onboarding StartHero has no accessibility violations", async () => {
     const { container } = render(<StartHero />);
     const results = await axe(container, axeOptions);
     expect(results).toHaveNoViolations();
   });
 
-  it('ThemeToggle has no accessibility violations', async () => {
+  it("ThemeToggle has no accessibility violations", async () => {
     const { container } = render(
       <ThemeProvider>
         <ThemeToggle />
-      </ThemeProvider>,
+      </ThemeProvider>
     );
     const results = await axe(container, axeOptions);
     expect(results).toHaveNoViolations();
   });
 
-  it('TopBar has no accessibility violations', async () => {
-    pathnameMock.mockReturnValue('/dashboard');
+  it("TopBar has no accessibility violations", async () => {
+    pathnameMock.mockReturnValue("/dashboard");
     const { container } = render(
       <ThemeProvider>
         <TimeWindowProvider>
@@ -231,31 +299,31 @@ describe('WCAG 2.1 AA — high-traffic surfaces', () => {
             <TopBar />
           </TenantProvider>
         </TimeWindowProvider>
-      </ThemeProvider>,
+      </ThemeProvider>
     );
     const results = await axe(container, axeOptions);
     expect(results).toHaveNoViolations();
   });
 
-  it('Sidebar has no accessibility violations', async () => {
-    pathnameMock.mockReturnValue('/alerts');
+  it("Sidebar has no accessibility violations", async () => {
+    pathnameMock.mockReturnValue("/alerts");
     const { container } = render(
       <ThemeProvider>
         <Sidebar />
-      </ThemeProvider>,
+      </ThemeProvider>
     );
     const results = await axe(container, axeOptions);
     expect(results).toHaveNoViolations();
   });
 
-  it('EmptyState has no accessibility violations', async () => {
+  it("EmptyState has no accessibility violations", async () => {
     const { container } = render(
-          <EmptyState
-                icon={<svg aria-hidden="true" />}
-                title="No alerts found"
-                description="There are no alerts matching your filters."
-                action={<button type="button">Clear filters</button>}
-              />,
+      <EmptyState
+        icon={<svg aria-hidden="true" />}
+        title="No alerts found"
+        description="There are no alerts matching your filters."
+        action={<button type="button">Clear filters</button>}
+      />
     );
     const results = await axe(container, axeOptions);
     expect(results).toHaveNoViolations();
@@ -266,12 +334,12 @@ describe('WCAG 2.1 AA — high-traffic surfaces', () => {
    * operator view below asserts it rendered something substantial first. */
   function assertRenderedSomething(container: HTMLElement, what: string) {
     const interactive = container.querySelectorAll(
-      'button, a, input, select, textarea, [role="tab"], [role="button"], table, h1, h2',
+      'button, a, input, select, textarea, [role="tab"], [role="button"], table, h1, h2'
     );
     expect(
       interactive.length,
       `${what} rendered ${interactive.length} interactive or structural elements, so axe ` +
-        'passed on an empty or loading view rather than on the real one',
+        "passed on an empty or loading view rather than on the real one"
     ).toBeGreaterThan(2);
   }
 
@@ -282,51 +350,83 @@ describe('WCAG 2.1 AA — high-traffic surfaces', () => {
   // ones above. These are the views an analyst spends their day in, and
   // they were covered by nothing.
 
-  it('AlertsView (the queue and alert list) has no accessibility violations', async () => {
-    pathnameMock.mockReturnValue('/alerts');
-    const { AlertsView } = await import('@/components/alerts/AlertsView');
+  it("AlertsView (the queue and alert list) has no accessibility violations", async () => {
+    pathnameMock.mockReturnValue("/alerts");
+    const { AlertsView } = await import("@/components/alerts/AlertsView");
     const { container } = render(
       <ThemeProvider>
         <AlertsView />
-      </ThemeProvider>,
+      </ThemeProvider>
     );
-    assertRenderedSomething(container, 'AlertsView');
+    assertRenderedSomething(container, "AlertsView");
     const results = await axe(container, axeOptions);
     expect(results).toHaveNoViolations();
   });
 
-  it('InvestigationRail has no accessibility violations', async () => {
-    pathnameMock.mockReturnValue('/alerts');
-    const { InvestigationRail } = await import('@/components/alerts/InvestigationRail');
+  it("InvestigationRail has no accessibility violations", async () => {
+    pathnameMock.mockReturnValue("/alerts");
+    const { InvestigationRail } = await import("@/components/alerts/InvestigationRail");
     const { container } = render(
       <ThemeProvider>
         <InvestigationRail alertId="a1" onClose={() => {}} />
-      </ThemeProvider>,
+      </ThemeProvider>
     );
-    assertRenderedSomething(container, 'InvestigationRail');
+    assertRenderedSomething(container, "InvestigationRail");
     const results = await axe(container, axeOptions);
     expect(results).toHaveNoViolations();
   });
 
-  it('SettingsView has no accessibility violations', async () => {
-    pathnameMock.mockReturnValue('/settings');
-    const { SettingsView } = await import('@/components/settings/SettingsView');
+  it("SettingsView has no accessibility violations", async () => {
+    pathnameMock.mockReturnValue("/settings");
+    const { SettingsView } = await import("@/components/settings/SettingsView");
     const { container } = render(
       <ThemeProvider>
         <SettingsView />
-      </ThemeProvider>,
+      </ThemeProvider>
     );
-    assertRenderedSomething(container, 'SettingsView');
+    assertRenderedSomething(container, "SettingsView");
     const results = await axe(container, axeOptions);
     expect(results).toHaveNoViolations();
   });
 
-  it('CopilotDock (collapsed) has no accessibility violations', async () => {
-    pathnameMock.mockReturnValue('/dashboard');
+  // The case workspace, which 4.7 left uncovered and said so. The plan
+  // names five views -- the queue, the alert list, the case workspace, the
+  // investigation rail and settings -- and this is the pair that was
+  // missing: the list an analyst picks a case from, and the page they then
+  // spend the investigation in.
+
+  it("CasesView (the case list) has no accessibility violations", async () => {
+    pathnameMock.mockReturnValue("/cases");
+    const { CasesView } = await import("@/components/cases/CasesView");
+    const { container } = render(
+      <ThemeProvider>
+        <CasesView />
+      </ThemeProvider>
+    );
+    assertRenderedSomething(container, "CasesView");
+    const results = await axe(container, axeOptions);
+    expect(results).toHaveNoViolations();
+  });
+
+  it("CaseWorkspace has no accessibility violations", async () => {
+    pathnameMock.mockReturnValue("/cases/c1");
+    const { CaseWorkspace } = await import("@/components/cases/CaseWorkspace");
+    const { container } = render(
+      <ThemeProvider>
+        <CaseWorkspace caseId="c1" />
+      </ThemeProvider>
+    );
+    assertRenderedSomething(container, "CaseWorkspace");
+    const results = await axe(container, axeOptions);
+    expect(results).toHaveNoViolations();
+  });
+
+  it("CopilotDock (collapsed) has no accessibility violations", async () => {
+    pathnameMock.mockReturnValue("/dashboard");
     const { container } = render(
       <ThemeProvider>
         <CopilotDock />
-      </ThemeProvider>,
+      </ThemeProvider>
     );
     const results = await axe(container, axeOptions);
     expect(results).toHaveNoViolations();

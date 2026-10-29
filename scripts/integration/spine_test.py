@@ -291,9 +291,14 @@ async def full_spine_test() -> None:
         # fingerprint of the original telemetry, not a bare title.
         alert = await get_alert_titled(client, title)
         assert alert is not None
-        for field, expected in [("severity", "critical"), ("status", "new")]:
-            if alert.get(field) != expected:
-                raise SystemExit(f"alert.{field}={alert.get(field)!r}, expected {expected!r}")
+        if alert.get("severity") != "critical":
+            raise SystemExit(f"alert.severity={alert.get('severity')!r}, expected 'critical'")
+        # 'new' is the state the row is born in; 'triaged' means auto-triage
+        # already reached it, which depth 4.4's per-entity concurrency now
+        # routinely manages inside this test's own window. Both prove the
+        # spine delivered the alert; anything else is a real wrong state.
+        if alert.get("status") not in ("new", "triaged"):
+            raise SystemExit(f"alert.status={alert.get('status')!r}, expected 'new' or 'triaged'")
         techniques = alert.get("mitre_techniques") or []
         if "T1003" not in techniques:
             raise SystemExit(f"ATT&CK enrichment lost in transit: {techniques}")

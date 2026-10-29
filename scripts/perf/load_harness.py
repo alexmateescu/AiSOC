@@ -85,6 +85,11 @@ from gate_toolkit import repo_root, self_test_main  # noqa: E402
 #: pins the two together, because a silent disagreement would look like a
 #: pipeline that lost every event.
 MARKER_PREFIX = "aisoc-load"
+#: Must equal ``BenignMarkerPrefix`` in services/demo-producer/main.go.
+#: The two prefixes are distinguishable because the alerting one is
+#: always followed by a space and the run id, so a `like` on
+#: "aisoc-load <run> %" cannot match a benign title.
+BENIGN_MARKER_PREFIX = "aisoc-load-benign"
 
 #: ``aisoc-load <run-id> seq=<n> t=<unix-nanoseconds>``
 _TITLE_RE = re.compile(rf"^{re.escape(MARKER_PREFIX)} (?P<run>[A-Za-z0-9_-]+) seq=(?P<seq>\d+) t=(?P<sent>\d+)$")
@@ -227,6 +232,61 @@ def compose_target(project_dir: Path, compose_files: list[str], ingest_url: str)
     )
 
 
+def _fusion_replicas(target: Target) -> int | None:
+    """How many fusion containers were actually running, or None.
+
+    Counted from the runtime rather than from a compose file, because a file
+    says what was requested and a rate is produced by what was running. Both
+    deployment shapes already expose a listing command for the resource
+    sampler, so this reads the same source the samples came from.
+    """
+    if not target.stats:
+        return None
+    try:
+        done = subprocess.run(  # noqa: S603 - fixed argv, same prefix the sampler uses
+            target.stats, capture_output=True, text=True, timeout=45, check=False
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if done.returncode != 0:
+        return None
+    # A fusion container is named for its service in both runtimes; a worker
+    # or a one-shot named after it is not a replica serving the spine.
+    count = sum(1 for line in done.stdout.splitlines() if "fusion" in line.split("\t")[0].split()[0].lower())
+    return count or None
+
+
+def _kafka_partitions(target: Target, group: str = _FUSION_GROUP) -> int | None:
+    """Partitions the fusion group is consuming, or None.
+
+    Read from the same `--describe` output the lag measurement uses, which
+    prints one row per partition, so this adds no new dependency and cannot
+    disagree with the lag figure published beside it.
+    """
+    if not target.kafka:
+        return None
+    try:
+        done = subprocess.run(  # noqa: S603
+            [*target.kafka, "--bootstrap-server", "localhost:9092", "--describe", "--group", group],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if done.returncode != 0:
+        return None
+    partitions: set[str] = set()
+    for line in done.stdout.splitlines():
+        fields = line.split()
+        # GROUP TOPIC PARTITION ...; the header and blank lines have no digit
+        # in the third column.
+        if len(fields) >= 3 and fields[2].isdigit():
+            partitions.add(f"{fields[1]}:{fields[2]}")
+    return len(partitions) or None
+
+
 def kubernetes_target(namespace: str, release: str, ingest_url: str, postgres_ref: str, kafka_ref: str) -> Target:
     kubectl = ["kubectl", "-n", namespace]
     return Target(
@@ -266,6 +326,40 @@ class ProducerSummary:
     @property
     def accepted_eps(self) -> float:
         return float(self.raw["accepted_eps"])
+
+    @property
+    def alerting_sent(self) -> int | None:
+        """How many events the producer sent in the alerting shape.
+
+        ``None`` for a summary written before the realistic mix existed,
+        which is the honest answer rather than falling back to the
+        accepted count and quietly grading an old run against a
+        denominator it never had.
+        """
+        value = self.raw.get("alerting_events_sent")
+        return int(value) if value is not None else None
+
+    @property
+    def benign_sent(self) -> int:
+        return int(self.raw.get("benign_events_sent") or 0)
+
+    @property
+    def alert_every(self) -> int:
+        return int(self.raw.get("alert_every") or 1)
+
+    @property
+    def payload_bytes_per_event(self) -> float | None:
+        """Mean request-body bytes per attempted event, measured at the wire.
+
+        ``None`` for a summary written by a producer from before the counter
+        existed — the honest answer, exactly like ``alerting_sent`` above,
+        rather than a default that looks like a measurement.
+        """
+        value = self.raw.get("payload_bytes_per_event")
+        if value is None:
+            return None
+        parsed = float(value)
+        return parsed if parsed > 0 else None
 
 
 @dataclass
@@ -363,13 +457,27 @@ def run_producer(
     target_eps: int,
     run_id: str,
     summary_path: Path,
+    alert_every: int = 1,
 ) -> ProducerSummary:
+    # Where `go run` is invoked from, which is not the repository root. The
+    # producer is its own module (`services/demo-producer/go.mod`) and there
+    # is no go.mod at the root, so `go run ./services/demo-producer` with
+    # cwd=root fails before it starts:
+    #
+    #     go: go.mod file not found in current directory or any parent
+    #     directory; see 'go help modules'
+    #
+    # The harness has therefore never produced a run from a clean checkout
+    # on the path it documents. A prebuilt `--producer-bin` still runs from
+    # the root, because it needs the module context of neither.
+    cwd = root
     if producer_bin:
         argv = [producer_bin]
     else:
         if not shutil.which("go"):
             raise RuntimeError("no --producer-bin given and `go` is not on PATH to build services/demo-producer")
-        argv = ["go", "run", "./services/demo-producer"]
+        argv = ["go", "run", "."]
+        cwd = root / "services" / "demo-producer"
     argv += [
         "--load",
         "--ingest-url",
@@ -390,11 +498,28 @@ def run_producer(
         run_id,
         "--summary",
         str(summary_path),
+        "--alert-every",
+        str(max(1, alert_every)),
     ]
-    done = subprocess.run(argv, cwd=root, capture_output=True, text=True, check=False)  # noqa: S603
+    done = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, check=False)  # noqa: S603
     if done.returncode != 0:
         raise RuntimeError(f"producer failed ({done.returncode}): {(done.stderr or done.stdout).strip()[-600:]}")
     return ProducerSummary(json.loads(summary_path.read_text(encoding="utf-8")))
+
+
+def count_benign_alerts(target: Target, run_id: str) -> int:
+    """Alerts raised by events that were supposed to raise none.
+
+    Counted rather than assumed zero. The whole point of the realistic
+    mix is that benign telemetry reaches the lake and produces nothing;
+    an all-alerting harness cannot observe that property at all, and a
+    mix that never checks it is the same harness with more events.
+    """
+    raw = target.sql(f"select count(*) from alerts where title like '{BENIGN_MARKER_PREFIX} {run_id} %'")
+    try:
+        return int(raw or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def collect_alerts(target: Target, run_id: str) -> list[AlertRow]:
@@ -470,13 +595,20 @@ def build_report(
     drain_seconds: float,
     settled: bool,
     shape: dict[str, Any] | None = None,
+    benign_alerts: int = 0,
 ) -> dict[str, Any]:
     accepted = summary.accepted
     seen: dict[int, int] = {}
     for row in alerts:
         seen[row.seq] = seen.get(row.seq, 0) + 1
     duplicates = sum(count - 1 for count in seen.values() if count > 1)
-    missing = accepted - len(seen)
+    # Against the population that was supposed to alert, not against every
+    # accepted event. With a realistic mix the benign majority raises
+    # nothing by design, and counting it as missing would report a perfect
+    # run as having lost 99% of its events — and `--assert-no-loss` would
+    # fail every mix run for the thing the mix exists to do.
+    alerting_population = summary.alerting_sent if summary.alerting_sent is not None else accepted
+    missing = max(0, alerting_population - len(seen))
 
     latencies_ms: list[float] = sorted(((row.created_epoch + clock_offset) - row.sent_epoch) * 1000.0 for row in alerts)
 
@@ -507,11 +639,29 @@ def build_report(
     else:
         metrics["pipeline_eps"] = unmeasured("pipeline_eps", "alerts/s", "fewer than two alerts landed")
 
+    # Depth plan 4.4. With a realistic mix most accepted events are benign
+    # and are *supposed* to produce no alert, so dividing alerts by accepted
+    # events would report a delivery ratio of 0.01 for a pipeline that lost
+    # nothing. The denominator is the alerting population the producer
+    # actually sent, which it counts rather than computing from
+    # `total / alert_every` — a run that stops early would otherwise be
+    # graded against an expectation it never reached.
+    expected_alerting = summary.alerting_sent if summary.alerting_sent is not None else accepted
     metrics["delivery_ratio"] = (
-        measured("delivery_ratio", "fraction", len(seen) / accepted, accepted)
-        if accepted > 0
-        else unmeasured("delivery_ratio", "fraction", "ingest accepted no events")
+        measured("delivery_ratio", "fraction", len(seen) / expected_alerting, expected_alerting)
+        if expected_alerting > 0
+        else unmeasured("delivery_ratio", "fraction", "no alerting events were sent")
     )
+
+    # The property the realistic mix exists to assert. Benign telemetry
+    # reaching the lake and producing no alert is what a real estate looks
+    # like; benign telemetry that alerts means the corpus is firing on
+    # routine traffic, which is the failure the mix is designed to expose
+    # and which an all-alerting harness cannot see at all.
+    if summary.benign_sent:
+        metrics["benign_alert_rate"] = measured("benign_alert_rate", "fraction", benign_alerts / summary.benign_sent, summary.benign_sent)
+    else:
+        metrics["benign_alert_rate"] = unmeasured("benign_alert_rate", "fraction", "no benign events were sent (alert-every is 1)")
 
     for key, (value, reason) in (("consumer_lag_in_flight", lag_in_flight), ("consumer_lag_drained", lag_drained)):
         metrics[key] = measured(key, "messages", float(value), 1) if value is not None else unmeasured(key, "messages", reason)
@@ -543,6 +693,10 @@ def build_report(
             "accepted_events": accepted,
             "alerts_observed": len(alerts),
             "distinct_events_alerted": len(seen),
+            "alerting_events_sent": summary.alerting_sent,
+            "benign_events_sent": summary.benign_sent,
+            "benign_events_that_alerted": benign_alerts,
+            "alert_every": summary.alert_every,
             "missing_events": missing,
             "duplicate_alert_rows": duplicates,
             "push_wall_seconds": summary.wall_seconds,
@@ -613,6 +767,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--assert-eps-floor", type=float, help="fail if pipeline throughput is below this")
     parser.add_argument("--assert-p95-ceiling-ms", type=float, help="fail if p95 event-to-alert latency exceeds this")
     parser.add_argument("--assert-no-loss", action="store_true", help="fail if any accepted event produced no alert")
+    parser.add_argument(
+        "--alert-every",
+        type=int,
+        default=1,
+        help=(
+            "send one alerting event every Nth event and benign telemetry in between. 1 (the default) "
+            "keeps the historical all-alerting load; 100 is a realistic estate where almost nothing alerts"
+        ),
+    )
+    parser.add_argument(
+        "--assert-benign-alert-rate-max",
+        type=float,
+        help=(
+            "fail if more than this fraction of the benign events raised an alert. Only meaningful with "
+            "--alert-every above 1; the realistic mix exists to make this measurable"
+        ),
+    )
     args = parser.parse_args(argv)
 
     root = repo_root()
@@ -658,6 +829,7 @@ def main(argv: list[str] | None = None) -> int:
         target_eps=args.target_eps,
         run_id=run_id,
         summary_path=summary_path,
+        alert_every=args.alert_every,
     )
     # Sampled immediately after the push rather than after the drain: the
     # queue is at its deepest here, and a lag read once the pipeline has caught
@@ -670,7 +842,11 @@ def main(argv: list[str] | None = None) -> int:
     settled = False
     while time.time() - drain_started < args.drain_timeout:
         count = int(target.sql(f"select count(*) from alerts where title like '{MARKER_PREFIX} {run_id} %'") or 0)
-        if count >= summary.accepted:
+        # With a realistic mix most accepted events are benign and raise
+        # nothing, so waiting for one alert per accepted event would always
+        # time out and report the drain as unsettled. The target is the
+        # alerting population the producer counted.
+        if count >= (summary.alerting_sent if summary.alerting_sent is not None else summary.accepted):
             settled = True
             break
         if count == previous and count > 0:
@@ -705,6 +881,33 @@ def main(argv: list[str] | None = None) -> int:
     }
     if args.target == "compose":
         shape["hosts"] = 1
+    # `throughput_claims.py` requires `payload_bytes` beside `ingest_eps` —
+    # wired as a gate in depth 5.8, after which the job failed every
+    # scheduled run for seventeen days because nothing ever recorded the
+    # key (the fan-out half of the same gap was fixed in #1218; this is the
+    # payload half). Read from what the producer actually sent — it counts
+    # request-body bytes at the marshal — and omitted, not defaulted, when
+    # an older producer summary lacks the counter, so the grader says
+    # "unreproducible" instead of publishing a guess.
+    payload_bytes = summary.payload_bytes_per_event
+    if payload_bytes is not None:
+        shape["payload_bytes"] = round(payload_bytes)
+    # `throughput_claims.py` requires both of these beside an alert-path rate,
+    # and it is right to: that rate is the one a reader uses to decide whether
+    # a deployment keeps up, and it means nothing without the fan-out it was
+    # measured at. Both are *read from the running deployment* -- a default
+    # written down here would be a guess that looks like a measurement, which
+    # is the failure the required-context rule exists to catch.
+    #
+    # Omitted, not defaulted, when the deployment cannot be asked. The grader
+    # then says the number is unreproducible, which is true, instead of
+    # publishing it beside a replica count nobody verified.
+    replicas = _fusion_replicas(target)
+    if replicas is not None:
+        shape["fusion_replicas"] = replicas
+    partitions = _kafka_partitions(target)
+    if partitions is not None:
+        shape["kafka_partitions"] = partitions
 
     report = build_report(
         target=target,
@@ -720,6 +923,7 @@ def main(argv: list[str] | None = None) -> int:
         drain_seconds=drain_seconds,
         settled=settled,
         shape=shape,
+        benign_alerts=count_benign_alerts(target, run_id),
     )
     report["run"]["total_wall_seconds"] = time.time() - push_started
 
@@ -744,6 +948,18 @@ def main(argv: list[str] | None = None) -> int:
             failures.append(f"p95 latency {body['value']:.0f}ms exceeds the ceiling {args.assert_p95_ceiling_ms:.0f}ms")
     if args.assert_no_loss and report["run"]["missing_events"] > 0:
         failures.append(f"{report['run']['missing_events']} accepted events produced no alert")
+    if args.assert_benign_alert_rate_max is not None:
+        body = report["metrics"]["benign_alert_rate"]
+        if not body["measured"]:
+            # Not a pass. A ceiling on a figure that was not measured is a
+            # gate that reports success for a run it could not grade, which
+            # is the shape this repository keeps finding.
+            failures.append(f"the benign alert rate was not measured ({body['reason']}), so the ceiling cannot be met")
+        elif body["value"] > args.assert_benign_alert_rate_max:
+            failures.append(
+                f"{body['value']:.4f} of benign events raised an alert, above the ceiling "
+                f"{args.assert_benign_alert_rate_max:.4f}; the corpus is firing on routine traffic"
+            )
 
     for failure in failures:
         print(f"FAIL: {failure}", file=sys.stderr)

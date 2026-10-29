@@ -27,7 +27,7 @@ from typing import Any
 
 import httpx
 import pytest
-from app._vendor.aisoc_benchmark.replay import LATENCY_LINE_PREFIX, format_replay_report, score_replay
+from app._vendor.aisoc_benchmark.replay import LATENCY_LINE_PREFIXES, format_replay_report, score_replay
 from app.api.v1.deps import CurrentUser, get_current_user
 from app.api.v1.endpoints.evaluations import StartReplayRequest
 from app.api.v1.endpoints.evaluations import router as evaluations_router
@@ -204,10 +204,15 @@ class TestExport:
         after = stripped.split("\n")
         assert len(original) == len(after)
         differing = [(a, b) for a, b in zip(original, after, strict=True) if a != b]
-        assert len(differing) == 1
-        assert differing[0][0].startswith(LATENCY_LINE_PREFIX)
-        assert differing[0][1].startswith(LATENCY_LINE_PREFIX)
-        assert "not reproducible" in differing[0][1]
+        # A property, not a count. The report carries more than one
+        # host-measured line since the scorecard added "time to verdict",
+        # and what has to hold is that the export touches *only* lines the
+        # stripper declares -- not that there happens to be one of them.
+        assert differing, "the export changed nothing while claiming to exclude latency"
+        for before, line in differing:
+            assert before.startswith(LATENCY_LINE_PREFIXES), f"excluded a line it does not declare: {before!r}"
+            assert line.startswith(LATENCY_LINE_PREFIXES)
+            assert "not reproducible" in line
 
     def test_the_json_export_nulls_latency_rather_than_dropping_the_keys(self) -> None:
         score = score_replay(_corpus()).as_dict()
@@ -291,6 +296,26 @@ class _StubSession:
 
     def __init__(self, connector: Any = None) -> None:
         self._connector = connector
+
+    async def begin_nested(self) -> Any:
+        """A SAVEPOINT. The job wraps each optional context read in one.
+
+        Modelled here rather than left off: a double that cannot do what
+        the real session can is how a defect reaches production with a
+        green suite behind it. The frozen-context reads need savepoints
+        because PostgreSQL aborts the whole transaction on a failed
+        statement, so catching the error is not enough to keep the later
+        write alive.
+        """
+
+        class _Savepoint:
+            async def rollback(self) -> None:
+                return None
+
+            async def commit(self) -> None:
+                return None
+
+        return _Savepoint()
 
     async def execute(self, *args: Any, **kwargs: Any) -> Any:
         connector = self._connector

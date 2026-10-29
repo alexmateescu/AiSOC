@@ -111,8 +111,26 @@ def compute_entry_hash(
     return h.hexdigest()
 
 
-def verify_chain_breaks(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def verify_chain_breaks(
+    rows: list[dict[str, Any]],
+    *,
+    anchor_prev_hash: str | None = None,
+) -> list[dict[str, Any]]:
     """Replay ``rows`` (oldest → newest, same tenant) and return **every** break.
+
+    ``anchor_prev_hash`` is the predecessor the first row should name, and
+    it exists for one reason: depth 8.1 gave the audit log an enforced
+    retention window, and a truncated chain no longer starts at the
+    genesis row. Without the anchor the oldest survivor names a
+    predecessor that has been lawfully removed, the replay reports
+    ``prev_hash mismatch`` at index 0, and a perfectly intact chain reads
+    as tampered with — which is the worst answer a control like this can
+    give, because it is indistinguishable from the real thing.
+
+    The anchor comes from ``aisoc_audit_checkpoints.first_retained_prev_hash``,
+    written by ``audit_retention_truncate`` in the same transaction as the
+    delete. It defaults to ``None``, which is the genesis case and what
+    every caller that has not been truncated still gets.
 
     :func:`verify_chain` stops at the first violation, which is the right
     answer to "is this chain intact?" and the wrong one for an auditor, who
@@ -131,7 +149,7 @@ def verify_chain_breaks(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     broken too. One forked append otherwise reads as thousands of failures.
     """
     breaks: list[dict[str, Any]] = []
-    prev_hash: str | None = None
+    prev_hash: str | None = anchor_prev_hash
     started = False
 
     def _note(idx: int, row: dict[str, Any], reason: str) -> None:
@@ -201,7 +219,50 @@ def verify_chain_breaks(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return breaks
 
 
-def verify_chain(rows: list[dict[str, Any]]) -> tuple[bool, int | None, str | None]:
+def verify_chain_tail(rows: list[dict[str, Any]], head: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Compare the newest chained row with the stored chain head.
+
+    :func:`verify_chain_breaks` checks the links *between* rows, so deleting
+    the newest rows leaves a chain that replays cleanly: every surviving link
+    is still valid. ``audit_chain_head`` remembers where the chain ended
+    (``next_index``, ``head_hash``), which is what makes truncation visible.
+
+    Read the head **before** the rows. An append that lands between the two
+    reads only makes the newest row newer than the head, which is not a
+    break; a deleted tail leaves the newest row short of it, which is.
+
+    Returns ``None`` when the tail matches, else a break dict with ``reason``
+    and ``missing`` (rows the head says exist and the table does not have).
+    """
+    if not head or head.get("next_index") is None:
+        return None
+    head_next = int(head["next_index"])
+    indexed = [r for r in rows if r.get("chain_index") is not None and r.get("entry_hash")]
+    newest = max(indexed, key=lambda r: int(r["chain_index"])) if indexed else None
+    newest_next = int(newest["chain_index"]) + 1 if newest else 0
+    if newest_next >= head_next:
+        if newest_next == head_next and newest is not None and head.get("head_hash") not in (None, newest.get("entry_hash")):
+            return {
+                "reason": "chain head hash does not match the newest row",
+                "missing": 0,
+                "chain_index": newest_next - 1,
+            }
+        return None
+    return {
+        "reason": (
+            f"chain head expects next_index {head_next} but the newest row is "
+            f"chain_index {newest_next - 1}: {head_next - newest_next} row(s) missing from the tail"
+        ),
+        "missing": head_next - newest_next,
+        "chain_index": newest_next - 1,
+    }
+
+
+def verify_chain(
+    rows: list[dict[str, Any]],
+    *,
+    anchor_prev_hash: str | None = None,
+) -> tuple[bool, int | None, str | None]:
     """Replay ``rows`` (oldest → newest, same tenant) and verify the chain.
 
     Each row must expose the same field names as
@@ -216,7 +277,7 @@ def verify_chain(rows: list[dict[str, Any]]) -> tuple[bool, int | None, str | No
     Use :func:`verify_chain_breaks` when the full picture matters; this is
     the same replay reporting only its first finding.
     """
-    breaks = verify_chain_breaks(rows)
+    breaks = verify_chain_breaks(rows, anchor_prev_hash=anchor_prev_hash)
     if not breaks:
         return True, None, None
     first = breaks[0]

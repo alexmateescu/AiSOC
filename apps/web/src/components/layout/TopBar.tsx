@@ -15,6 +15,7 @@ import { useTenant } from './TenantProvider';
 const routeLabels: Record<string, { title: string; description: string }> = {
   '/detection/catalog': { title: 'Detection Catalog', description: 'Curated rule packs and templates' },
   '/settings/rbac': { title: 'Roles & Permissions', description: 'Access control and team management' },
+  '/settings/mfa': { title: 'Two-factor authentication', description: 'Your second factor, and whether this tenant requires one' },
   '/settings/users': { title: 'Users', description: 'Member and role management' },
   '/dashboard': { title: 'Dashboard', description: 'SOC overview and metrics' },
   '/alerts': { title: 'Alerts', description: 'Security alerts and incidents' },
@@ -27,6 +28,7 @@ const routeLabels: Record<string, { title: string; description: string }> = {
   '/playbooks': { title: 'Playbooks', description: 'Automated response and SOAR workflows' },
   '/marketplace': { title: 'Marketplace', description: 'Plugins, integrations, and content packs' },
   '/honeytokens': { title: 'Honeytokens', description: 'Deception assets and trip-wire alerts' },
+  '/ai-estate': { title: 'AI Estate', description: 'Observed AI apps, agents, MCP servers, keys and grants' },
   '/purple-team': { title: 'Purple Team', description: 'Adversary emulation and detection coverage' },
   '/connectors': { title: 'Connectors', description: 'Security tool integrations' },
   '/compliance': { title: 'Compliance', description: 'Frameworks, controls, and evidence' },

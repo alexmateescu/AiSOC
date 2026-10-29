@@ -59,15 +59,16 @@ For `mode: logs` (the `status` / `level` attribute):
 
 | AiSOC severity | Datadog log status |
 |---|---|
-| `high`   | `emergency`, `alert`, `critical` |
-| `medium` | `error` |
-| `low`    | `warn`, `warning` |
-| `info`   | `notice`, `info`, `debug`, missing |
+| `critical` | `emergency`, `alert`, `critical` |
+| `medium`   | `error` |
+| `low`      | `warn`, `warning` |
+| `info`     | `notice`, `info`, `debug`, missing |
 
-The split between `critical` (→ high) and `error` (→ medium) is
-deliberate: keeping `critical`/`alert`/`emergency` on its own tier
-means a paging event stays distinguishable from a routine 5xx in the
-alert queue.
+Datadog log statuses follow syslog ordering, in which `emergency` (0)
+and `alert` (1) outrank `critical` (2) — so all three map to AiSOC's
+top tier. Mapping `emergency` or `alert` below `critical` would invert
+the vendor's own ladder. Nothing from `mode: logs` maps to `high`;
+routine `error` logs stay at `medium`, below anything that pages.
 
 For `mode: events` (the monitor `alert_type` attribute):
 

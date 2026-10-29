@@ -149,6 +149,15 @@ readiness probe for `api`, `ingest`, `alert-fusion`, `agents` and `realtime`.
 It used to wire `/health` for both probes, and `/health` answers 200 while the
 process is alive whatever its consumer is doing.
 
+Readiness also reports per-service dependency keys: Fusion reports `database`,
+`lake_writer` and `kafka`; Agents and Actions report `database`; Ingest reports
+`kafka` and `graph`; Realtime reports `kafka`. A value of `false` names the
+unavailable dependency. Probes are bounded to 1.5 seconds. The ClickHouse lake
+and Neo4j graph are auxiliary projections: their loss is reported as degraded,
+but they do not remove the event pipeline from service. Postgres and the Kafka
+spine are required and fail readiness when unavailable. Realtime exposes the
+same Kafka report on `/readyz` (and keeps `/health` and `/healthz` compatible).
+
 A detached replica is therefore pulled out of service but **not** killed. That
 is deliberate: restarting on readiness failure turns a broker or schema fault
 into a restart loop that hides the cause. What the chart does instead is
@@ -158,6 +167,38 @@ election) cannot leave a pod running with nothing consuming.
 
 If `/readyz` is 503 for a fusion replica, look at the broker before you look at
 the pod.
+
+### The API's own probes: liveness and dependency readiness
+
+The API additionally answers two unauthenticated endpoints — a load balancer
+or probe has no credential, and the bodies carry only booleans about the
+service's own dependencies:
+
+- `GET /api/v1/health` — **liveness**: the process serves HTTP, and nothing
+  else is claimed. It deliberately touches no store, because a liveness probe
+  that fails when a dependency is down invites the orchestrator to restart a
+  healthy process, converting an outage into an outage plus a restart storm.
+- `GET /api/v1/health/ready` — **readiness**: can this service do its job
+  right now, named per dependency. `database` is a *block* dependency: the
+  API is the system of record's front door, so without PostgreSQL the status
+  goes **503** and a balancer should stop sending traffic here — the body
+  still names every dependency, because failing *with the reason* is the
+  point. `cache` is a *degrade* dependency: Redis loss is reported
+  (`cache: false`) while the status stays **200**, because failing readiness
+  over a cache would pull the API out of the balancer to fix a cache.
+
+Each probe is hard-capped (1.5 s) well inside a prober's read budget, so a
+store that is down produces "down and we say so" rather than a probe that
+waits out a connect timeout and says nothing. `services/threatintel`'s
+`/health` names its Qdrant leg the same way: `vector_store` is degrade — IOC
+ingestion continues without it and enrichment responses say the similarity
+leg was skipped.
+
+These are distinct from `/readyz` above: `/readyz` answers for *consumer
+subscriptions* (is anything consuming), the dependency probes answer for
+*stores* (can a request be served). The weekly chaos store-outage grader
+(`scripts/chaos/store_outage.py`) reads exactly these keys while a store is
+down, so their contract is exercised, not just published.
 
 ## Migrations
 

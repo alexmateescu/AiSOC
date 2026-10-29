@@ -1,7 +1,14 @@
 # AiSOC ops runbook — live deployment
 
-Host: `10.200.0.69` (SSH `ubuntu@`, key `~/.ssh/c8r-tech-key`)
-Repo/compose project: `/home/ubuntu/AiSOC` (compose project name `aisoc`)
+Host: your deployment's address (SSH user and key are yours)
+Repo/compose project: `$AISOC_ROOT`, wherever you cloned it (compose
+project name `aisoc`)
+
+> The commands below use `$AISOC_ROOT` rather than a literal path. Set it
+> once — `export AISOC_ROOT="$(git rev-parse --show-toplevel)"` — and they
+> run on any host. This file previously named one contributor's home
+> directory and private IP, which read as instructions and worked on
+> exactly one machine.
 Origin: `https://github.com/beenuar/AiSOC` · Fork: `https://github.com/alexmateescu/AiSOC`
 
 ## Service map (container → host port → role)

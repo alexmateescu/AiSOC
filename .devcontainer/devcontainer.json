@@ -46,7 +46,13 @@
   "onCreateCommand": "pnpm install --frozen-lockfile",
   "//postStartCommand": "Starts dockerd. Runs on every container start rather than only at create, so a Codespace stop/resume comes back with a working daemon — `onCreateCommand` would leave the second boot without one.",
   "postStartCommand": "bash .devcontainer/start-docker.sh",
-  "postAttachCommand": "echo '\\n>>> AiSOC dev container is ready.\\n>>> To run the demo, open a terminal and run:\\n>>>     pnpm aisoc:demo --no-open\\n>>> Then click the forwarded port 3000 in the Ports panel.\\n>>> Or, no-Docker:  pip install -e packages/aisoc-sandbox && aisoc-sandbox demo\\n'",
+  // `make up`, not `pnpm aisoc:demo`. The demo compose file has no ingest
+  // service, no fusion service and Kafka disabled — its own header says not
+  // to use it to evaluate whether AiSOC works — so pointing a fresh
+  // Codespace at it showed a populated console that had never run the
+  // pipeline. Both installers were rewritten to remove that handoff; this
+  // banner was the last place still sending people to it.
+  "postAttachCommand": "echo '\\n>>> AiSOC dev container is ready.\\n>>> To run the real stack, open a terminal and run:\\n>>>     make up      # starts it and creates your administrator\\n>>>     make smoke   # proves the pipeline end to end\\n>>> Then click the forwarded port 3000 in the Ports panel.\\n>>> Or, no-Docker:  pip install -e packages/aisoc-sandbox && aisoc-sandbox demo\\n'",
   "remoteUser": "node",
   "containerEnv": {
     "AISOC_DEV_MODE": "1"

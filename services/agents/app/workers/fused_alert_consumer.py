@@ -35,6 +35,7 @@ import asyncio
 import contextlib
 import json
 import os
+import time
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -62,6 +63,7 @@ from app.playbook import alert_trigger
 from app.routing.model_router import is_deterministic_mode
 from app.security.llm_resolver import resolve_llm_config
 from app.workers.business_context import BusinessContextApplier
+from app.workers.entity_lane import EntityLanes, entity_of
 from app.workers.shadow_mode import (
     LiveShadowModePolicy,
     ShadowDecision,
@@ -77,6 +79,12 @@ from app.workers.triage_persistence import (
 )
 
 logger = structlog.get_logger()
+
+#: How long the commit window may stay open when the topic is quieter
+#: than the concurrency bound. A policy choice: five seconds of replay
+#: after a crash is cheap, and leaving finished work uncommitted
+#: indefinitely is not.
+_COMMIT_WINDOW_SECONDS = 5.0
 
 _NAMESPACE = uuid.uuid5(uuid.NAMESPACE_URL, "tryaisoc.com/agents/auto-triage")
 
@@ -102,6 +110,7 @@ _METRICS = {
     "outcome_written": 0,
     "outcome_suppressed": 0,
     "ungrounded_demoted": 0,
+    "llm_failed_held_for_review": 0,
     "persist_retries": 0,
     "dead_lettered": 0,
     "approvals_raised": 0,
@@ -287,6 +296,36 @@ def build_state(message: dict[str, Any]) -> InvestigationState | None:
     )
 
 
+# Severities a failed model call may not close. The deterministic scorer is a
+# fallback for when the model is unreachable, and on a laptop CPU or a gateway
+# with the wrong base URL that is every call. Observed: a critical
+# "ransomware canary files encrypted" alert, vssadmin deleting shadow copies,
+# came back `likely_benign` from the fallback after the LLM timed out.
+_FAIL_CLOSED_SEVERITIES = frozenset({"critical", "high"})
+
+
+def _hold_severe_for_review_after_llm_failure(state: InvestigationState) -> InvestigationState:
+    """Fail closed: an LLM error is never the reason a severe alert closes.
+
+    Only auto-closeable verdicts on high or critical alerts change, and only on
+    the path where the model was asked and failed. A deployment that runs
+    deterministic triage on purpose keeps today's behaviour.
+    """
+    severity = str((state.raw_alert or {}).get("severity") or "").strip().lower()
+    if severity not in _FAIL_CLOSED_SEVERITIES:
+        return state
+    verdict = state.verdict
+    if normalize_disposition(str(verdict or ""), default=NEEDS_REVIEW) not in AUTO_CLOSEABLE_DISPOSITIONS:
+        return state
+    state.add_finding(
+        f"LLM triage failed, so the deterministic verdict '{verdict}' on a {severity}-severity "
+        "alert is held for review instead of closing it."
+    )
+    state.verdict = NEEDS_REVIEW
+    _METRICS["llm_failed_held_for_review"] += 1
+    return state
+
+
 class FusedAlertTriageWorker:
     """Consumes ``aisoc.alerts.fused`` and auto-triages each alert (copilot)."""
 
@@ -317,6 +356,7 @@ class FusedAlertTriageWorker:
         writer: TriageWriter | None = None,
         context_reader: TriageContextReader | None = None,
         shadow_policy: ShadowModePolicy | None = None,
+        entity_concurrency: int | None = None,
     ) -> None:
         self._bootstrap = bootstrap_servers
         self._topic = topic
@@ -337,6 +377,11 @@ class FusedAlertTriageWorker:
         # Phase B4 — environment-specific noise reduction applied post-fusion →
         # pre-triage. None = disabled (no rules file / flag off).
         self._business_context = business_context
+        # Parity 6.9. Concurrency across entities, order within one.
+        # Declared here rather than created in `start` so a test that
+        # builds this worker without a broker still has lanes — the same
+        # reason the sinks above are class-level defaults.
+        self._lanes = EntityLanes(entity_concurrency)
 
     async def start(self) -> None:
         from aiokafka import AIOKafkaConsumer  # noqa: PLC0415 — optional dep, only at runtime
@@ -355,7 +400,13 @@ class FusedAlertTriageWorker:
         await self._consumer.start()
         self._running = True
         self._attached = True
-        logger.info("auto_triage_worker.started", topic=self._topic, group=self._group_id)
+        logger.info(
+            "auto_triage_worker.started",
+            topic=self._topic,
+            group=self._group_id,
+            entity_concurrency=self._lanes.limit,
+        )
+        last_commit = time.monotonic()
         try:
             async for msg in self._consumer:
                 if not self._running:
@@ -371,18 +422,59 @@ class FusedAlertTriageWorker:
                 # of another method: the loop must not depend on a callee
                 # staying total, which is exactly how the ueba consumer came
                 # to have no ``except`` on its only handler.
-                try:
-                    await self._process_with_retry(msg.value)
-                except Exception as exc:  # noqa: BLE001 — one alert must not end the subscription
-                    _METRICS["errors"] += 1
-                    logger.error(
-                        "auto_triage_worker.handler_escaped",
-                        error=str(exc),
-                        error_type=type(exc).__name__,
-                        partition=getattr(msg, "partition", None),
-                        offset=getattr(msg, "offset", None),
-                        exc_info=True,
-                    )
+                # Parity 6.9. Triage is an LLM call, so this stage spends
+                # almost all of its time waiting; it used to wait one alert
+                # at a time. Alerts about *different* entities now run
+                # concurrently up to a bound, and alerts about one entity
+                # still run in arrival order — they are the ones most
+                # likely to be one incident, and triage reads institutional
+                # memory that earlier triages of the same entity wrote, so
+                # racing them turns a deterministic verdict into a coin
+                # toss.
+                payload = msg.value if isinstance(msg.value, dict) else {}
+                partition = getattr(msg, "partition", None)
+                offset = getattr(msg, "offset", None)
+
+                async def _handle(value=msg.value, partition=partition, offset=offset) -> None:
+                    try:
+                        await self._process_with_retry(value)
+                    except Exception as exc:  # noqa: BLE001 — one alert must not end the subscription
+                        _METRICS["errors"] += 1
+                        logger.error(
+                            "auto_triage_worker.handler_escaped",
+                            error=str(exc),
+                            error_type=type(exc).__name__,
+                            partition=partition,
+                            offset=offset,
+                            exc_info=True,
+                        )
+
+                await self._lanes.submit(entity_of(payload), _handle)
+
+                # Commit only after everything in flight has finished, and
+                # only when the window is full or has been open long
+                # enough. Committing with work in flight would break the
+                # at-least-once contract this loop's own comment
+                # describes: a crash after the commit loses an alert that
+                # was never triaged.
+                #
+                # The time bound matters as much as the count. Without it
+                # a topic that goes quiet below the concurrency bound
+                # leaves the last few alerts triaged and uncommitted
+                # indefinitely, so a restart replays work that was already
+                # done — correct, and wasteful every single time.
+                window_full = self._lanes.in_flight >= self._lanes.limit
+                window_old = (time.monotonic() - last_commit) >= _COMMIT_WINDOW_SECONDS
+                if window_full or window_old:
+                    await self._lanes.drain()
+                    last_commit = time.monotonic()
+                    try:
+                        await self._consumer.commit()
+                    except Exception as commit_exc:  # noqa: BLE001 — reprocess on restart
+                        logger.warning("auto_triage_worker.commit_failed", error=str(commit_exc))
+                    continue
+
+                await self._lanes.drain()
                 try:
                     await self._consumer.commit()
                 except Exception as commit_exc:  # noqa: BLE001 — reprocess on restart
@@ -1143,7 +1235,7 @@ class FusedAlertTriageWorker:
             logger.warning("auto_triage_worker.llm_failed_fallback", error=str(exc))
             state = await run_triage(state)
             _METRICS["deterministic"] += 1
-            return state, "deterministic"
+            return _hold_severe_for_review_after_llm_failure(state), "deterministic"
 
     def _apply_groundedness_gate(
         self,
@@ -1258,6 +1350,10 @@ class FusedAlertTriageWorker:
             # only inside a findings string.
             groundedness=state.groundedness,
             ungrounded=(state.groundedness is not None and state.groundedness < _groundedness_floor()),
+            # The prompt and response behind the verdict (issue #1276).
+            # Empty on the deterministic path, which is the honest value
+            # there — no model was asked, so there is nothing to replay.
+            llm_exchanges=list(state.llm_exchanges),
         )
 
     @staticmethod

@@ -36,20 +36,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_USER: aisoc
-          POSTGRES_PASSWORD: aisoc_ci_only
-          POSTGRES_DB: aisoc
-        ports: ["5432:5432"]
-        options: >-
-          --health-cmd "pg_isready -U aisoc"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 20
-
     env:
       # The runtime role, not the owner. POSTGRES_USER (aisoc) is a superuser
       # and ignores every RLS policy even under FORCE ROW LEVEL SECURITY, so
@@ -67,6 +53,10 @@ jobs:
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Start PostgreSQL with registry fallback
+        uses: ./.github/actions/start-postgres
+        with:
+          password: aisoc_ci_only
 
       - uses: actions/setup-python@e9d6f990972a57673cdb72ec29e19d42ba28880f # v6
         with:
@@ -102,6 +92,19 @@ jobs:
           ISOLATION_AUDIT_DSN: ${{ env.AUDIT_DSN }}
           DATABASE_URL: ${{ env.AUDIT_DSN }}
         run: python -m pytest ../../tests/isolation/test_audit_forgery_live.py -v --tb=short
+
+      # The immutability suite ran in no workflow at all between #1231 and
+      # here — a live suite attached to nothing grades nothing. It drives two
+      # connections because the two refusal layers bind different roles: the
+      # runtime role is refused by 117's privilege revoke, the owner only by
+      # the trigger, and the tenant-erasure cases (issue #1330, ADR-0014)
+      # must cross both.
+      - name: Audit rows cannot be deleted or edited; tenant erasure is the one path through
+        working-directory: services/api
+        env:
+          ISOLATION_AUDIT_DSN: ${{ env.AUDIT_DSN }}
+          ISOLATION_AUDIT_OWNER_DSN: ${{ env.DATABASE_MIGRATION_URL }}
+        run: python -m pytest ../../tests/isolation/test_audit_immutability_live.py -v --tb=short
 
       # The negative control.
       #

@@ -164,6 +164,16 @@ const SEVERITIES: readonly FieldOption[] = [
   { value: 'critical', label: 'Critical' },
 ];
 
+const WAIT_UNTIL: readonly FieldOption[] = [
+  { value: 'timer', label: 'A timer' },
+  { value: 'callback', label: 'A callback' },
+];
+
+const PARALLEL_JOINS: readonly FieldOption[] = [
+  { value: 'all', label: 'All branches must succeed' },
+  { value: 'any', label: 'Any one branch is enough' },
+];
+
 const OSQUERY_BACKENDS: readonly FieldOption[] = [
   { value: 'osctrl', label: 'osctrl' },
   { value: 'fleetdm', label: 'FleetDM' },
@@ -259,9 +269,10 @@ export const STEP_SCHEMAS: Record<StepType, StepSchema> = {
   },
   notify: {
     type: 'notify',
-    execution: 'executed',
+    execution: 'governed',
     label: 'Notify',
-    description: 'Send a notification to Slack, PagerDuty, email, or a generic webhook.',
+    description:
+      'Send a notification to the tenant\u2019s configured Slack, Teams, email or PagerDuty destination. The destination is a named playbook reference, so a shared pack carries no webhook of its own.',
     accent: '#facc15',
     bgColor: '#1a3d2e',
     icon: '🔔',
@@ -294,8 +305,8 @@ export const STEP_SCHEMAS: Record<StepType, StepSchema> = {
         key: 'webhook_env',
         label: 'Webhook URL env',
         kind: 'env_ref',
-        placeholder: 'SOC_WEBHOOK_URL',
-        help: 'Required only for the generic webhook channel.',
+        placeholder: 'SLACK_SOC_WEBHOOK',
+        help: 'Names a playbook reference holding the Slack or Teams incoming webhook. Configure it under Settings; a reference is disabled until somebody enables it.',
       },
     ],
   },
@@ -490,12 +501,89 @@ export const STEP_SCHEMAS: Record<StepType, StepSchema> = {
     // condition has no params — its predicate lives on `step.condition`.
     fields: [],
   },
+  wait: {
+    type: 'wait',
+    execution: 'executed',
+    label: 'Wait',
+    description:
+      'Hold the run for a timer or until something calls back. A short timer sleeps in place; anything longer becomes a durable pause that survives a restart, on the same mechanism the approval step uses.',
+    accent: '#a78bfa',
+    bgColor: '#241a40',
+    icon: '\u23F3',
+    shortCode: 'wait',
+    fields: [
+      {
+        key: 'until',
+        label: 'Wait for',
+        kind: 'select',
+        required: true,
+        options: WAIT_UNTIL,
+        defaultValue: 'timer',
+      },
+      {
+        key: 'seconds',
+        label: 'Seconds',
+        kind: 'number',
+        placeholder: '300',
+        help: 'Required for a timer. Up to 60 seconds runs in place; longer suspends the run and resumes it on a sweep.',
+      },
+    ],
+  },
+  parallel: {
+    type: 'parallel',
+    execution: 'executed',
+    label: 'Parallel',
+    description:
+      'Run the child steps at the same time and join. Each branch gets its own copy of the run context, so two branches cannot overwrite each other and leave whichever finished last to win.',
+    accent: '#38bdf8',
+    bgColor: '#102a3a',
+    icon: '\u21C9',
+    shortCode: 'par',
+    fields: [
+      {
+        key: 'join',
+        label: 'Join',
+        kind: 'select',
+        required: true,
+        options: PARALLEL_JOINS,
+        defaultValue: 'all',
+      },
+    ],
+  },
+  loop: {
+    type: 'loop',
+    execution: 'executed',
+    label: 'Loop',
+    description:
+      'Run the child steps once per item in a list from the run context. Bounded: the iteration ceiling is reported in the result rather than silently truncating, because a loop that quietly stopped at 25 of 300 sessions leaves 275 live.',
+    accent: '#34d399',
+    bgColor: '#10332a',
+    icon: '\u21BB',
+    shortCode: 'loop',
+    fields: [
+      {
+        key: 'over',
+        label: 'Over',
+        kind: 'string',
+        required: true,
+        placeholder: 'sessions',
+        help: 'A dot-path into the run context that resolves to a list. Each iteration binds `item` and `index`.',
+      },
+      {
+        key: 'max_iterations',
+        label: 'Max iterations',
+        kind: 'number',
+        placeholder: '25',
+        help: 'Capped at 100 whatever is set here.',
+      },
+    ],
+  },
   osquery_live_query: {
     type: 'osquery_live_query',
-    execution: 'executed',
+    execution: 'governed',
     label: 'Live query',
     description:
-      'Run an allowlisted osquery query across hosts through osctrl, FleetDM or the AiSOC agent. The query itself is a template ID, not free SQL, so a playbook cannot ask an endpoint an arbitrary question. Needs an agents image carrying the osquery backend clients; without them the engine fails the step rather than reporting a query it never sent.',
+      'Run an allowlisted osquery query across hosts through osctrl, FleetDM or the AiSOC agent. The query itself is a template ID, not free SQL, so a playbook cannot ask an endpoint an arbitrary question. Dispatched through the action registry, which is where the three backend clients live \u2014 the engine used to import them from a service its own image does not contain, so every live query raised.',
     accent: '#2dd4bf',
     bgColor: '#123333',
     icon: '🔎',
@@ -572,6 +660,65 @@ export const STEP_SCHEMAS: Record<StepType, StepSchema> = {
         help:
           'Leave blank for the deployment default. An undecided approval expires with a ' +
           'recorded outcome rather than leaving the run waiting forever.',
+      },
+    ],
+  },
+  verify_user: {
+    type: 'verify_user',
+    execution: 'executed',
+    label: 'Verify with the user',
+    description:
+      'Asks the affected person whether they recognise the activity, then their manager if ' +
+      'nobody answers, and resumes the run with the signed answer so a later condition can ' +
+      'branch on it. Never sent on a confirmed true positive, and auto-sent only for alert ' +
+      'classes this tenant opted into.',
+    accent: '#a78bfa',
+    bgColor: '#2a2440',
+    icon: '🙋',
+    shortCode: 'vfy',
+    fields: [
+      USER_TARGET,
+      {
+        key: 'channel',
+        label: 'Ask over',
+        kind: 'select',
+        required: false,
+        options: [
+          { value: 'slack', label: 'Slack' },
+          { value: 'teams', label: 'Teams' },
+          { value: 'email', label: 'Email' },
+        ],
+        help: 'Which configured destination the question goes out on. Defaults to Slack.',
+      },
+      {
+        key: 'message_template',
+        label: 'Question',
+        kind: 'textarea',
+        required: false,
+        placeholder: 'We saw a sign-in to your account from a new country. Was this you?',
+        help:
+          'What the person reads. The three answer links are appended automatically; do not ' +
+          'write your own, because only a signed link can be accepted.',
+      },
+      {
+        key: 'manager',
+        label: 'Escalate to',
+        kind: 'string',
+        required: false,
+        placeholder: 'Leave blank to use the directory',
+        help:
+          'Who is asked if the person does not answer. Blank resolves the manager from SCIM; ' +
+          'a name here overrides the directory.',
+      },
+      {
+        key: 'expires_in_hours',
+        label: 'Expires after (hours)',
+        kind: 'number',
+        required: false,
+        placeholder: '24',
+        help:
+          'Leave blank for the deployment default. An unanswered question resumes the run ' +
+          'with a `timed_out` outcome rather than leaving it waiting forever.',
       },
     ],
   },

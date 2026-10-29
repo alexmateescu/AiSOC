@@ -17,16 +17,17 @@ Coverage is explicit and honest:
 
 * **okta** — fully assembled here: fetch the user, then its groups and assigned
   apps, and build the resolver's `principals/groups/apps/admin_roles` snapshot.
-* **aws / azure / gcp / gws** — consume a connector-provided *reconciled*
-  snapshot: the connector returns the full provider snapshot for the sentinel
-  resource id `__posture_snapshot__`. Connectors that haven't implemented that
-  yet surface as "no snapshot" (the endpoint still 412s, same as before) — so
-  we never fabricate a cloud snapshot we didn't actually collect.
+* **aws / azure / gcp / gws / github** — consume a connector-provided
+  *reconciled* snapshot: the connector returns the full provider snapshot for
+  the sentinel resource id `__posture_snapshot__`. Connectors that haven't
+  implemented that yet surface as "no snapshot" (the endpoint still 412s, same
+  as before) — so we never fabricate a snapshot we didn't actually collect.
 """
 
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -44,6 +45,7 @@ PROVIDER_CONNECTOR = {
     "azure": "azure_entra",
     "gcp": "gcp_scc",
     "gws": "google_workspace",
+    "github": "github",
 }
 
 # Sentinel resource id: connectors that expose a full reconciled provider
@@ -103,36 +105,71 @@ async def _collect_okta(principal_id: str, fetcher: ResourceConfigFetcher, at_ts
     }
 
 
+@dataclass(frozen=True)
+class CollectedSnapshot:
+    """A collected snapshot and how complete the collector says it is.
+
+    The gap travels with the data on purpose. An earlier shape returned the
+    bare snapshot dict and dropped ``partial`` and the notes on the floor, so
+    a collection that 403'd halfway through a page of role assignments was
+    indistinguishable from one that read the whole estate -- and the
+    difference is an identity that looks harmless because the policy granting
+    it everything was in the part nobody could read.
+    """
+
+    snapshot: dict[str, Any]
+    partial: bool = False
+    notes: tuple[str, ...] = ()
+
+    def __bool__(self) -> bool:
+        """Truthy only when something was actually collected.
+
+        Callers test this to decide between answering and 412-ing, so an
+        empty snapshot must be falsy however complete the collector claims
+        it was: zero principals means a lost read permission far more often
+        than it means an empty estate.
+        """
+        return bool(self.snapshot)
+
+
 async def collect_snapshot(
     provider: str,
     principal_id: str,
     *,
     fetcher: ResourceConfigFetcher,
     at_ts: str = "",
-) -> dict[str, Any]:
+) -> CollectedSnapshot:
     """Collect a resolver snapshot for ``provider``/``principal_id``.
 
-    Returns an empty dict when nothing could be collected (the endpoint then
-    surfaces the same 412 as before — we never fabricate a snapshot).
+    Returns an empty snapshot when nothing could be collected (the endpoint
+    then surfaces the same 412 as before — we never fabricate a snapshot).
     """
     connector_id = PROVIDER_CONNECTOR.get(provider)
     if connector_id is None:
-        return {}
+        return CollectedSnapshot({})
     try:
         if provider == "okta":
-            return await _collect_okta(principal_id, fetcher, at_ts)
+            # Assembled here rather than by the connector, and assembled from
+            # reads that either succeed or raise, so there is no partial state
+            # for it to report.
+            return CollectedSnapshot(await _collect_okta(principal_id, fetcher, at_ts))
         # Cloud providers: consume a connector-provided reconciled snapshot.
         cfg = await fetcher(connector_id, POSTURE_SNAPSHOT_ID, at_ts)
         snap = cfg.get("snapshot") if isinstance(cfg, dict) else None
         if isinstance(snap, dict) and snap:
-            return snap
+            notes = cfg.get("collection_notes")
+            return CollectedSnapshot(
+                snapshot=snap,
+                partial=bool(cfg.get("partial")),
+                notes=tuple(str(n) for n in notes) if isinstance(notes, list) else (),
+            )
         # Some connectors may already return the snapshot at the top level.
         if isinstance(cfg, dict) and any(k in cfg for k in ("principals", "users", "policies", "role_assignments")):
-            return cfg
-        return {}
+            return CollectedSnapshot(cfg)
+        return CollectedSnapshot({})
     except Exception as exc:  # noqa: BLE001 — collection failure => empty (412), never a crash
         logger.warning("posture_loader.collect_failed", provider=provider, error=str(exc))
-        return {}
+        return CollectedSnapshot({})
 
 
 class HttpResourceConfigFetcher:

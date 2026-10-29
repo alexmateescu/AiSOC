@@ -45,6 +45,17 @@ type Config struct {
 	ShodanEnrichEnabled   bool
 	ShodanCacheExpirySecs int
 
+	// Geography, ASN and reputation on the activity projection's location
+	// block, read from services/enrichment rather than from a vendor
+	// directly: that service already merges the feeds and owns the keys,
+	// and a second merge here would drift from the one triage reads.
+	//
+	// Unset means off, which is why there is no separate enable flag. Only
+	// public addresses are ever sent (see activity.IsPublicIP).
+	EnrichmentServiceURL     string
+	EnrichmentCacheTTLSecs   int
+	EnrichmentTimeoutSeconds int
+
 	// CVE / vulnerability correlation.
 	//
 	// Off by default. Nothing in the platform consumes VulnKafkaTopic —
@@ -57,6 +68,43 @@ type Config struct {
 	VulnCorrelEnabled bool
 	VulnKafkaTopic    string // topic for VULNERABILITY_MATCH events
 	NvdAPIKey         string // optional NVD API key for higher rate limits
+
+	// Depth plan 4.2 — the syslog listener.
+	//
+	// Off by default: binding a port that nothing sends to is harmless but
+	// misleading, and 514 in particular needs either a capability or a
+	// published container port, which an operator has to decide.
+	//
+	// SyslogToken is a minted ingest token, and it is the *only* place the
+	// tenant can come from. Syslog carries no authenticated principal and
+	// no header, so anything read off the wire is sender-controlled — a
+	// tenant taken from a syslog field would be a cross-tenant write with
+	// no attacker effort at all. One listener therefore serves one tenant.
+	SyslogEnabled        bool
+	SyslogUDPAddr        string
+	SyslogTCPAddr        string
+	SyslogToken          string
+	SyslogBatchSize      int
+	SyslogFlushMs        int
+	SyslogMaxConnections int
+
+	// Depth plan 4.2 — the OTLP logs receiver and the customer Kafka input.
+	//
+	// Both off by default, and both take the tenant from a minted ingest
+	// token for the same reason syslog does: neither OTLP nor a Kafka
+	// record carries an authenticated principal, so a tenant read out of
+	// a resource attribute or a record header would be a cross-tenant
+	// write any instrumented process could perform.
+	//
+	// OTLPEnabled adds POST /v1/logs. There is no address of its own: the
+	// receiver shares the service's HTTP port, which is what an
+	// OpenTelemetry exporter expects to find behind one endpoint URL.
+	OTLPEnabled bool
+	// KafkaInputSources is a JSON array of source objects. An array rather
+	// than numbered variables because a deployment reading three tenants'
+	// topics needs three of everything, and numbered variables are how a
+	// fourth source silently gets the third one's token.
+	KafkaInputSources string
 
 	// Workstream 6 — universal capture push paths.
 	// InboxEnabled toggles the /v1/inbox/* routes. Off by default in
@@ -198,12 +246,27 @@ func Load() (*Config, error) {
 		ShodanEnrichEnabled:   getEnv("SHODAN_ENRICH_ENABLED", "false") == "true",
 		ShodanCacheExpirySecs: mustGetEnvInt("SHODAN_CACHE_EXPIRY_SECS", 3600),
 
+		// IOC enrichment for the activity projection's location block.
+		EnrichmentServiceURL:     getEnv("ENRICHMENT_SERVICE_URL", ""),
+		EnrichmentCacheTTLSecs:   mustGetEnvInt("ENRICHMENT_CACHE_TTL_SECS", 3600),
+		EnrichmentTimeoutSeconds: mustGetEnvInt("ENRICHMENT_TIMEOUT_SECS", 2),
+
 		// CVE correlation
 		VulnCorrelEnabled: getEnv("VULN_CORREL_ENABLED", "false") == "true",
 		VulnKafkaTopic:    getEnv("VULN_KAFKA_TOPIC", "aisoc.vulnerability_matches"),
 		NvdAPIKey:         getEnv("NVD_API_KEY", ""),
 
 		// Universal capture (Workstream 6).
+		SyslogEnabled:        getEnv("AISOC_SYSLOG_ENABLED", "false") == "true",
+		SyslogUDPAddr:        getEnv("AISOC_SYSLOG_UDP_ADDR", "0.0.0.0:5514"),
+		SyslogTCPAddr:        getEnv("AISOC_SYSLOG_TCP_ADDR", "0.0.0.0:5514"),
+		SyslogToken:          getEnv("AISOC_SYSLOG_TOKEN", ""),
+		SyslogBatchSize:      mustGetEnvInt("AISOC_SYSLOG_BATCH_SIZE", 500),
+		SyslogFlushMs:        mustGetEnvInt("AISOC_SYSLOG_FLUSH_MS", 2000),
+		SyslogMaxConnections: mustGetEnvInt("AISOC_SYSLOG_MAX_CONNECTIONS", 256),
+
+		OTLPEnabled:       getEnv("AISOC_OTLP_LOGS_ENABLED", "false") == "true",
+		KafkaInputSources: getEnv("AISOC_KAFKA_INPUT_SOURCES", ""),
 		InboxEnabled:      getEnv("INBOX_ENABLED", "true") == "true",
 		InboxTemplatesDir: getEnv("INBOX_TEMPLATES_DIR", "/app/templates"),
 		InboxMaxBodyBytes: int64(mustGetEnvInt("INBOX_MAX_BODY_BYTES", 10*1024*1024)),

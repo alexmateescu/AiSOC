@@ -17,6 +17,9 @@ from typing import Any, Final
 
 USER_SCHEMA: Final[str] = "urn:ietf:params:scim:schemas:core:2.0:User"
 GROUP_SCHEMA: Final[str] = "urn:ietf:params:scim:schemas:core:2.0:Group"
+#: The enterprise extension, which is where `manager` lives. Only ever
+#: emitted when there is a manager to emit.
+ENTERPRISE_USER_SCHEMA: Final[str] = "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User"
 LIST_RESPONSE_SCHEMA: Final[str] = "urn:ietf:params:scim:api:messages:2.0:ListResponse"
 ERROR_SCHEMA: Final[str] = "urn:ietf:params:scim:api:messages:2.0:Error"
 SERVICE_PROVIDER_CONFIG_SCHEMA: Final[str] = "urn:ietf:params:scim:schemas:core:2.0:ServiceProviderConfig"
@@ -49,6 +52,7 @@ def user_resource(
     created_at: datetime | None,
     updated_at: datetime | None,
     groups: list[tuple[uuid.UUID, str]] | None = None,
+    manager_ref: str | None = None,
 ) -> dict[str, Any]:
     """One SCIM User.
 
@@ -86,6 +90,12 @@ def user_resource(
         resource["groups"] = [
             {"value": str(group_id), "display": display, "$ref": f"{SCIM_BASE}/Groups/{group_id}"} for group_id, display in groups
         ]
+    if manager_ref:
+        # Echoed back, and the extension URN added to `schemas` alongside
+        # it. A provider that sent `manager` and reads a resource without
+        # it concludes the write was dropped and re-sends on every sync.
+        resource["schemas"] = [*resource["schemas"], ENTERPRISE_USER_SCHEMA]
+        resource[ENTERPRISE_USER_SCHEMA] = {"manager": {"value": manager_ref}}
     return resource
 
 

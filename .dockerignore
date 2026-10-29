@@ -38,6 +38,12 @@ terminals/
 
 # ─── Python (services/*) — excluded from the web build entirely ───────────────
 services/
+# …except the MCP server, which is a member of the root pnpm workspace and so
+# has to build from this context to get a `--frozen-lockfile` install against
+# the root `pnpm-lock.yaml`. Building it from `services/mcp/` would re-resolve
+# its `^` ranges on every build, which is the same commit producing two
+# different images. Costs the web build ~300 KB of TypeScript it ignores.
+!services/mcp
 **/__pycache__
 **/*.pyc
 **/*.pyo

@@ -114,6 +114,12 @@ DELIBERATE_DEFAULTS: dict[str, str] = {
     "OPENAI_MODEL": "a logical task alias the gateway defines",
     "LITELLM_MASTER_KEY": "the local gateway's own key; the gateway is in-network only",
     "LLM_GATEWAY_URL": "the compose hostname of the gateway",
+    "AISOC_LITELLM_REQUEST_TIMEOUT": (
+        "a duration in seconds, and the value the gateway actually runs with. It "
+        "was a literal inside infra/litellm/config.yaml, so raising it meant "
+        "editing a mounted file; it is surfaced here because CPU-only inference "
+        "on the bundled 3B model is the deployment that has to raise it"
+    ),
     "TAXII_FEEDS": "a real public MITRE ATT&CK TAXII endpoint",
     "CISA_KEV_ENABLED": "a boolean",
     "ABUSE_CH_ENABLED": "a boolean",
@@ -124,6 +130,8 @@ DELIBERATE_DEFAULTS: dict[str, str] = {
     "SPLUNK_PORT": "the Splunk management port",
     "SPLUNK_SCHEME": "a URL scheme",
     "SPLUNK_VERIFY_SSL": "a boolean, and the secure default",
+    "OPENCTI_VERIFY_SSL": "a boolean, and the secure default",
+    "OPENCTI_POLL_INTERVAL": "a duration in seconds, matching the other feed poll intervals",
     "AWS_REGION": "a region",
 }
 

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -20,9 +21,12 @@ import (
 	"github.com/beenuar/aisoc/services/ingest/internal/handler"
 	"github.com/beenuar/aisoc/services/ingest/internal/inbox"
 	"github.com/beenuar/aisoc/services/ingest/internal/ingestauth"
+	"github.com/beenuar/aisoc/services/ingest/internal/kafkainput"
 	"github.com/beenuar/aisoc/services/ingest/internal/normalizer"
+	"github.com/beenuar/aisoc/services/ingest/internal/otlp"
 	"github.com/beenuar/aisoc/services/ingest/internal/publisher"
 	"github.com/beenuar/aisoc/services/ingest/internal/server"
+	"github.com/beenuar/aisoc/services/ingest/internal/syslog"
 	"github.com/beenuar/aisoc/services/ingest/internal/telemetry"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog"
@@ -85,7 +89,10 @@ func main() {
 	// the graph writer NEVER block fusion ingest; the writer's queue is
 	// bounded and drops on full + emits a metric.
 	if cfg.GraphEnabled {
-		gctx, gcancel := context.WithTimeout(context.Background(), 10*time.Second)
+		// Derived from the package's own retry window rather than written
+		// here, plus headroom for the final attempt. An independent
+		// number is how the retry came to be capped at a sixth of it.
+		gctx, gcancel := context.WithTimeout(context.Background(), graph.ConnectRetryWindow()+15*time.Second)
 		gw, err := graph.New(gctx, graph.Config{
 			URI:           cfg.Neo4jURI,
 			Username:      cfg.Neo4jUser,
@@ -293,7 +300,161 @@ func main() {
 		log.Info().Msg("graph_ws: disabled (AISOC_GRAPH_WS_ENABLED!=true)")
 	}
 
-	srv := server.New(cfg, h, inboxHandler, graphWSServer)
+	// Depth plan 4.2 — the syslog listener. Off unless the operator asks
+	// for it, because binding 514 needs a decision they have to make.
+	//
+	// Needs the same two things the inbox needs (a token store to resolve
+	// the tenant, a template registry to normalise) plus a publisher, and
+	// refuses to start rather than listening without them: a bound socket
+	// that drops everything is indistinguishable from a working one.
+	var syslogListener *syslog.Listener
+	if cfg.SyslogEnabled {
+		switch {
+		case tokenStore == nil:
+			log.Error().Msg("syslog: not started — DATABASE_DSN is unset, so the configured ingest token cannot be resolved to a tenant")
+		case cfg.SyslogToken == "":
+			log.Error().Msg("syslog: not started — AISOC_SYSLOG_TOKEN is unset, so there is no tenant to attribute messages to. " +
+				"Mint one with POST /api/v1/inbox/tokens using the 'syslog' template")
+		default:
+			registry := inbox.NewRegistry()
+			if err := registry.LoadEmbedded(); err != nil {
+				log.Error().Err(err).Msg("syslog: not started — embedded templates failed to load")
+				break
+			}
+			if err := registry.Load(cfg.InboxTemplatesDir); err != nil {
+				log.Warn().Err(err).Str("dir", cfg.InboxTemplatesDir).Msg("syslog: template overrides on disk could not be read")
+			}
+			sink, err := syslog.NewPublishingSink(tokenStore, registry, pub, cfg.SyslogToken)
+			if err != nil {
+				log.Error().Err(err).Msg("syslog: not started")
+				break
+			}
+			listener, err := syslog.New(syslog.Config{
+				UDPAddr:        cfg.SyslogUDPAddr,
+				TCPAddr:        cfg.SyslogTCPAddr,
+				BatchSize:      cfg.SyslogBatchSize,
+				FlushInterval:  time.Duration(cfg.SyslogFlushMs) * time.Millisecond,
+				MaxConnections: cfg.SyslogMaxConnections,
+			}, sink)
+			if err != nil {
+				// Not fatal: the HTTP ingest path is this service's
+				// primary job and must not refuse traffic because 514 was
+				// taken. Loud, though — the operator asked for a listener
+				// and does not have one.
+				log.Error().Err(err).Msg("syslog: listener disabled")
+				break
+			}
+			syslogListener = listener
+			udpAddr, tcpAddr := listener.Addrs()
+			// /readyz names this listener and its state. A receiver nobody
+			// is sending to and a receiver that failed to bind look the
+			// same from outside unless readiness says which.
+			h.RegisterSubscription("syslog", func() handler.SubscriptionStatus {
+				state := listener.Health()
+				bound := state.UDPBound || state.TCPBound
+				return handler.SubscriptionStatus{
+					Attached:     bound,
+					NotResolving: !bound,
+					Detail:       syslogDetail(state),
+				}
+			})
+			log.Info().
+				Str("udp", udpAddr).
+				Str("tcp", tcpAddr).
+				Int("batch_size", cfg.SyslogBatchSize).
+				Msg("syslog: listener accepting RFC 5424, RFC 3164, CEF and LEEF")
+		}
+	} else {
+		log.Info().Msg("syslog: disabled (AISOC_SYSLOG_ENABLED!=true)")
+	}
+
+	// Depth plan 4.2 — the OTLP logs receiver. Off unless the operator asks
+	// for it. It shares the HTTP port rather than binding one of its own,
+	// because an OpenTelemetry exporter is configured with a single
+	// endpoint URL and appends /v1/logs itself.
+	var otlpReceiver *otlp.Receiver
+	if cfg.OTLPEnabled {
+		if tokenStore == nil {
+			log.Error().Msg("otlp: not started — DATABASE_DSN is unset, so an exporter's ingest token cannot be resolved to a tenant")
+		} else {
+			registry := inbox.NewRegistry()
+			if err := registry.LoadEmbedded(); err != nil {
+				log.Error().Err(err).Msg("otlp: not started — embedded templates failed to load")
+			} else {
+				if err := registry.Load(cfg.InboxTemplatesDir); err != nil {
+					log.Warn().Err(err).Str("dir", cfg.InboxTemplatesDir).Msg("otlp: template overrides on disk could not be read")
+				}
+				receiver, err := otlp.New(tokenStore, registry, pub)
+				if err != nil {
+					log.Error().Err(err).Msg("otlp: receiver disabled")
+				} else {
+					otlpReceiver = receiver
+					// /readyz names the receiver. An endpoint nobody is
+					// exporting to and one refusing every request look the
+					// same from outside unless readiness says which.
+					h.RegisterSubscription("otlp_logs", func() handler.SubscriptionStatus {
+						return handler.SubscriptionStatus{
+							Attached:     true,
+							NotResolving: false,
+							Detail:       receiver.Detail(),
+						}
+					})
+					log.Info().Str("path", "/v1/logs").Str("template", otlp.TemplateID).
+						Msg("otlp: logs receiver accepting protobuf and JSON")
+				}
+			}
+		}
+	} else {
+		log.Info().Msg("otlp: disabled (AISOC_OTLP_LOGS_ENABLED!=true)")
+	}
+
+	// Depth plan 4.2 — customer Kafka topics. One source per tenant; the
+	// tenant comes from each source's minted token and from nothing in the
+	// record.
+	var kafkaSources []*kafkainput.Source
+	if sources, err := kafkainput.ParseSources(cfg.KafkaInputSources); err != nil {
+		// Loud and specific. A malformed source list that started the
+		// service with the input silently off is the exact shape of defect
+		// this repository keeps finding.
+		log.Error().Err(err).Msg("kafka_input: no sources started — AISOC_KAFKA_INPUT_SOURCES could not be read")
+	} else if len(sources) > 0 {
+		if tokenStore == nil {
+			log.Error().Int("sources", len(sources)).
+				Msg("kafka_input: no sources started — DATABASE_DSN is unset, so their ingest tokens cannot be resolved to tenants")
+		} else {
+			registry := inbox.NewRegistry()
+			if err := registry.LoadEmbedded(); err != nil {
+				log.Error().Err(err).Msg("kafka_input: no sources started — embedded templates failed to load")
+			} else {
+				if err := registry.Load(cfg.InboxTemplatesDir); err != nil {
+					log.Warn().Err(err).Str("dir", cfg.InboxTemplatesDir).Msg("kafka_input: template overrides on disk could not be read")
+				}
+				for _, sc := range sources {
+					src, err := kafkainput.NewSource(sc, tokenStore, registry, pub)
+					if err != nil {
+						log.Error().Err(err).Str("source", sc.Name).Msg("kafka_input: source disabled")
+						continue
+					}
+					kafkaSources = append(kafkaSources, src)
+					name := sc.Name
+					h.RegisterSubscription("kafka_input:"+name, func() handler.SubscriptionStatus {
+						health := src.Health()
+						return handler.SubscriptionStatus{
+							Attached:     health.Attached,
+							NotResolving: health.NotResolving || health.PermanentFailure,
+							Detail:       health.Detail(),
+						}
+					})
+					log.Info().Str("source", sc.Name).Str("topic", sc.Topic).Str("group", sc.GroupID).
+						Msg("kafka_input: consuming a customer topic")
+				}
+			}
+		}
+	} else {
+		log.Info().Msg("kafka_input: no sources configured (AISOC_KAFKA_INPUT_SOURCES is empty)")
+	}
+
+	srv := server.New(cfg, h, inboxHandler, graphWSServer, otlpReceiver)
 
 	// Graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
@@ -302,6 +463,23 @@ func main() {
 	if graphWSBroker != nil {
 		graphWSBroker.Start(ctx)
 		defer graphWSBroker.Stop()
+	}
+
+	for _, src := range kafkaSources {
+		src.Start(ctx)
+		defer src.Stop()
+	}
+
+	if syslogListener != nil {
+		syslogListener.Start(ctx)
+		defer func() {
+			// Given its own short deadline rather than ctx: ctx is already
+			// cancelled by the time deferred shutdown runs, and a drain on
+			// a cancelled context publishes nothing.
+			drainCtx, drainCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			syslogListener.Stop(drainCtx)
+			drainCancel()
+		}()
 	}
 
 	// Drain VulnMatches → Kafka in a background goroutine
@@ -348,4 +526,28 @@ var Version = "dev"
 func init() {
 	// Set version in health check
 	_ = fmt.Sprintf("aisoc-ingest/%s", Version)
+}
+
+// syslogDetail turns listener state into the one sentence /readyz shows.
+//
+// "attached" alone would be a lie of omission for a receiver: a syslog
+// listener is legitimately silent for hours, so the detail carries what it
+// has bound, what it has received and what it last failed on — which is
+// what separates "nothing is being sent" from "everything is being dropped".
+func syslogDetail(state syslog.State) string {
+	if !state.UDPBound && !state.TCPBound {
+		return "no transport bound"
+	}
+	bound := make([]string, 0, 2)
+	if state.UDPBound {
+		bound = append(bound, "udp "+state.UDPAddr)
+	}
+	if state.TCPBound {
+		bound = append(bound, "tcp "+state.TCPAddr)
+	}
+	detail := fmt.Sprintf("listening on %s; received %d, rejected %d", strings.Join(bound, ", "), state.Received, state.Rejected)
+	if state.LastError != "" {
+		detail += "; last error: " + state.LastError
+	}
+	return detail
 }

@@ -346,7 +346,7 @@ def compare_against_go(schema: Schema, go_parsed: tuple[set[str], set[str]]) -> 
         errors.append(
             f"node labels declared in Go source but missing from YAML: "
             f"{_format_set(missing_in_yaml_labels)} — run "
-            f"`python scripts/export_graph_schema.py --write` and update "
+            f"`python scripts/export_graph_schema.py --from-go` and update "
             f"apps/docs/docs/architecture/graph-schema.md"
         )
 
@@ -359,7 +359,7 @@ def compare_against_go(schema: Schema, go_parsed: tuple[set[str], set[str]]) -> 
         errors.append(
             f"relationships declared in Go source but missing from YAML: "
             f"{_format_set(missing_in_yaml_rels)} — run "
-            f"`python scripts/export_graph_schema.py --write` and update "
+            f"`python scripts/export_graph_schema.py --from-go` and update "
             f"apps/docs/docs/architecture/graph-schema.md"
         )
 

@@ -21,6 +21,7 @@
 package graph
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -82,10 +83,140 @@ func ExtractFromOCSF(eventID, tenantID, connectorType string, ocsf map[string]in
 	// connector since it's pulled from the OCSF mitre_attck enrichment.
 	extractMITRE(ev, ocsf)
 
+	// Depth 6.1 — the AI estate, also a post-pass and for the same reason:
+	// AI telemetry arrives on three different connector types and as plain
+	// process activity, so a connector case would cover one of them.
+	extractAIEstate(ev, ocsf)
+
+	// The activity projection, applied to whichever nodes the extractors
+	// above produced. A post-pass rather than a line in each of the five
+	// extractors: the projection is on the event, not on the connector, and
+	// the next extractor somebody adds would otherwise ship without it and
+	// nobody would notice until a traversal came back missing actor_kind
+	// for one source.
+	applyActivityProperties(ev, ocsf)
+
+	// The session this event belongs to, and the assumed-role chain when the
+	// event issued one. A post-pass for the same reason as the line above:
+	// the session is a property of the event, not of the connector.
+	applySessionGraph(ev, ocsf)
+
 	if len(ev.Nodes) == 0 && len(ev.Edges) == 0 {
 		return nil
 	}
 	return ev
+}
+
+// applyActivityProperties copies the projection onto the nodes it describes.
+//
+// Which property lands on which label is declared in schema.go
+// (ActivityNodeProperties) so the schema-drift gate and the writer read one
+// list. Only non-empty values are written, with one deliberate exception:
+// `actor_kind` is written even when it is `unknown`, because "the source
+// declined to say" and "this event predates the projection" are different
+// facts and a Cypher `IS NULL` cannot tell them apart.
+func applyActivityProperties(ev *Event, ocsf map[string]interface{}) {
+	act, ok := ocsf["activity"].(map[string]interface{})
+	if !ok {
+		// The projection is a struct on the normalizer's own path and a map
+		// once it has been through JSON. Both reach this function depending
+		// on whether the graph writer runs in-process or off the topic.
+		act = structToMap(ocsf["activity"])
+		if act == nil {
+			return
+		}
+	}
+	actor := childMap(act, "actor")
+	location := childMap(act, "location")
+	client := childMap(location, "client")
+
+	for i := range ev.Nodes {
+		node := &ev.Nodes[i]
+		if node.Properties == nil {
+			node.Properties = map[string]interface{}{}
+		}
+		switch node.Label {
+		case NodeUser, NodeServiceAccount:
+			node.Properties["actor_kind"] = stringOr(actor["kind"], "unknown")
+			setIfNonEmpty(node.Properties, "actor_kind_source", actor["kind_source"])
+			setIfNonEmpty(node.Properties, "on_behalf_of", actor["on_behalf_of"])
+		case NodeNetworkPath:
+			// Only the source side: the geography and ASN describe where
+			// the action came from, and writing them onto the destination
+			// node would attribute the caller's country to the thing they
+			// reached.
+			if role, _ := node.Properties["role"].(string); role != "src" {
+				continue
+			}
+			setIfNonEmpty(node.Properties, "country_code", location["country_code"])
+			setIfNonEmpty(node.Properties, "as_org", location["as_org"])
+			setIfNonEmpty(node.Properties, "client_family", client["family"])
+			setIfNonEmpty(node.Properties, "client_category", client["category"])
+			if asn := numberOr(location["asn"]); asn != 0 {
+				node.Properties["asn"] = asn
+			}
+			if known, _ := location["reputation_known"].(bool); known {
+				node.Properties["reputation"] = numberOr(location["reputation"])
+				node.Properties["reputation_known"] = true
+			}
+		}
+	}
+}
+
+func childMap(parent map[string]interface{}, key string) map[string]interface{} {
+	if parent == nil {
+		return map[string]interface{}{}
+	}
+	if child, ok := parent[key].(map[string]interface{}); ok {
+		return child
+	}
+	if child := structToMap(parent[key]); child != nil {
+		return child
+	}
+	return map[string]interface{}{}
+}
+
+// structToMap round-trips a value through its JSON form. The projection is a
+// typed struct where the normalizer builds it and a map once it has crossed
+// Kafka; the graph writer runs on both paths and must not see two shapes.
+func structToMap(value interface{}) map[string]interface{} {
+	if value == nil {
+		return nil
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return nil
+	}
+	var out map[string]interface{}
+	if err := json.Unmarshal(encoded, &out); err != nil {
+		return nil
+	}
+	return out
+}
+
+func setIfNonEmpty(props map[string]interface{}, key string, value interface{}) {
+	if s, ok := value.(string); ok && strings.TrimSpace(s) != "" {
+		props[key] = s
+	}
+}
+
+func stringOr(value interface{}, fallback string) string {
+	if s, ok := value.(string); ok && strings.TrimSpace(s) != "" {
+		return s
+	}
+	return fallback
+}
+
+func numberOr(value interface{}) float64 {
+	switch v := value.(type) {
+	case float64:
+		return v
+	case int64:
+		return float64(v)
+	case int:
+		return float64(v)
+	}
+	return 0
 }
 
 // extractGeneric is the fallback path. Every OCSF event has actor + endpoints
@@ -580,4 +711,151 @@ func parseTime(s string) time.Time {
 		}
 	}
 	return time.Time{}
+}
+
+// aiAgentProcesses maps a coding agent's executable base name to its vendor.
+//
+// Deliberately a small named table rather than a substring heuristic: the
+// word "agent" matches half an EDR estate, and a false positive here puts
+// somebody's antivirus on an AI inventory. Mirrors
+// CODING_AGENT_PROCESSES in services/fusion/app/services/ai_asset_recorder.py;
+// the two services cannot import each other, and
+// TestAIEstateVocabularyMatchesRecorder reads both files and compares them.
+var aiAgentProcesses = map[string]string{
+	"claude":                  "Anthropic",
+	"codex":                   "OpenAI",
+	"aider":                   "Aider",
+	"goose":                   "Block",
+	"continue":                "Continue",
+	"opencode":                "OpenCode",
+	"gemini":                  "Google",
+	"copilot":                 "GitHub",
+	"copilot-language-server": "GitHub",
+	"amazonq":                 "Amazon",
+	"cline":                   "Cline",
+}
+
+// extractAIEstate projects AI-estate telemetry onto the graph (depth 6.1).
+//
+// A post-pass rather than a connector case, for the same reason extractMITRE
+// is one: AI telemetry arrives through the `ai-runtime` / `ai-finding` inbox
+// templates, through a gateway connector, and as ordinary process activity
+// from any EDR — so keying on connectorType would cover one of the three and
+// look complete.
+//
+// Two edges, both existing relationship types rather than new ones:
+//
+//	(:User)-[:OPERATES]->(:AIAsset)   who runs it
+//	(:Endpoint)-[:HOSTS]->(:AIAsset)  where it ran
+//
+// Those are the two links depth 6.1 asks for: a person and a device.
+func extractAIEstate(ev *Event, ocsf map[string]interface{}) {
+	sourceType := strings.ToLower(getString(ocsf, "source_type"))
+	kind, externalID, displayName, vendor := "", "", "", ""
+
+	switch sourceType {
+	case "ai-runtime", "ai-finding":
+		// The SDK and gateway path: actor.process.name is the agent id.
+		externalID = getString(ocsf, "actor.process.name")
+		displayName = getString(ocsf, "actor.process.path")
+		base := processBaseName(displayName)
+		if base == "" {
+			base = processBaseName(externalID)
+		}
+		if v, ok := aiAgentProcesses[base]; ok {
+			kind, vendor = "coding_agent", v
+		} else {
+			kind = "ai_app"
+			vendor = getString(ocsf, "cloud.provider")
+		}
+	default:
+		// Endpoint discovery: a known agent binary in process activity.
+		// Only class 1007 carries one; anything else is a different event
+		// that happens to name a process.
+		if classUID, ok := ocsf["class_uid"].(float64); !ok || int(classUID) != 1007 {
+			return
+		}
+		name := getString(ocsf, "process.name")
+		if name == "" {
+			name = getString(ocsf, "actor.process.name")
+		}
+		base := processBaseName(name)
+		v, ok := aiAgentProcesses[base]
+		if !ok {
+			return
+		}
+		kind, vendor, externalID, displayName = "coding_agent", v, base, name
+	}
+
+	if externalID == "" {
+		return
+	}
+
+	device := getString(ocsf, "src_endpoint.hostname")
+	if device == "" {
+		device = getString(ocsf, "device.name")
+	}
+	assetKey := fmt.Sprintf("aiasset:%s:%s:%s:%s", ev.TenantID, kind, externalID, device)
+
+	props := map[string]interface{}{
+		"kind":        kind,
+		"external_id": externalID,
+	}
+	if displayName != "" {
+		props["display_name"] = displayName
+	}
+	if vendor != "" {
+		props["vendor"] = vendor
+	}
+	if model := getString(ocsf, "metadata.product.feature.name"); model != "" {
+		props["model"] = model
+	}
+	ev.Nodes = append(ev.Nodes, Node{
+		Label:      NodeAIAsset,
+		NaturalKey: assetKey,
+		TenantID:   ev.TenantID,
+		Properties: props,
+	})
+
+	if user := getString(ocsf, "actor.user.name"); user != "" {
+		userKey := fmt.Sprintf("user:%s:%s", ev.TenantID, user)
+		ev.Nodes = append(ev.Nodes, Node{
+			Label:      NodeUser,
+			NaturalKey: userKey,
+			TenantID:   ev.TenantID,
+			Properties: map[string]interface{}{"name": user},
+		})
+		ev.Edges = append(ev.Edges, Edge{
+			Type:      RelOperates,
+			FromLabel: NodeUser, FromKey: userKey,
+			ToLabel: NodeAIAsset, ToKey: assetKey,
+		})
+	}
+
+	if device != "" {
+		endpointKey := fmt.Sprintf("endpoint:%s:%s", ev.TenantID, device)
+		ev.Nodes = append(ev.Nodes, Node{
+			Label:      NodeEndpoint,
+			NaturalKey: endpointKey,
+			TenantID:   ev.TenantID,
+			Properties: map[string]interface{}{"hostname": device},
+		})
+		ev.Edges = append(ev.Edges, Edge{
+			Type:      RelHosts,
+			FromLabel: NodeEndpoint, FromKey: endpointKey,
+			ToLabel: NodeAIAsset, ToKey: assetKey,
+		})
+	}
+}
+
+// processBaseName strips a directory prefix and a .exe suffix, lowercased.
+func processBaseName(path string) string {
+	if path == "" {
+		return ""
+	}
+	p := strings.ToLower(strings.ReplaceAll(path, "\\", "/"))
+	if idx := strings.LastIndex(p, "/"); idx >= 0 {
+		p = p[idx+1:]
+	}
+	return strings.TrimSuffix(p, ".exe")
 }

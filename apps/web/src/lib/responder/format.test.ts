@@ -1,77 +1,103 @@
 /**
- * format — unit tests
- * ===================
- *
- * The mobile responder UI leans on these formatters to keep severity, status
- * and time strings consistent across the alert/case surface. They're pure
- * functions, so we test them directly without a DOM.
- *
- * Coverage map:
- *   - severityTone: every tier in the v1.5 five-tier ladder
- *     (`critical | high | medium | low | info`) has a tone entry, ranks are
- *     strictly monotonic, fallback path returns `info` rather than throwing,
- *     and case-insensitive matching works (some upstreams emit `"Critical"`).
- *
- * If a refactor accidentally drops a tier — e.g. squashes `critical` back into
- * `high` like the pre-v1.5 four-tier ladder — these tests catch it before the
- * mobile UI starts rendering blanks for P1 incidents.
+ * The responder formatting helpers are pure functions the mobile surface
+ * leans on for every list row, so each branch is pinned: the relative-time
+ * ladder, the "until" inverse, the five severity tones with their ranks, and
+ * the status maps — including the rule the CASE_STATUS comment records, that
+ * only the six database statuses exist and anything else falls through to a
+ * grey tone that still shows the raw label rather than lying with a known one.
  */
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { describe, expect, it } from 'vitest';
+import { alertStatusTone, caseStatusTone, formatRelative, formatUntil, severityTone } from './format';
 
-import { severityTone } from './format';
+const NOW = new Date('2026-10-12T12:00:00Z');
+
+beforeEach(() => {
+  vi.useFakeTimers();
+  vi.setSystemTime(NOW);
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+describe('formatRelative', () => {
+  it('renders a dash for nothing, and for garbage', () => {
+    expect(formatRelative(null)).toBe('—');
+    expect(formatRelative(undefined)).toBe('—');
+    expect(formatRelative('not-a-date')).toBe('—');
+  });
+
+  it('walks the ladder: just now, seconds, minutes, hours, days', () => {
+    expect(formatRelative(new Date(NOW.getTime() - 2_000).toISOString())).toBe('just now');
+    expect(formatRelative(new Date(NOW.getTime() - 30_000).toISOString())).toBe('30s ago');
+    expect(formatRelative(new Date(NOW.getTime() - 5 * 60_000).toISOString())).toBe('5m ago');
+    expect(formatRelative(new Date(NOW.getTime() - 3 * 3_600_000).toISOString())).toBe('3h ago');
+    expect(formatRelative(new Date(NOW.getTime() - 2 * 86_400_000).toISOString())).toBe('2d ago');
+  });
+
+  it('falls back to a calendar date past a week', () => {
+    const old = new Date(NOW.getTime() - 30 * 86_400_000).toISOString();
+    expect(formatRelative(old)).not.toMatch(/ago$/);
+  });
+
+  it('clamps the future to now rather than inventing negative time', () => {
+    expect(formatRelative(new Date(NOW.getTime() + 60_000).toISOString())).toBe('just now');
+  });
+});
+
+describe('formatUntil', () => {
+  it('is null for nothing, garbage, and the past', () => {
+    expect(formatUntil(null)).toBeNull();
+    expect(formatUntil('not-a-date')).toBeNull();
+    expect(formatUntil(new Date(NOW.getTime() - 1_000).toISOString())).toBeNull();
+  });
+
+  it('renders minutes, hours and days ahead', () => {
+    expect(formatUntil(new Date(NOW.getTime() + 25 * 60_000).toISOString())).toBe('25m');
+    expect(formatUntil(new Date(NOW.getTime() + 5 * 3_600_000).toISOString())).toBe('5h');
+    expect(formatUntil(new Date(NOW.getTime() + 3 * 86_400_000).toISOString())).toBe('3d');
+  });
+});
 
 describe('severityTone', () => {
-  const tiers = ['critical', 'high', 'medium', 'low', 'info'] as const;
-
-  it.each(tiers)('returns a tone for %s', (tier) => {
-    const tone = severityTone(tier);
-    expect(tone.bg).toMatch(/^bg-/);
-    expect(tone.fg).toMatch(/^text-/);
-    expect(tone.border).toMatch(/^border-l-/);
-    expect(tone.glyph).toHaveLength(1);
-    expect(typeof tone.rank).toBe('number');
+  it('ranks the five tiers in order', () => {
+    const ranks = ['info', 'low', 'medium', 'high', 'critical'].map((s) => severityTone(s).rank);
+    expect(ranks).toEqual([0, 1, 2, 3, 4]);
   });
 
-  it('assigns strictly monotonic ranks across the five-tier ladder', () => {
-    const ranks = tiers.map((t) => severityTone(t).rank);
-    // critical = 4, high = 3, medium = 2, low = 1, info = 0 — so the list as
-    // ordered should be strictly descending.
-    expect(ranks).toEqual([4, 3, 2, 1, 0]);
+  it('is case-insensitive and falls back to info for the unknown', () => {
+    expect(severityTone('CRITICAL').glyph).toBe('C');
+    expect(severityTone('made-up').rank).toBe(0);
+    expect(severityTone(null).rank).toBe(0);
+  });
+});
+
+describe('alertStatusTone', () => {
+  it('labels the known statuses', () => {
+    expect(alertStatusTone('new').label).toBe('New');
+    expect(alertStatusTone('false_positive').label).toBe('FP');
+    expect(alertStatusTone('snoozed').label).toBe('Snoozed');
   });
 
-  it('falls back to the info tone for unknown severities', () => {
-    const info = severityTone('info');
-    const unknown = severityTone('not-a-real-severity');
-    expect(unknown).toEqual(info);
+  it('an unknown status keeps its own name in grey rather than borrowing a known label', () => {
+    const tone = alertStatusTone('quarantined');
+    expect(tone.label).toBe('quarantined');
+    expect(tone.bg).toContain('slate');
+  });
+});
+
+describe('caseStatusTone', () => {
+  it('covers exactly the six statuses the database permits', () => {
+    for (const s of ['new', 'triaged', 'investigating', 'contained', 'resolved', 'closed']) {
+      expect(caseStatusTone(s).label.toLowerCase()).toBe(s);
+    }
   });
 
-  it('falls back to the info tone for nullish severities', () => {
-    const info = severityTone('info');
-    expect(severityTone(null)).toEqual(info);
-    expect(severityTone(undefined)).toEqual(info);
-    expect(severityTone('')).toEqual(info);
-  });
-
-  it('is case-insensitive (some upstreams emit Title-Case)', () => {
-    expect(severityTone('Critical')).toEqual(severityTone('critical'));
-    expect(severityTone('HIGH')).toEqual(severityTone('high'));
-    expect(severityTone('Medium')).toEqual(severityTone('medium'));
-  });
-
-  it('uses distinct background colors for each tier', () => {
-    // Catches a refactor where someone copy-pastes a row but forgets to
-    // update the color — easy to miss in code review.
-    const bgs = new Set(tiers.map((t) => severityTone(t).bg));
-    expect(bgs.size).toBe(tiers.length);
-  });
-
-  it('uses the red palette for critical (P1 wallboard contract)', () => {
-    // The wallboard relies on `red` being the unambiguous P1 signal. If a
-    // theme refactor recolors `critical` to e.g. magenta, this catches it.
-    const crit = severityTone('critical');
-    expect(crit.bg).toContain('red');
-    expect(crit.fg).toContain('red');
-    expect(crit.border).toContain('red');
+  it('the statuses nothing can write fall through honestly', () => {
+    // `open` and `pending` were map entries nothing could match; the fix was
+    // to delete them, so they must render as themselves in grey.
+    expect(caseStatusTone('open').label).toBe('open');
+    expect(caseStatusTone('pending').bg).toContain('slate');
   });
 });

@@ -44,7 +44,7 @@ def _okta_fetcher():
 
 
 async def test_okta_snapshot_assembled_from_resource_configs():
-    snap = await collect_snapshot("okta", "00u-alice", fetcher=_okta_fetcher())
+    snap = (await collect_snapshot("okta", "00u-alice", fetcher=_okta_fetcher())).snapshot
     assert [p["id"] for p in snap["principals"]] == ["00u-alice"]
     assert snap["principals"][0]["groups"] == ["00g-admins"]
     group = next(g for g in snap["groups"] if g["id"] == "00g-admins")
@@ -55,7 +55,7 @@ async def test_okta_snapshot_assembled_from_resource_configs():
 
 
 async def test_assembled_okta_snapshot_resolves():
-    snap = await collect_snapshot("okta", "00u-alice", fetcher=_okta_fetcher())
+    snap = (await collect_snapshot("okta", "00u-alice", fetcher=_okta_fetcher())).snapshot
     result = OktaResolver().resolve("00u-alice", snapshot=snap)
     # Alice inherits the super-admin role via the Admins group → has privileges.
     perms = {d.permission if hasattr(d, "permission") else d for d in result.decisions}
@@ -70,35 +70,78 @@ async def test_cloud_provider_consumes_reconciled_snapshot():
         assert resource_id == POSTURE_SNAPSHOT_ID
         return {"snapshot": reconciled}
 
-    snap = await collect_snapshot("aws", "arn:aws:iam::1:user/bob", fetcher=_fetch)
-    assert snap == reconciled
+    collected = await collect_snapshot("aws", "arn:aws:iam::1:user/bob", fetcher=_fetch)
+    assert collected.snapshot == reconciled
+    assert collected.partial is False
+    assert collected.notes == ()
 
 
 async def test_cloud_provider_top_level_snapshot_shape():
     async def _fetch(connector_id, resource_id, at_ts):  # noqa: ANN001, ARG001
         return {"principals": [{"id": "u1"}], "policies": []}
 
-    snap = await collect_snapshot("azure", "u1", fetcher=_fetch)
-    assert "principals" in snap
+    collected = await collect_snapshot("azure", "u1", fetcher=_fetch)
+    assert "principals" in collected.snapshot
 
 
 async def test_unknown_provider_returns_empty():
     async def _fetch(connector_id, resource_id, at_ts):  # noqa: ANN001, ARG001
         return {"anything": True}
 
-    assert await collect_snapshot("mystery", "p", fetcher=_fetch) == {}
+    assert not await collect_snapshot("mystery", "p", fetcher=_fetch)
 
 
 async def test_fetch_error_degrades_to_empty():
     async def _boom(connector_id, resource_id, at_ts):  # noqa: ANN001, ARG001
         raise RuntimeError("connectors service down")
 
-    assert await collect_snapshot("okta", "00u-alice", fetcher=_boom) == {}
-    assert await collect_snapshot("aws", "x", fetcher=_boom) == {}
+    assert not await collect_snapshot("okta", "00u-alice", fetcher=_boom)
+    assert not await collect_snapshot("aws", "x", fetcher=_boom)
 
 
 async def test_empty_cloud_snapshot_returns_empty():
     async def _fetch(connector_id, resource_id, at_ts):  # noqa: ANN001, ARG001
         return {"snapshot": {}}
 
-    assert await collect_snapshot("gcp", "sa@proj.iam", fetcher=_fetch) == {}
+    assert not await collect_snapshot("gcp", "sa@proj.iam", fetcher=_fetch)
+
+
+async def test_the_gap_survives_the_hop_from_the_connector():
+    """A collector that could not read half the estate says so in the same
+    envelope as the data, and that has to reach the caller.
+
+    The earlier shape returned the bare snapshot dict and dropped `partial`
+    and the notes on the floor, so a collection that 403'd on a page of role
+    assignments was indistinguishable from one that read everything -- and
+    the difference is an identity that looks harmless because the policy
+    granting it everything was in the page nobody could read.
+    """
+
+    async def _fetch(connector_id, resource_id, at_ts):  # noqa: ANN001, ARG001
+        return {
+            "snapshot": {"principals": [{"id": "u1"}]},
+            "partial": True,
+            "collection_notes": ["the second page of role assignments returned 403"],
+        }
+
+    collected = await collect_snapshot("azure", "u1", fetcher=_fetch)
+
+    assert collected.partial is True
+    assert collected.notes == ("the second page of role assignments returned 403",)
+    assert collected.snapshot["principals"] == [{"id": "u1"}]
+
+
+async def test_an_incomplete_collection_that_got_nothing_is_still_nothing():
+    """`partial` does not make an empty snapshot answerable.
+
+    Zero principals means the credential lost its read permission far more
+    often than it means the estate is empty, so the caller must still 412
+    rather than resolve a principal against a document with nothing in it.
+    """
+
+    async def _fetch(connector_id, resource_id, at_ts):  # noqa: ANN001, ARG001
+        return {"snapshot": {}, "partial": True, "collection_notes": ["every page 403'd"]}
+
+    collected = await collect_snapshot("gcp", "sa@proj.iam", fetcher=_fetch)
+
+    assert not collected, "an empty snapshot is falsy however complete the collector claims it was"

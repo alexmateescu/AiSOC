@@ -56,6 +56,16 @@ from app.executors.identity import (
     ResetPasswordExecutor,
     SuspendSessionExecutor,
 )
+from app.executors.mailbox import (
+    GMAIL_CLIENT_PARAM_KEYS,
+    GOOGLE_WORKSPACE,
+    M365,
+    M365_CLIENT_PARAM_KEYS,
+    BlockSenderExecutor,
+    PurgeEmailExecutor,
+    RestoreEmailExecutor,
+    UnblockSenderExecutor,
+)
 from app.executors.network import (
     AllowIPExecutor,
     BlockDomainExecutor,
@@ -90,12 +100,16 @@ from .investigation_reads import (
     DefenderLookupEndpointTelemetry,
     DefenderUnisolateHost,
     EntraGetUserActivity,
+    GmailSearchMailboxes,
     GoogleWorkspaceGetUserActivity,
+    M365SearchMailboxes,
     OktaGetUserActivity,
     SentinelOneGetDetections,
     SentinelOneGetHost,
 )
 from .models import LiveActionRequest, LiveActionResult, LiveActionStatus
+from .notify_arms import NOTIFY_ARMS
+from .osquery_arms import OSQUERY_ARMS
 from .vendor_breadth import VENDOR_BREADTH_EXECUTORS
 
 logger = structlog.get_logger(__name__)
@@ -838,6 +852,23 @@ class PagerDutyCreateTicket(_LegacyExecutorAdapter):
 
 @apply_contract
 class SlackNotify(_LegacyExecutorAdapter):
+    """Post a notification to Slack through an incoming webhook.
+
+    API reference: https://api.slack.com/messaging/webhooks
+
+    Overrides ``execute`` for the same reason ``_ChatOpsVerify`` does, and it
+    is the same defect wearing different clothes. The base class previews by
+    stripping ``_credential_keys`` so the legacy executor falls into its
+    simulation branch; ``NotifySlackExecutor`` has no simulation branch, so
+    a stripped ``webhook_url`` took its no-webhook path — which, until this
+    change, returned COMPLETED with ``message_sent: true``. Every dry run
+    therefore reported a completed send.
+
+    Fixing the executor to fail closed with no webhook (it now does) is
+    necessary and not sufficient: a preview would then report a *failure*,
+    which is equally untrue. Simulate here, before anything is stripped.
+    """
+
     vendor_id = "slack"
     capability = "notify"
     description = "Post an incident notification to a Slack channel."
@@ -845,6 +876,22 @@ class SlackNotify(_LegacyExecutorAdapter):
     _legacy_executor = NotifySlackExecutor()
     _legacy_action_type = ActionType.NOTIFY_SLACK
     _credential_keys = ("webhook_url",)
+
+    async def execute(self, request: LiveActionRequest) -> LiveActionResult:
+        if request.dry_run:
+            message = str((request.params or {}).get("message") or "AiSOC playbook notification")
+            return LiveActionResult(
+                request_id=request.request_id,
+                status=LiveActionStatus.SIMULATED,
+                capability=self.capability,
+                vendor_id=self.vendor_id,
+                summary=f"would notify slack: {message[:120]}",
+                details={"would_notify": "slack", "message": message},
+            )
+        return await super().execute(request)
+
+
+# ---------------------------------------------------------------------------
 
 
 # ---------------------------------------------------------------------------
@@ -934,6 +981,156 @@ class TeamsChatOpsVerify(_ChatOpsVerify):
 
 
 # ---------------------------------------------------------------------------
+# Mailbox remediation (depth 7.1)
+# ---------------------------------------------------------------------------
+#
+# Ten adapters over the five verbs in `app.executors.mailbox`. The legacy
+# executors are vendor-agnostic — `ActionType` is, and the post-action
+# verifier is keyed by it — so each adapter pins its vendor into the request
+# and the executor honours the pin **only when that vendor's credentials are
+# present**. Honouring a pin blindly is the defect that had a dry run call a
+# customer's Splunk; here it would act on the wrong tenant's mail.
+#
+# `_credential_keys` is imported from the executor module rather than
+# retyped, so the dry-run strip and the client factory read one list.
+
+
+class _MailboxAdapter(_LegacyExecutorAdapter):
+    """Pin the vendor, refuse a preview before any client is built.
+
+    The dry-run override is not redundant with `_LegacyExecutorAdapter`'s
+    credential strip. That strip works by making the legacy executor fall
+    through to a simulation branch, and these executors deliberately have no
+    simulation branch: a purge that did not happen must never be reported as
+    one that did. Returning SIMULATED here, before a client exists, says what
+    is true — nothing was read and nothing was changed — and the step grader
+    counts `simulated` as a failure to execute, which is correct.
+    """
+
+    _vendor_pin: str = ""
+
+    async def execute(self, request: LiveActionRequest) -> LiveActionResult:
+        if request.dry_run:
+            return LiveActionResult(
+                request_id=request.request_id,
+                status=LiveActionStatus.SIMULATED,
+                capability=self.capability,
+                vendor_id=self.vendor_id,
+                summary=f"would {self.capability.replace('_', ' ')} for {request.target or 'the named mailbox'}",
+                details={
+                    "would_run": self.capability,
+                    "mailbox": request.target,
+                    "internet_message_id": (request.params or {}).get("internet_message_id", ""),
+                    "executed": False,
+                },
+            )
+        pinned = {**(request.params or {}), "alert_vendor": self._vendor_pin}
+        return await super().execute(request.model_copy(update={"params": pinned}))
+
+    def _summarise(self, output: dict[str, Any], status: LiveActionStatus) -> str:
+        # The executors write a summary that states the scope of what they
+        # did — "per-mailbox rule, not a tenant-wide block" — and the base
+        # class's generic "<verb> <target>" would drop exactly that.
+        return str(output.get("summary") or super()._summarise(output, status))
+
+
+@apply_contract
+class M365PurgeEmail(_MailboxAdapter):
+    vendor_id = M365
+    capability = "purge_email"
+    description = "Soft-delete a message from one Microsoft 365 mailbox (recoverable items)."
+    requires_credentials = True
+    _legacy_executor = PurgeEmailExecutor()
+    _legacy_action_type = ActionType.PURGE_EMAIL
+    _credential_keys = M365_CLIENT_PARAM_KEYS
+    _vendor_pin = M365
+
+
+@apply_contract
+class M365RestoreEmail(_MailboxAdapter):
+    vendor_id = M365
+    capability = "restore_email"
+    description = "Move a soft-deleted message back into a Microsoft 365 mailbox folder."
+    requires_credentials = True
+    _legacy_executor = RestoreEmailExecutor()
+    _legacy_action_type = ActionType.RESTORE_EMAIL
+    _credential_keys = M365_CLIENT_PARAM_KEYS
+    _vendor_pin = M365
+
+
+@apply_contract
+class M365BlockSender(_MailboxAdapter):
+    vendor_id = M365
+    capability = "block_sender"
+    description = "Add an inbox rule deleting future mail from a sender, in one mailbox."
+    requires_credentials = True
+    _legacy_executor = BlockSenderExecutor()
+    _legacy_action_type = ActionType.BLOCK_SENDER
+    _credential_keys = M365_CLIENT_PARAM_KEYS
+    _vendor_pin = M365
+
+
+@apply_contract
+class M365UnblockSender(_MailboxAdapter):
+    vendor_id = M365
+    capability = "unblock_sender"
+    description = "Remove the inbox rule block_sender created."
+    requires_credentials = True
+    _legacy_executor = UnblockSenderExecutor()
+    _legacy_action_type = ActionType.UNBLOCK_SENDER
+    _credential_keys = M365_CLIENT_PARAM_KEYS
+    _vendor_pin = M365
+
+
+@apply_contract
+class GmailPurgeEmail(_MailboxAdapter):
+    vendor_id = GOOGLE_WORKSPACE
+    capability = "purge_email"
+    description = "Move a message to Trash in one Gmail mailbox."
+    requires_credentials = True
+    _legacy_executor = PurgeEmailExecutor()
+    _legacy_action_type = ActionType.PURGE_EMAIL
+    _credential_keys = GMAIL_CLIENT_PARAM_KEYS
+    _vendor_pin = GOOGLE_WORKSPACE
+
+
+@apply_contract
+class GmailRestoreEmail(_MailboxAdapter):
+    vendor_id = GOOGLE_WORKSPACE
+    capability = "restore_email"
+    description = "Take a message back out of Gmail Trash."
+    requires_credentials = True
+    _legacy_executor = RestoreEmailExecutor()
+    _legacy_action_type = ActionType.RESTORE_EMAIL
+    _credential_keys = GMAIL_CLIENT_PARAM_KEYS
+    _vendor_pin = GOOGLE_WORKSPACE
+
+
+@apply_contract
+class GmailBlockSender(_MailboxAdapter):
+    vendor_id = GOOGLE_WORKSPACE
+    capability = "block_sender"
+    description = "Add a Gmail filter trashing future mail from a sender, in one mailbox."
+    requires_credentials = True
+    _legacy_executor = BlockSenderExecutor()
+    _legacy_action_type = ActionType.BLOCK_SENDER
+    _credential_keys = GMAIL_CLIENT_PARAM_KEYS
+    _vendor_pin = GOOGLE_WORKSPACE
+
+
+@apply_contract
+class GmailUnblockSender(_MailboxAdapter):
+    vendor_id = GOOGLE_WORKSPACE
+    capability = "unblock_sender"
+    description = "Remove the Gmail filter block_sender created."
+    requires_credentials = True
+    _legacy_executor = UnblockSenderExecutor()
+    _legacy_action_type = ActionType.UNBLOCK_SENDER
+    _credential_keys = GMAIL_CLIENT_PARAM_KEYS
+    _vendor_pin = GOOGLE_WORKSPACE
+
+
+# ---------------------------------------------------------------------------
 # Registration entry point
 # ---------------------------------------------------------------------------
 
@@ -957,6 +1154,11 @@ _BUILTIN_ADAPTERS: tuple[type[LiveActionExecutor], ...] = (
     GoogleWorkspaceGetUserActivity,
     AWSLookupCloudAudit,
     DefenderLookupEndpointTelemetry,
+    # Depth 7.1. The read every mailbox-remediation verb depends on: a
+    # purge takes a per-mailbox message id, and only a search maps one
+    # internet message id onto the mailboxes holding a copy.
+    M365SearchMailboxes,
+    GmailSearchMailboxes,
     # Rollback for the most disruptive action, which had no executor.
     CrowdStrikeUnisolateHost,
     DefenderUnisolateHost,
@@ -1014,11 +1216,33 @@ _BUILTIN_ADAPTERS: tuple[type[LiveActionExecutor], ...] = (
     JiraCreateTicket,
     ServiceNowCreateTicket,
     PagerDutyCreateTicket,
-    SlackNotify,
     # Human-in-the-loop: a working executor whose honest "not answered yet"
     # had no status to land in until AWAITING_COMPLETION existed.
     SlackChatOpsVerify,
     TeamsChatOpsVerify,
+    # Depth 5.1. `notify` had one arm and the playbook engine reached none of
+    # them, so all 63 notify steps in the shipped packs delivered nothing.
+    SlackNotify,
+    *NOTIFY_ARMS,
+    # Depth 5.1. The engine's osquery handler imported clients that live here,
+    # so it raised in every agents image. Same verb, run where its clients and
+    # its credentials are.
+    *OSQUERY_ARMS,
+    # Depth 7.1. A phishing response that could block the sender's domain at
+    # the firewall and could not remove the message it arrived in.
+    # Registered like every other arm, so discovery lists them and the
+    # console can say the verb exists, and refused at execute() unless
+    # AISOC_FEATURE_MAILBOX_REMEDIATION is set. Gating registration instead
+    # would make a disabled deployment answer executor_not_found, which
+    # reads as a missing integration rather than as a deliberate setting.
+    M365PurgeEmail,
+    M365RestoreEmail,
+    M365BlockSender,
+    M365UnblockSender,
+    GmailPurgeEmail,
+    GmailRestoreEmail,
+    GmailBlockSender,
+    GmailUnblockSender,
 )
 
 

@@ -103,12 +103,47 @@ class TestTheGpuOverlayDoesTheOppositeThing:
         assert any(d.get("driver") == "nvidia" for d in devices)
         assert any("gpu" in (d.get("capabilities") or []) for d in devices)
 
-    def test_it_touches_only_ollama(self) -> None:
-        """An overlay that quietly changed other services would be a second
-        deployment shape nobody reviewed."""
+    def test_only_the_service_that_runs_the_model_reserves_a_device(self) -> None:
+        """The reservation moved onto `litellm` once, while this file was being
+        edited for the model default, and nothing else would have noticed: the
+        overlay still parsed, `make up-gpu` still came up, and the GPU sat
+        held by a proxy that does no inference while generation ran on the
+        CPU. A reservation anywhere but `ollama` is that bug."""
         services = _load(GPU_OVERLAY).get("services") or {}
 
-        assert set(services) == {"ollama"}, f"the GPU overlay also changes {sorted(set(services) - {'ollama'})}"
+        reserving = sorted(name for name, body in services.items() if _device_reservations(body or {}))
+
+        assert reserving == ["ollama"], f"a device is reserved on {reserving}, and only ollama runs the model"
+
+    def test_it_touches_only_the_three_services_the_runtime_needs(self) -> None:
+        """An overlay that quietly changed other services would be a second
+        deployment shape nobody reviewed.
+
+        Three rather than one since the overlay also carries the measured GPU
+        model default: the device goes to `ollama`, the pull instruction to
+        `ollama-pull` and the routing to `litellm`. Still a closed set, so a
+        fourth service appearing here fails."""
+        services = _load(GPU_OVERLAY).get("services") or {}
+        expected = {"ollama", "ollama-pull", "litellm"}
+
+        assert set(services) == expected, f"the GPU overlay also changes {sorted(set(services) - expected)}"
+
+    def test_the_model_it_pulls_is_the_model_it_routes_to(self) -> None:
+        """The failure this prevents is silent in the worst way: the gateway
+        routes to a model nothing pulled, the provider answers 404, and triage
+        swallows that into its deterministic fallback. The stack is healthy,
+        every container is up, and the measurement is of no model at all."""
+        services = _load(GPU_OVERLAY).get("services") or {}
+
+        pulled = (services.get("ollama-pull") or {}).get("entrypoint") or []
+        env = ((services.get("litellm") or {}).get("environment")) or {}
+
+        assert pulled, "the overlay pulls nothing"
+        model = pulled[-1].split(":-")[-1].rstrip("}")
+
+        for key in ("AISOC_LLM_MODEL_FAST", "AISOC_LLM_MODEL_DEEP"):
+            routed = str(env.get(key, "")).split(":-")[-1].rstrip("}")
+            assert routed.endswith(model), f"{key} routes to {routed!r} and the overlay pulls {model!r}"
 
 
 class TestTheHostLlmOverlayStopsTheBundledOne:

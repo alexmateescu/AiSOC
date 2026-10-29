@@ -76,7 +76,28 @@ NORMALIZER = ROOT / "services" / "ingest" / "internal" / "normalizer" / "normali
 # family by deriving the booleans from the tenant overlay. 14 rules moved
 # (one rule carried two clauses), leaving the four families that genuinely
 # need engine or enrichment work.
-MAX_UNREACHABLE = 119
+#
+# 119 before depth plan 3.1, which decided all 74 rules of the windowed
+# family: 50 became `wd-*` rules replayed through the real engine, and 24
+# were refused with a reason and stopped being published as executable
+# (`scripts/windowed_translation.py`, gated by
+# `scripts/check_windowed_translation.py`). Two of the 74 carried a second
+# clause as well, which is why the identity-enrichment family moved from 24
+# to 22 and the comparison family from 8 to 7.
+#
+# 45 before depth plan 3.3, which closed the rest in four steps and left two:
+#   * five rules were never unreachable — this gate's operator list had not
+#     been given `neq` when the matcher was, so `approver_role_neq` was read
+#     as a field name rather than as `approver_role` with `!=`;
+#   * 18 rules now resolve their `*_priv` booleans from the tenant's own
+#     directory import (`tenant_overlay.IDENTITY_FIELDS`);
+#   * 2 resolve from the per-tenant first-seen store (`first_seen.py`);
+#   * 18 are retired with a reason in `scripts/enrichment_decisions.py`,
+#     gated by `scripts/check_enrichment_decisions.py`, which refuses to let
+#     a rule whose fields *are* resolvable be retired to move this number.
+#
+# The two that remain both need the behavioural baseline of depth plan 3.4.
+MAX_UNREACHABLE = 2
 
 #: Fields that no telemetry carries because they are computed, not observed:
 #: sliding-window counters, allowlist membership, privilege flags, and
@@ -119,7 +140,15 @@ _DERIVED_FIELD_PATTERN = re.compile(
 #: Operator suffixes the matcher strips to recover the field name. Order
 #: matters: longer suffixes must be tried first so `not_contains_any` is not
 #: shortened to `contains_any`. Mirrors `OPERATORS` in
-#: `services/fusion/app/services/detection_matcher.py`.
+#: `services/fusion/app/services/detection_matcher.py`, and
+#: `services/fusion/tests/test_detection_matcher_parity.py` asserts the two
+#: lists agree in **both** directions.
+#:
+#: They did not. `neq` was added to the matcher and not here, so five rules
+#: whose clauses the engine reads correctly as `<field>` + `!=` were reported
+#: by this gate as naming a field called `<field>_neq` — unreachable,
+#: ratcheted, and fine all along. A list that mirrors another and is checked
+#: in one direction only drifts in exactly the direction things change.
 _OPERATOR_SUFFIXES = (
     "not_contains_any",
     "not_startswith_any",
@@ -139,6 +168,7 @@ _OPERATOR_SUFFIXES = (
     "not_in",
     "contains",
     "match",
+    "neq",
     "gte",
     "lte",
     "in",
@@ -203,6 +233,75 @@ def _rule_fields(match_when: dict) -> set[str]:
 #: breaks.
 _DERIVED_TIME_FIELDS = frozenset({"is_business_hours", "is_after_hours", "is_weekend"})
 
+#: The source-IP privacy boolean `derived_fields.ip_privacy_fields` computes
+#: from `src_ip` (issue #1545). Named exactly rather than pattern-matched for
+#: the same reason as the tenant set below: `ip_is_internal` is computed and
+#: a hypothetical `registry_is_internal` would not be.
+_DERIVED_IP_FIELDS = frozenset({"ip_is_internal"})
+
+#: Booleans the **tenant overlay** computes, from that tenant's own directory
+#: import (`identity_nodes.privilege_tier`). Depth plan 3.3.
+#:
+#: Named here rather than pattern-matched on `_priv$`, because four booleans
+#: in the same family are deliberately *not* computed — `scope_priv`,
+#: `act_as_user_priv`, `gpo_link_priv` and `account_is_dc` have no subject
+#: field any source emits. A pattern would have swept those in and reported
+#: four rules reachable that are not.
+#:
+#: `services/fusion/tests/test_tenant_tuning_overlay.py` asserts this set and
+#: `tenant_overlay.IDENTITY_FIELDS` agree in both directions, so the list
+#: cannot drift the way the operator list below did.
+_TENANT_DERIVED_FIELDS = frozenset(
+    {
+        "user_priv",
+        "target_user_priv",
+        "role_priv",
+        "actor_role_priv",
+        "actor_is_admin",
+    }
+)
+
+#: Booleans and ages the **first-seen store** computes
+#: (`services/fusion/app/services/first_seen.py`). Depth plan 3.3.
+#:
+#: Only observation-shaped subjects are here. `domain_age_days`,
+#: `key_age_days` and the other ages-of-a-thing are not, and will not be:
+#: answering "how old is this domain" with "when did we first see it" would
+#: fire a newly-registered-domain rule on most of the internet.
+#: `services/fusion/tests/test_first_seen.py` asserts this set and the
+#: store's own tables agree in both directions.
+_FIRST_SEEN_DERIVED_FIELDS = frozenset(
+    {
+        "publisher_ip_seen_before",
+        "device_fingerprint_seen_before",
+        "session_age_hours",
+    }
+)
+
+#: Per-principal behavioural scores the **baseline store** computes
+#: (`services/fusion/app/services/baselines.py`). Depth plan 3.4.
+#:
+#: Every one is reported only when the principal has enough history to
+#: support it, and is absent otherwise — so a rule reading one of these
+#: fires on a measured deviation and not on a quiet tenant. `ADR-0011`
+#: records why these are computed in fusion rather than in the
+#: `full`-profile UEBA service.
+#:
+#: `services/fusion/tests/test_baselines.py` asserts this set and
+#: `baselines.DERIVED_FIELDS` agree in both directions, so the two cannot
+#: drift the way the matcher's operator list did.
+_BASELINE_DERIVED_FIELDS = frozenset(
+    {
+        "baseline_action_rarity",
+        "baseline_resource_rarity",
+        "baseline_client_family_rarity",
+        "baseline_location_rarity",
+        "baseline_principal_volume_z",
+        "baseline_oauth_app_volume_z",
+        "baseline_peer_deviation",
+    }
+)
+
 #: `<left>_eq_<right>` / `<left>_neq_<right>`, resolved by comparing two
 #: fields of the same event. Reachable only when *both* sides are in the
 #: namespace — a comparison against a field nothing emits is still dead, and
@@ -213,7 +312,13 @@ _DERIVED_COMPARISON_RE = re.compile(r"^(?P<left>.+?)_(?:eq|neq)_(?P<right>.+)$")
 
 def _is_derivable(field: str, namespace: set[str]) -> bool:
     """True when the engine can compute this field from what it already has."""
-    if field in _DERIVED_TIME_FIELDS:
+    if (
+        field in _DERIVED_TIME_FIELDS
+        or field in _DERIVED_IP_FIELDS
+        or field in _TENANT_DERIVED_FIELDS
+        or field in _FIRST_SEEN_DERIVED_FIELDS
+        or field in _BASELINE_DERIVED_FIELDS
+    ):
         return True
     match = _DERIVED_COMPARISON_RE.match(field)
     if not match:
@@ -235,7 +340,25 @@ _FIELD_FAMILIES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("identity enrichment", re.compile(r"_priv$|_is_admin$|_is_dc$")),
     ("per-tenant allowlist", re.compile(r"_in_allowlist$|_not_in_allowlist$")),
     ("age / first-seen enrichment", re.compile(r"_age_days$|_age_hours$|_seen_before$")),
-    ("behavioural baseline", re.compile(r"_baseline|_deviation|^active_|_is_first_")),
+    # Narrowed in depth plan 3.4. This used to read `^active_`, which is not
+    # a behavioural shape at all: it swept in `active_state` (a systemd unit
+    # state an endpoint agent would emit) and `active_p0_or_p1_incident` (an
+    # ITSM lookup), and reported both as blocked on a baseline that would
+    # never have helped either. The whole family therefore read "2 rules
+    # need depth plan 3.4" when the true answer was zero — a gate pointing
+    # at the wrong piece of work is worse than one pointing at none, because
+    # building the named thing does not move the number and the next reader
+    # concludes the fix failed.
+    #
+    # The shape a baseline field actually has is the one `baselines.py`
+    # produces, so the pattern now matches that and nothing else.
+    ("behavioural baseline", re.compile(r"^baseline_|_baseline$|_deviation$")),
+    # Answered by a system outside the event and outside this platform: the
+    # tenant's ITSM, change calendar or ticket queue. Distinct from identity
+    # enrichment, which AiSOC can answer from its own directory import, and
+    # from "nothing emits it", which is a content mistake rather than a
+    # missing integration.
+    ("external system context", re.compile(r"_incident$|^change_ticket|_approved_change$")),
     (
         # Both operands invented by the rule author. Distinct from the rest:
         # the engine can compute a comparison, it just cannot compare two

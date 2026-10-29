@@ -39,7 +39,6 @@ on:
       - "docker-compose.yml"
       - "infra/**"
       - ".env.example"
-      - "render.yaml"
       - ".github/workflows/isolation.yml"
   pull_request:
     paths:
@@ -64,7 +63,6 @@ on:
       - "docker-compose.yml"
       - "infra/**"
       - ".env.example"
-      - "render.yaml"
       - ".github/workflows/isolation.yml"
   # Matching isolation-live.yml, so a maintainer can run the isolation gate on
   # demand rather than only when a path filter happens to match.
@@ -127,7 +125,7 @@ jobs:
       - name: Install deps
         run: >-
           pip install --quiet
-          pytest pytest-asyncio httpx "fastapi>=0.117,<0.142" pydantic
+          pytest pytest-asyncio httpx "fastapi>=0.117,<0.162" pydantic
           structlog "redis>=5,<6" "pydantic-settings>=2.1,<3"
           "aiokafka>=0.10,<0.15" "asyncpg>=0.29,<0.31" "cryptography>=46,<51"
           "sqlalchemy[asyncio]>=2,<3" aiosqlite "langchain-core>=1.2.22,<2" "langchain-openai>=0.2.0,<2"

@@ -152,6 +152,16 @@ def _phishing_row(tenant_id: uuid.UUID, **overrides: Any) -> MagicMock:
         "submitted_at": now,
         "triaged_at": now,
         "raw_content": "Click here to verify",
+        # Depth 7.1 columns. A bare MagicMock answers any attribute with a
+        # truthy mock, so retriage's `getattr(row, "intake_source", "manual")`
+        # read a mock instead of its default and ReportedMessage refused it —
+        # the double must say what a real row says, which for a pre-7.1
+        # submission is these values.
+        "intake_source": "manual",
+        "internet_message_id": "",
+        "recipients": [],
+        "reported_by": "",
+        "headers": {},
     }
     defaults.update(overrides)
     row = MagicMock()

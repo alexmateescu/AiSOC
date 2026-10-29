@@ -39,14 +39,26 @@ def test_registry_contains_pagerduty():
     assert CONNECTOR_REGISTRY["pagerduty"] is PagerDutyConnector
 
 
-def test_normalize_incident_p1_triggered_high(fixture):
+def test_normalize_incident_p1_triggered_critical(fixture):
     ev = dict(fixture["incidents"][0], _aisoc_stream="incident")
     out = PagerDutyConnector(_KEY, subdomain="acme").normalize(ev)
-    # P1 priority maps to high via the wave-1 priority table.
-    assert out["severity"] == "high"
+    assert out["severity"] == "critical"
+    assert out["raw_event"]["priority"]["name"] == "P1"
     assert out["source"] == "pagerduty"
     assert out["external_id"] == "pagerduty-incident-PT4KHLK"
     assert out["event_type"] == "pagerduty.incident.triggered"
+
+
+def test_normalize_incident_named_critical_priority():
+    ev = {
+        "_aisoc_stream": "incident",
+        "id": "critical-incident",
+        "status": "triggered",
+        "priority": {"name": "critical"},
+    }
+    out = PagerDutyConnector(_KEY).normalize(ev)
+    assert out["severity"] == "critical"
+    assert out["raw_event"]["priority"]["name"] == "critical"
 
 
 def test_normalize_incident_low_urgency_low(fixture):

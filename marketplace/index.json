@@ -1,7 +1,7 @@
 {
   "$schema": "https://example.com/schemas/marketplace/v1.json",
   "version": "1.0.0",
-  "generated": "2026-10-04T15:38:08Z",
+  "generated": "2026-10-28T19:50:45Z",
   "categories": [
     {
       "id": "playbooks",
@@ -20,29 +20,29 @@
     }
   ],
   "stats": {
-    "total": 7155,
-    "playbooks": 87,
-    "playbook_packs": 62,
-    "detections": 6991,
-    "plugins": 77,
-    "verified": 1034,
+    "total": 7183,
+    "playbooks": 88,
+    "playbook_packs": 63,
+    "detections": 7015,
+    "plugins": 80,
+    "verified": 1062,
     "community": 1,
     "by_tier": {
       "beta": 7,
       "community": 1,
       "imported": 6113,
-      "stable": 1034
+      "stable": 1062
     },
     "detections_by_tier": {
       "community": 1,
       "imported": 6113,
-      "stable": 877
+      "stable": 901
     },
-    "executable": 2767,
-    "quarantined": 4388,
-    "executable_detections": 2603,
-    "reference_only_detections": 4388,
-    "not_a_detection": 164
+    "executable": 2698,
+    "quarantined": 4485,
+    "executable_detections": 2530,
+    "reference_only_detections": 4485,
+    "not_a_detection": 168
   },
   "mitre_coverage": {
     "unique_techniques": 391,
@@ -54,7 +54,7 @@
       "T1003.003": 21,
       "T1003.004": 10,
       "T1003.005": 8,
-      "T1003.006": 7,
+      "T1003.006": 6,
       "T1003.008": 1,
       "T1005": 7,
       "T1007": 2,
@@ -62,11 +62,11 @@
       "T1011": 1,
       "T1012": 8,
       "T1016": 3,
-      "T1018": 15,
+      "T1018": 14,
       "T1020": 3,
       "T1021": 4,
       "T1021.001": 10,
-      "T1021.002": 24,
+      "T1021.002": 23,
       "T1021.003": 8,
       "T1021.004": 4,
       "T1021.005": 1,
@@ -92,14 +92,14 @@
       "T1037.004": 2,
       "T1039": 2,
       "T1040": 8,
-      "T1041": 9,
-      "T1046": 11,
+      "T1041": 8,
+      "T1046": 10,
       "T1047": 34,
       "T1048": 8,
       "T1048.001": 1,
-      "T1048.003": 5,
+      "T1048.003": 4,
       "T1049": 4,
-      "T1052": 2,
+      "T1052": 1,
       "T1052.001": 1,
       "T1053": 4,
       "T1053.001": 1,
@@ -129,7 +129,6 @@
       "T1069": 3,
       "T1069.001": 12,
       "T1069.002": 11,
-      "T1069.003": 1,
       "T1070": 17,
       "T1070.001": 3,
       "T1070.002": 1,
@@ -138,47 +137,48 @@
       "T1070.005": 4,
       "T1070.006": 1,
       "T1071": 7,
-      "T1071.001": 16,
-      "T1071.004": 12,
+      "T1071.001": 13,
+      "T1071.004": 10,
       "T1072": 4,
       "T1074.001": 4,
-      "T1078": 51,
+      "T1078": 50,
       "T1078.001": 5,
       "T1078.002": 7,
-      "T1078.003": 2,
+      "T1078.003": 3,
       "T1078.004": 49,
       "T1082": 13,
       "T1083": 9,
       "T1087": 10,
       "T1087.001": 10,
-      "T1087.002": 19,
-      "T1087.004": 5,
+      "T1087.002": 18,
+      "T1087.004": 2,
       "T1090": 16,
       "T1090.001": 4,
       "T1090.002": 1,
       "T1090.003": 9,
       "T1091": 1,
-      "T1095": 5,
-      "T1098": 47,
-      "T1098.001": 22,
-      "T1098.003": 6,
+      "T1095": 4,
+      "T1098": 48,
+      "T1098.001": 19,
+      "T1098.003": 8,
       "T1098.004": 6,
+      "T1098.005": 1,
       "T1098.007": 1,
       "T1102": 5,
       "T1102.002": 1,
       "T1105": 49,
       "T1106": 6,
-      "T1110": 23,
-      "T1110.001": 7,
+      "T1110": 18,
+      "T1110.001": 5,
       "T1110.002": 1,
-      "T1110.003": 4,
-      "T1110.004": 4,
+      "T1110.003": 2,
+      "T1110.004": 3,
       "T1112": 58,
       "T1113": 7,
       "T1114": 1,
       "T1114.001": 1,
       "T1114.002": 1,
-      "T1114.003": 2,
+      "T1114.003": 3,
       "T1115": 3,
       "T1119": 3,
       "T1120": 2,
@@ -195,10 +195,10 @@
       "T1134.003": 3,
       "T1134.004": 1,
       "T1135": 7,
-      "T1136": 3,
-      "T1136.001": 12,
+      "T1136": 2,
+      "T1136.001": 11,
       "T1136.002": 3,
-      "T1136.003": 4,
+      "T1136.003": 2,
       "T1137": 4,
       "T1137.002": 1,
       "T1137.003": 1,
@@ -210,10 +210,10 @@
       "T1187": 3,
       "T1190": 39,
       "T1195": 3,
-      "T1195.001": 1,
-      "T1195.002": 9,
+      "T1195.001": 2,
+      "T1195.002": 6,
       "T1197": 13,
-      "T1199": 12,
+      "T1199": 11,
       "T1200": 3,
       "T1201": 3,
       "T1202": 26,
@@ -225,8 +225,9 @@
       "T1207": 2,
       "T1210": 4,
       "T1211": 4,
-      "T1212": 5,
+      "T1212": 4,
       "T1213": 2,
+      "T1213.003": 1,
       "T1216": 8,
       "T1216.001": 2,
       "T1217": 3,
@@ -250,17 +251,17 @@
       "T1404": 2,
       "T1482": 14,
       "T1484": 1,
-      "T1484.001": 8,
-      "T1484.002": 2,
-      "T1485": 34,
-      "T1486": 12,
+      "T1484.001": 7,
+      "T1484.002": 3,
+      "T1485": 29,
+      "T1486": 11,
       "T1489": 10,
       "T1490": 20,
       "T1491.001": 2,
       "T1496": 4,
       "T1497.001": 1,
-      "T1498": 4,
-      "T1498.001": 2,
+      "T1498": 3,
+      "T1498.001": 1,
       "T1498.002": 2,
       "T1499": 1,
       "T1499.001": 1,
@@ -272,10 +273,10 @@
       "T1518.001": 2,
       "T1525": 8,
       "T1526": 2,
-      "T1528": 9,
+      "T1528": 8,
       "T1529": 3,
-      "T1530": 35,
-      "T1531": 10,
+      "T1530": 31,
+      "T1531": 7,
       "T1535": 1,
       "T1537": 7,
       "T1539": 6,
@@ -290,7 +291,6 @@
       "T1546.001": 4,
       "T1546.002": 1,
       "T1546.003": 11,
-      "T1546.004": 2,
       "T1546.007": 1,
       "T1546.008": 5,
       "T1546.009": 1,
@@ -313,13 +313,13 @@
       "T1548.002": 50,
       "T1548.003": 2,
       "T1548.004": 1,
-      "T1550": 5,
-      "T1550.001": 2,
+      "T1550": 6,
+      "T1550.001": 3,
       "T1550.002": 6,
-      "T1550.003": 4,
+      "T1550.003": 3,
       "T1550.004": 1,
       "T1552": 3,
-      "T1552.001": 20,
+      "T1552.001": 16,
       "T1552.002": 3,
       "T1552.004": 7,
       "T1552.005": 1,
@@ -331,25 +331,26 @@
       "T1553.004": 9,
       "T1553.005": 5,
       "T1554": 3,
-      "T1555": 9,
-      "T1555.001": 5,
+      "T1555": 8,
+      "T1555.001": 4,
       "T1555.003": 9,
       "T1555.004": 3,
-      "T1555.005": 2,
+      "T1555.005": 1,
       "T1556": 43,
       "T1556.001": 1,
       "T1556.003": 1,
       "T1556.004": 1,
       "T1556.006": 16,
-      "T1556.007": 1,
+      "T1556.007": 2,
+      "T1556.009": 1,
       "T1557": 2,
-      "T1557.001": 13,
+      "T1557.001": 12,
       "T1557.002": 3,
       "T1557.003": 1,
       "T1558": 3,
       "T1558.001": 2,
       "T1558.002": 2,
-      "T1558.003": 16,
+      "T1558.003": 15,
       "T1558.004": 4,
       "T1559.001": 3,
       "T1559.002": 1,
@@ -369,18 +370,16 @@
       "T1564.003": 6,
       "T1564.004": 12,
       "T1564.006": 2,
-      "T1564.008": 1,
+      "T1564.008": 2,
       "T1565": 2,
       "T1565.001": 3,
-      "T1565.002": 1,
-      "T1566": 6,
+      "T1566": 5,
       "T1566.001": 15,
       "T1566.002": 2,
-      "T1567": 18,
+      "T1567": 16,
       "T1567.001": 1,
-      "T1567.002": 18,
-      "T1568.001": 2,
-      "T1568.002": 3,
+      "T1567.002": 15,
+      "T1568.002": 2,
       "T1569": 1,
       "T1569.002": 29,
       "T1570": 5,
@@ -399,6 +398,7 @@
       "T1578": 1,
       "T1578.002": 1,
       "T1578.003": 1,
+      "T1580": 1,
       "T1583.001": 4,
       "T1584": 1,
       "T1586.003": 1,
@@ -408,7 +408,7 @@
       "T1589.002": 1,
       "T1590.001": 1,
       "T1590.002": 1,
-      "T1592": 2,
+      "T1592": 1,
       "T1593.003": 1,
       "T1595": 1,
       "T1595.002": 1,
@@ -418,14 +418,14 @@
       "T1606.002": 1,
       "T1608": 2,
       "T1608.003": 1,
-      "T1609": 1,
+      "T1609": 3,
       "T1610": 12,
       "T1611": 25,
       "T1612": 1,
       "T1614.001": 2,
       "T1615": 4,
       "T1620": 4,
-      "T1621": 7,
+      "T1621": 5,
       "T1622": 1,
       "T1647": 1,
       "T1649": 4,
@@ -439,8 +439,8 @@
       "T1686.003": 10,
       "T1689": 1
     },
-    "total_with_mitre": 2472,
-    "unique_techniques_all_rules": 493,
+    "total_with_mitre": 2400,
+    "unique_techniques_all_rules": 494,
     "techniques_all_rules": {
       "T1001.003": 2,
       "T1003": 51,
@@ -563,11 +563,11 @@
       "T1072": 9,
       "T1074": 3,
       "T1074.001": 6,
-      "T1078": 132,
+      "T1078": 133,
       "T1078.001": 10,
       "T1078.002": 14,
-      "T1078.003": 11,
-      "T1078.004": 98,
+      "T1078.003": 12,
+      "T1078.004": 102,
       "T1082": 49,
       "T1083": 28,
       "T1087": 21,
@@ -580,12 +580,12 @@
       "T1090.003": 11,
       "T1091": 5,
       "T1095": 8,
-      "T1098": 91,
-      "T1098.001": 27,
+      "T1098": 95,
+      "T1098.001": 29,
       "T1098.002": 6,
-      "T1098.003": 35,
+      "T1098.003": 37,
       "T1098.004": 12,
-      "T1098.005": 7,
+      "T1098.005": 8,
       "T1098.007": 1,
       "T1102": 17,
       "T1102.001": 4,
@@ -596,14 +596,14 @@
       "T1110": 57,
       "T1110.001": 18,
       "T1110.002": 1,
-      "T1110.003": 44,
+      "T1110.003": 45,
       "T1110.004": 16,
       "T1112": 164,
       "T1113": 16,
       "T1114": 6,
       "T1114.001": 7,
       "T1114.002": 16,
-      "T1114.003": 12,
+      "T1114.003": 13,
       "T1115": 11,
       "T1119": 8,
       "T1120": 2,
@@ -638,7 +638,7 @@
       "T1189": 4,
       "T1190": 177,
       "T1195": 23,
-      "T1195.001": 2,
+      "T1195.001": 3,
       "T1195.002": 17,
       "T1197": 23,
       "T1199": 16,
@@ -657,7 +657,7 @@
       "T1212": 8,
       "T1213": 10,
       "T1213.002": 2,
-      "T1213.003": 5,
+      "T1213.003": 6,
       "T1216": 14,
       "T1216.001": 2,
       "T1217": 4,
@@ -687,7 +687,7 @@
       "T1482": 31,
       "T1484": 13,
       "T1484.001": 16,
-      "T1484.002": 6,
+      "T1484.002": 7,
       "T1485": 84,
       "T1485.001": 2,
       "T1486": 27,
@@ -719,7 +719,7 @@
       "T1526": 11,
       "T1528": 28,
       "T1529": 16,
-      "T1530": 46,
+      "T1530": 50,
       "T1531": 20,
       "T1535": 6,
       "T1537": 23,
@@ -766,8 +766,8 @@
       "T1548.002": 76,
       "T1548.003": 39,
       "T1548.004": 1,
-      "T1550": 13,
-      "T1550.001": 4,
+      "T1550": 14,
+      "T1550.001": 5,
       "T1550.002": 7,
       "T1550.003": 9,
       "T1550.004": 2,
@@ -791,13 +791,14 @@
       "T1555.003": 15,
       "T1555.004": 6,
       "T1555.005": 5,
-      "T1556": 73,
+      "T1556": 74,
       "T1556.001": 1,
       "T1556.002": 3,
       "T1556.003": 1,
       "T1556.004": 3,
-      "T1556.006": 28,
-      "T1556.007": 1,
+      "T1556.006": 29,
+      "T1556.007": 2,
+      "T1556.009": 1,
       "T1557": 13,
       "T1557.001": 19,
       "T1557.002": 6,
@@ -830,7 +831,7 @@
       "T1564.003": 11,
       "T1564.004": 25,
       "T1564.006": 3,
-      "T1564.008": 4,
+      "T1564.008": 5,
       "T1565": 3,
       "T1565.001": 11,
       "T1565.002": 3,
@@ -867,7 +868,7 @@
       "T1578.002": 2,
       "T1578.003": 1,
       "T1578.005": 1,
-      "T1580": 6,
+      "T1580": 7,
       "T1583.001": 4,
       "T1583.006": 1,
       "T1584": 3,
@@ -906,7 +907,7 @@
       "T1606.002": 1,
       "T1608": 2,
       "T1608.003": 1,
-      "T1609": 4,
+      "T1609": 6,
       "T1610": 12,
       "T1611": 29,
       "T1612": 1,
@@ -995,11 +996,11 @@
         "T1071.001": 10,
         "T1071.004": 6,
         "T1074.001": 1,
-        "T1078": 41,
+        "T1078": 42,
         "T1078.001": 4,
         "T1078.002": 3,
-        "T1078.003": 1,
-        "T1078.004": 38,
+        "T1078.003": 2,
+        "T1078.004": 42,
         "T1083": 2,
         "T1087.001": 2,
         "T1087.002": 5,
@@ -1007,20 +1008,21 @@
         "T1090": 3,
         "T1090.003": 6,
         "T1095": 3,
-        "T1098": 32,
-        "T1098.001": 22,
-        "T1098.003": 9,
+        "T1098": 36,
+        "T1098.001": 24,
+        "T1098.003": 11,
         "T1098.004": 8,
+        "T1098.005": 1,
         "T1098.007": 1,
         "T1105": 3,
         "T1110": 9,
         "T1110.001": 4,
-        "T1110.003": 4,
+        "T1110.003": 5,
         "T1110.004": 4,
         "T1112": 1,
         "T1113": 2,
         "T1114.002": 5,
-        "T1114.003": 4,
+        "T1114.003": 5,
         "T1127.001": 1,
         "T1133": 13,
         "T1134": 1,
@@ -1033,6 +1035,7 @@
         "T1185": 1,
         "T1190": 30,
         "T1195": 2,
+        "T1195.001": 1,
         "T1195.002": 10,
         "T1197": 1,
         "T1199": 15,
@@ -1042,6 +1045,7 @@
         "T1212": 2,
         "T1213": 3,
         "T1213.002": 1,
+        "T1213.003": 1,
         "T1218": 1,
         "T1218.003": 1,
         "T1218.004": 1,
@@ -1054,7 +1058,7 @@
         "T1404": 2,
         "T1482": 1,
         "T1484.001": 2,
-        "T1484.002": 2,
+        "T1484.002": 3,
         "T1485": 29,
         "T1486": 8,
         "T1489": 2,
@@ -1067,7 +1071,7 @@
         "T1505.003": 3,
         "T1525": 8,
         "T1528": 6,
-        "T1530": 36,
+        "T1530": 40,
         "T1531": 5,
         "T1535": 1,
         "T1537": 10,
@@ -1098,7 +1102,8 @@
         "T1548.002": 4,
         "T1548.003": 3,
         "T1548.004": 1,
-        "T1550": 3,
+        "T1550": 4,
+        "T1550.001": 1,
         "T1550.002": 2,
         "T1550.003": 1,
         "T1550.004": 1,
@@ -1117,12 +1122,13 @@
         "T1555.003": 3,
         "T1555.004": 1,
         "T1555.005": 1,
-        "T1556": 42,
+        "T1556": 43,
         "T1556.001": 1,
         "T1556.003": 1,
         "T1556.004": 1,
-        "T1556.006": 14,
-        "T1556.007": 1,
+        "T1556.006": 15,
+        "T1556.007": 2,
+        "T1556.009": 1,
         "T1557": 2,
         "T1557.001": 5,
         "T1557.002": 3,
@@ -1140,7 +1146,7 @@
         "T1562.008": 14,
         "T1562.012": 2,
         "T1564.001": 1,
-        "T1564.008": 1,
+        "T1564.008": 2,
         "T1565.001": 4,
         "T1565.002": 1,
         "T1566": 3,
@@ -1159,13 +1165,14 @@
         "T1574.002": 4,
         "T1574.006": 3,
         "T1578.002": 1,
+        "T1580": 1,
         "T1583.001": 4,
         "T1592": 2,
         "T1595.002": 1,
         "T1599": 1,
         "T1600.001": 1,
         "T1606.002": 1,
-        "T1609": 1,
+        "T1609": 3,
         "T1610": 12,
         "T1611": 25,
         "T1612": 1,
@@ -30812,10 +30819,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/application/rate-limit-burst.yaml",
-      "sha256": "81da163e5d78188214229399302fcf050e86b64f5e683d9856d1521542f054ee"
+      "quarantine_reason": "superseded by the windowed rule wd-rate-limit-burst; this stateless form named a counter no source emits",
+      "sha256": "d6cd2f5fe9f5881e7d785db49aad9cda0afa45e3c6b727de11cccbc849468c36"
     },
     {
       "id": "det-application-009",
@@ -31012,10 +31020,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/application/github-protected-branch-bypass.yaml",
-      "sha256": "408d302476035003e40f95c04c61d77e4ed4136848a38f6e6e5bf4407a28ec06"
+      "quarantine_reason": "not executable (needs-connector-field): wants `ref_in_protected_branches` and `actor_role` on a git.push, and the audit entry carries neither a ref nor the actor's org role. The observable form of a protection bypass in this telemetry is `protected_branch.policy_override`, which app-protected-branch-disabled already matches.",
+      "sha256": "e01150cf5d5fc13af7fe4092f7956d7589061b7b89721797946e1af10753cabd"
     },
     {
       "id": "det-application-017",
@@ -31040,7 +31049,7 @@
       "enabled": true,
       "executable": true,
       "path": "detections/application/github-public-repo-flip.yaml",
-      "sha256": "a84b1745a96ff19c92c44021c914e4f6fcdf51dd0e26ed43235fb65a5a227566"
+      "sha256": "301ff06edbbf04aeb7ece2e2dccdd2596b2d8d3a89bf294eff3e9891787acf33"
     },
     {
       "id": "det-application-018",
@@ -31087,10 +31096,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/application/api-mass-enumeration-ids.yaml",
-      "sha256": "35cd0f0eb9a093eb0a790efc8b52ff0246cd79f9bbe60d58b0c4cfa624f56517"
+      "quarantine_reason": "not executable (operand-not-emitted): counts distinct object ids per source, and no WAF or application source in this tree surfaces the requested object id as a field \u2014 the engine would count nothing. Revisit when the activity projection lands a `resource` field (depth plan 2.2).",
+      "sha256": "a341f99d9353fb8aa7b55cca497b9e2ce7888177a1ce1d343cf1687df2e588a3"
     },
     {
       "id": "det-application-020",
@@ -31112,10 +31122,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/application/api-permission-bypass-idor.yaml",
-      "sha256": "907beebb04b60d1689cfbab9e63429968a56e4e59b580a9837feb62e6ddebc7a"
+      "quarantine_reason": "not executable (needs-connector-field): compares the object's owning tenant with the caller's, and no application source in this tree surfaces either. The engine can compare two fields of one event; it cannot compare two fields that are not there.",
+      "sha256": "3f757cd10acefaf0b218f68cd8f303aef0f8f9570eb30887494e602a8d28a41d"
     },
     {
       "id": "det-application-021",
@@ -31212,10 +31223,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/application/saas-mass-share-public.yaml",
-      "sha256": "72c83cfff9ac33fb3bf97c094febe1dc2a9b01798bc1f71d7f50002130ef03df"
+      "quarantine_reason": "superseded by the windowed rule wd-saas-mass-share-public; this stateless form named a counter no source emits",
+      "sha256": "dd371b2dfe0e4a36598eb67bf72ea7f8fbec2036c78a36e0629e3b7fd0f14e75"
     },
     {
       "id": "det-application-025",
@@ -31612,10 +31624,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/application/app-account-enum-reset.yaml",
-      "sha256": "39b35d2bbe7c42ad8dddd06f321ad83ff342598554734c19a70bad6a0076c82f"
+      "quarantine_reason": "superseded by the windowed rule wd-app-account-enum-reset; this stateless form named a counter no source emits",
+      "sha256": "ca784d9be605f1a34bf0fae00af57d67a84189c411f13a6f75c985a11036884d"
     },
     {
       "id": "det-application-041",
@@ -31762,10 +31775,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/application/app-ci-workflow-modified-by-non-owner.yaml",
-      "sha256": "cbdd8b151fb99ccdede43f2f4e91b16bfd8f7d5a9a458a787dfe1d0b2d427489"
+      "quarantine_reason": "not executable (needs-connector-field): matches pushes that modify .github/workflows/ without CODEOWNER approval, but the audit log's git.push entries carry no file paths and no review role \u2014 `path` and `approver_role` exist in no GitHub telemetry this connector pulls. The push webhook's per-commit file list could carry the paths; surfacing it is connector work.",
+      "sha256": "24368520c3844f542e60e7af76035978ea893a4c415b04d1a3871bdbb62694a0"
     },
     {
       "id": "det-application-047",
@@ -31790,7 +31804,7 @@
       "enabled": true,
       "executable": true,
       "path": "detections/application/app-self-hosted-runner-external.yaml",
-      "sha256": "826b9b5d236411e0dc567ac2341bc6c58aa6ce74b4fd5ebbddb574ca919d6f14"
+      "sha256": "34f18e7c0f5c90ba516ae13137ddf9e1ef6fc0ed00e539d9ed96863a11093432"
     },
     {
       "id": "det-application-048",
@@ -31915,7 +31929,7 @@
       "enabled": true,
       "executable": true,
       "path": "detections/application/app-deploy-key-added-github.yaml",
-      "sha256": "9ee43d16d2cc1f4b7b35f13e49e1f726097dc7fcdd0167441416fa70f9d2bc50"
+      "sha256": "1b8442952eee7ef1b38bea033db18ac15c2fd960cf7a39075b07e7844bb2338a"
     },
     {
       "id": "det-application-053",
@@ -31937,10 +31951,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/application/app-npm-package-publish-new-account.yaml",
-      "sha256": "54cefdefd2ce54c8dc2a82f3f8ab0ce19663f18acec4e1c515b85fdfde352a60"
+      "quarantine_reason": "not executable (needs-external-source): wants the publisher account's age at the registry. The first-seen store knows when this deployment first saw the account, which is a different number: substituting it would fire on every publisher a quiet tenant has not seen before.",
+      "sha256": "636bbcd6478dc775efa4bca041e41f09de50c63bfaa801e7d5f66fd1383de7b6"
     },
     {
       "id": "det-application-054",
@@ -31987,10 +32002,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/application/app-docker-insecure-registry-flag.yaml",
-      "sha256": "571654c2fd02fccb3b3146be9f4420959e01127cce20a9d06a68998b645fd5a8"
+      "quarantine_reason": "not executable (not-windowed): `insecure_registries_count` is the length of a list inside one daemon config event, not a count over a window. The reachability gate reads it as windowed because the name ends in `_count`.",
+      "sha256": "08232f1c7b5b3490b6aa4e79de04213f0e8350d90f30e1b02ea4f98216cceb6f"
     },
     {
       "id": "det-application-056",
@@ -32040,7 +32056,7 @@
       "enabled": true,
       "executable": true,
       "path": "detections/application/app-protected-branch-disabled.yaml",
-      "sha256": "f74a64858a2962bcbac0134f1a5c3b1aa38913f7639dc0fcc63595e70083e303"
+      "sha256": "b63813e952ba0970198ae425d078deda160beccffedfa765f1a6d9707f602f8a"
     },
     {
       "id": "det-application-058",
@@ -32062,10 +32078,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/application/app-salesforce-mass-export.yaml",
-      "sha256": "72bbff628f51b8b4e7aa61f7a8b6f0dd301ae906580a56c43d977859b41a604d"
+      "quarantine_reason": "not executable (not-windowed): `row_count` is a per-event field of one export record, not a count over a window. The Salesforce connector does not surface it.",
+      "sha256": "18d46ceb2934492bba36d21de5a7138a64de2bc973c57a089ecf4a0e14e25908"
     },
     {
       "id": "det-application-059",
@@ -32162,10 +32179,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/application/app-box-public-link-mass-create.yaml",
-      "sha256": "cf92c561eb1991d82444053a99d2a9d2231a0daae9b8e8729fea68426a6e82d6"
+      "quarantine_reason": "superseded by the windowed rule wd-app-box-public-link-mass-create; this stateless form named a counter no source emits",
+      "sha256": "7a2750d91a204fcd59a160aa07d9b2e7ece603e8c4766a4016ec410a6f171ef3"
     },
     {
       "id": "det-application-063",
@@ -32237,10 +32255,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/application/app-servicenow-record-export-bulk.yaml",
-      "sha256": "40ec8c992135e5af7b5f053a3ceec3f03b3c7bcbc4a3b4c55a9ec008cc0856bc"
+      "quarantine_reason": "not executable (not-windowed): `row_count` is a per-event field of one export record, not a count over a window. The ServiceNow connector does not surface it.",
+      "sha256": "2d88e18502daf69b2c75b66c63dccef87c25687a8c39a493059822be4e4de26c"
     },
     {
       "id": "det-application-066",
@@ -32813,10 +32832,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/cloud/aws-iam-enumeration.yaml",
-      "sha256": "304e0557b80a04aad978cdb4b860342fb080f14fd834d5795449d4c4f1af9c6a"
+      "quarantine_reason": "superseded by the windowed rule wd-aws-iam-enumeration; this stateless form named a counter no source emits",
+      "sha256": "a1f60811c87292b8cab480f0aad935d6734dd2ab1e891da535526d7783edc0a2"
     },
     {
       "id": "det-cloud-003",
@@ -33143,10 +33163,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/cloud/aws-s3-mass-getobject.yaml",
-      "sha256": "6ccc6f122f905dff87f6a00123999f9ac198926b24c74f10b804ab61bb2b8abe"
+      "quarantine_reason": "superseded by the windowed rule wd-aws-s3-mass-getobject; this stateless form named a counter no source emits",
+      "sha256": "0fde5d59050ccdabe54aabd82c23b67ed39ce794213d75c68858a086a4a6cb11"
     },
     {
       "id": "det-cloud-016",
@@ -33393,10 +33414,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/cloud/azure-resource-mass-delete.yaml",
-      "sha256": "16261b9181ef8238dc0880480d3abfb810e6c8df9cf2d35bf65df47a33b1f21e"
+      "quarantine_reason": "superseded by the windowed rule wd-azure-resource-mass-delete; this stateless form named a counter no source emits",
+      "sha256": "fed6ffde1508e24b474184bbc3cbcc350b23ab067cd2fccda9eaa0c94f5f1887"
     },
     {
       "id": "det-cloud-026",
@@ -33619,10 +33641,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/cloud/gcp-secret-manager-mass-export.yaml",
-      "sha256": "0771f6f2575981a558e4f0cf7d6d4a83cf51472c9a18f19d7c86a19ec1c2f5c1"
+      "quarantine_reason": "superseded by the windowed rule wd-gcp-secret-manager-mass-export; this stateless form named a counter no source emits",
+      "sha256": "d96938e05b66df327ee77acc83880315e9ac3aa81087f4cff4640d1add05267a"
     },
     {
       "id": "det-cloud-035",
@@ -33821,10 +33844,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/cloud/aws-iam-key-rotation-skipped.yaml",
-      "sha256": "8d0a8e51f512c731c5e600f7f31e9ba210793a0241ab6d27bd55cc4fad68c9c6"
+      "quarantine_reason": "not executable (needs-external-source): wants an access key's creation date. CloudTrail reports key *use* and not key age; the date is in the IAM credential report, which arrives with the AWS posture snapshot (depth plan 2.5).",
+      "sha256": "a18d457a4dae77733cdbb4b1a24795938a42482111a9db3fa866f11316e9fdf9"
     },
     {
       "id": "det-cloud-043",
@@ -34022,10 +34046,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/cloud/aws-iam-create-user-burst.yaml",
-      "sha256": "76c6fbdd88f82ad2be5f24de4e9ad8317dcd57680bf3eb5ee21fa0100e4b7780"
+      "quarantine_reason": "superseded by the windowed rule wd-aws-iam-create-user-burst; this stateless form named a counter no source emits",
+      "sha256": "2a2edcbcde6c466b8374fde6de22dba3d9c96fa8b4e56bd1e9e15a36d72b3293"
     },
     {
       "id": "det-cloud-051",
@@ -34047,10 +34072,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/cloud/aws-iam-account-summary-recon.yaml",
-      "sha256": "9d007c619fae1bc3d815423530ea868e1cf21bfb5e45b13386281f750c5cbba2"
+      "quarantine_reason": "superseded by the windowed rule wd-aws-iam-account-summary-recon; this stateless form named a counter no source emits",
+      "sha256": "12818092ce2aae207ba18e4cedb9a9867bce748862756d1439d0ee41e24c0ec6"
     },
     {
       "id": "det-cloud-052",
@@ -34072,10 +34098,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/cloud/aws-iam-list-keys-recon.yaml",
-      "sha256": "17cac93a054bc8c701a5fd9748c29c8216cb45ef7603cd547ad828bea580e551"
+      "quarantine_reason": "not executable (operand-not-emitted): counts distinct *target* users of ListAccessKeys. CloudTrail carries that in `requestParameters.UserName`, and the matcher has no dotted-path traversal, so the connector's `user_name` is the caller rather than the target. Counting the caller would be a different detection.",
+      "sha256": "6f9a181b45fac60c7cf2f961275de26811a1412ba1535bbd25aa03874cf795cf"
     },
     {
       "id": "det-cloud-053",
@@ -34297,10 +34324,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/cloud/aws-s3-mass-deleteobject.yaml",
-      "sha256": "08fbcb7ac1876e6d5c42a0670e802cd56a5738ff7fb28b52674b71504e7376e0"
+      "quarantine_reason": "superseded by the windowed rule wd-aws-s3-mass-deleteobject; this stateless form named a counter no source emits",
+      "sha256": "ea48892082f49a53720b5c75e4e39328603cb561bb00e06d806c58cb94d65d24"
     },
     {
       "id": "det-cloud-062",
@@ -34998,10 +35026,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/cloud/aws-secretsmanager-mass-getsecret.yaml",
-      "sha256": "d593df7dfed0a9f0034f85f8a069a36762e1e339ae7c9839100d2731ae172723"
+      "quarantine_reason": "not executable (operand-not-emitted): counts distinct secrets, which CloudTrail carries in `requestParameters.SecretId`; the connector surfaces no secret identifier, so the engine has nothing to be distinct about.",
+      "sha256": "c9e262d368b95d81a0069cebfc598519f6ab43fab01b8978729b0d15ff82b070"
     },
     {
       "id": "det-cloud-090",
@@ -35198,10 +35227,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/cloud/aws-cloudfront-origin-changed.yaml",
-      "sha256": "8e47eb25a342cc5028d93e531d35b98576fd146e849e9528bcfb384a243f47e2"
+      "quarantine_reason": "not executable (needs-external-source): wants a distribution's creation date, which is configuration state rather than an event, and arrives with the AWS posture snapshot (depth plan 2.5).",
+      "sha256": "e3e1416f71dd1cadea373cb7396fbba0fbef8862b167fb86495a5e10a94e1d44"
     },
     {
       "id": "det-cloud-098",
@@ -35448,10 +35478,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/cloud/azure-ad-bulk-user-creation.yaml",
-      "sha256": "16dc2a330e26f0ed98d3a6cf2839e57a509220a46a338004a3626e2a9fb666ed"
+      "quarantine_reason": "superseded by the windowed rule wd-azure-ad-bulk-user-creation; this stateless form named a counter no source emits",
+      "sha256": "c2c6029621942ade6d66bde78cd9c762ce12a9327ac5a84178c2b239fca0298e"
     },
     {
       "id": "det-cloud-108",
@@ -35523,10 +35554,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/cloud/azure-ad-bulk-license-assignment.yaml",
-      "sha256": "a29bf20b144444553ae995cfb0eaad9c47366b505816b078c9e6096830c0d609"
+      "quarantine_reason": "superseded by the windowed rule wd-azure-ad-bulk-license-assignment; this stateless form named a counter no source emits",
+      "sha256": "92abc9bcfb427f0b836e1d1656694b48122997e1cb55100a49659a7a9477c259"
     },
     {
       "id": "det-cloud-111",
@@ -35673,10 +35705,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/cloud/azure-arm-locks-removed-bulk.yaml",
-      "sha256": "ca1c950a12eb928473ff08c28eaf27ca5083a7039ad9090f06f9761c2fee26eb"
+      "quarantine_reason": "superseded by the windowed rule wd-azure-arm-locks-removed-bulk; this stateless form named a counter no source emits",
+      "sha256": "05e36370354d762c3f3798c54d3889701aceb57a52995b0b6bd9346844a6a7c7"
     },
     {
       "id": "det-cloud-117",
@@ -35723,10 +35756,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/cloud/azure-arm-mass-resource-modify.yaml",
-      "sha256": "404127a1704077d786feaa87417441b3929a19ba53673de55bc0e29b7f82d38f"
+      "quarantine_reason": "superseded by the windowed rule wd-azure-arm-mass-resource-modify; this stateless form named a counter no source emits",
+      "sha256": "888fd3d543b31409c54d7e8c8b154f203269df1b39875cf9b56b5594f33d02f5"
     },
     {
       "id": "det-cloud-119",
@@ -35948,10 +35982,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/cloud/azure-keyvault-secret-mass-get.yaml",
-      "sha256": "c483e02bd23bd1953a3e5892f1ea013bddc3cf4af220f8f362b68b552f2b38f7"
+      "quarantine_reason": "superseded by the windowed rule wd-azure-keyvault-secret-mass-get; this stateless form named a counter no source emits",
+      "sha256": "ca2c5f00de963f8414877676769ea18bb8410bf30038168dcf910f4915a87fee"
     },
     {
       "id": "det-cloud-128",
@@ -36323,10 +36358,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/cloud/gcp-iam-service-account-key-mass-create.yaml",
-      "sha256": "0f5df424efe9297df53063710f3a8ab61328e5aa7653e068ce3d700076c4f722"
+      "quarantine_reason": "superseded by the windowed rule wd-gcp-iam-service-account-key-mass-create; this stateless form named a counter no source emits",
+      "sha256": "e2d2790bd174aa1d27e7d3bafd2a75f97029a7fec2eebe8e9d03ff7950a32a19"
     },
     {
       "id": "det-cloud-143",
@@ -36373,10 +36409,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/cloud/gcp-iam-impersonation-burst.yaml",
-      "sha256": "8cba5a7357d029e627bcd5e78a6350112ed3c1fe2a327f064f0c30f6bd770931"
+      "quarantine_reason": "not executable (operand-not-emitted): counts distinct impersonation *targets*. The GCP audit connector emits the caller (`actor`) and no target service account, so nothing identifies what is being impersonated.",
+      "sha256": "8dd757d9c09438e477aad23848dc5754fb44632ddc799255528bad8511854a61"
     },
     {
       "id": "det-cloud-145",
@@ -36473,10 +36510,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/cloud/gcp-gcs-mass-delete.yaml",
-      "sha256": "7a22d5ed005cead7804483558975d97cdf6d3b4aed48dd34c734e3b8ebdb5559"
+      "quarantine_reason": "superseded by the windowed rule wd-gcp-gcs-mass-delete; this stateless form named a counter no source emits",
+      "sha256": "874b3c7d54d1d714100224ab0b818d3c9550d7978dfef1e700e3ba6132706f1c"
     },
     {
       "id": "det-cloud-149",
@@ -36723,10 +36761,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/cloud/gcp-bq-mass-export.yaml",
-      "sha256": "08c476fdd42babeee5f382082770a96d0d2111b00486969183defeaf14655e96"
+      "quarantine_reason": "superseded by the windowed rule wd-gcp-bq-mass-export; this stateless form named a counter no source emits",
+      "sha256": "adf82d71c1bfaaa32e329584e0f50ce226e56e451267273646b2a830bb48f1d9"
     },
     {
       "id": "det-cloud-159",
@@ -36948,10 +36987,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/cloud/k8s-secret-mass-get.yaml",
-      "sha256": "37cf655ac9ed8cb06bdd5ffd5aba4b056119941a564654bcb450efa73e45c42e"
+      "quarantine_reason": "superseded by the windowed rule wd-k8s-secret-mass-get; this stateless form named a counter no source emits",
+      "sha256": "9787f5e532cf8778168a2ca3609e820bdd50b27361849c294ed0c40eb1337457"
     },
     {
       "id": "det-cloud-168",
@@ -37423,10 +37463,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/cloud/cloud-multi-cross-cloud-mass-egress.yaml",
-      "sha256": "b6f761129d162c02e4940e863a6fd257529e17501fbb628381e21d7571abb260"
+      "quarantine_reason": "not executable (aggregate): `bytes_out_per_minute` is a sum of a numeric field over the window. The engine counts occurrences and distinct values; it adds nothing up, so a gigabyte in one transfer and a gigabyte in a thousand are the same count to it.",
+      "sha256": "7b5413b7a942507984c4cf1202929c11ffb34a2f70147b52065a69ea4d11e06b"
     },
     {
       "id": "det-cloud-187",
@@ -38505,10 +38546,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/data-exfil/large-egress-personal-cloud.yaml",
-      "sha256": "eb8402dc3f1e0cc3ca5aa0803383e6f25bc1721df0155785d50ed937b41c1a9e"
+      "quarantine_reason": "not executable (not-windowed): carries a `time_window_minutes_lt` clause and no counter at all, so there is nothing to accumulate. `bytes_out` is a per-event proxy field; the window clause is vestigial and is what makes the rule unreachable. Deleting that one clause is a content decision, not a translation.",
+      "sha256": "cff7d6e248fcd64de67fd19a88a672379a7216813217fe519b8355545d124999"
     },
     {
       "id": "det-data-exfil-002",
@@ -38530,10 +38572,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/data-exfil/egress-spike-baseline.yaml",
-      "sha256": "653475a9aa55dc00d90200d659dfca6c9c8cb34a840f7cd47e4d3729aa87dcfe"
+      "quarantine_reason": "not executable (aggregate): needs a sum of `bytes_out` per source and a z-score against a learned baseline. Both are out of scope for a counting engine (the baseline arrives with depth plan 3.4).",
+      "sha256": "424872b43d159017f5a8620d1ab24619df423f8b4433e4a45f57fa57f7a41a78"
     },
     {
       "id": "det-data-exfil-003",
@@ -38631,10 +38674,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/data-exfil/salesforce-bulk-export.yaml",
-      "sha256": "2f35ea6879cab1f19d7ec673a65f6a22bd4b18cea70fd36edd39e728940c178d"
+      "quarantine_reason": "not executable (not-windowed): `row_count` is a per-event field of one export record, not a count over a window. The Salesforce connector does not surface it.",
+      "sha256": "26883bcf44dab64327a579056543fa85cee37b2a7f9ebd7cec2ac51a996a8d68"
     },
     {
       "id": "det-data-exfil-007",
@@ -38681,10 +38725,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/data-exfil/db-mass-row-read.yaml",
-      "sha256": "7de65520911f07c3588c176cad44b065325961ca3b6c0fd136ec66920a4595a0"
+      "quarantine_reason": "not executable (aggregate): needs a sum of rows read per session and a z-score against a learned baseline; the engine computes neither.",
+      "sha256": "ea09b41263ee91c7e16c585b8b9546f545bbc1405c5e8be0a9cc182a5c2cfd67"
     },
     {
       "id": "det-data-exfil-009",
@@ -38731,10 +38776,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/data-exfil/github-pii-pattern-push.yaml",
-      "sha256": "99d74ffff6ec73dcbcff94ea9363abc2877d92ce0f27e211e265a94d79b5a266"
+      "quarantine_reason": "not executable (needs-external-source): greps `diff_text` for secret patterns, and no GitHub telemetry carries diff contents \u2014 the audit log's git.push has no payload and webhooks name files, not hunks. Content inspection is GitHub secret scanning's job; surfacing its alerts is connector work, not a rewrite of this rule.",
+      "sha256": "9ec45286627557b194b6a1ad1f82877cf959b727fd185997258993c21aa53909"
     },
     {
       "id": "det-data-exfil-011",
@@ -38807,10 +38853,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/data-exfil/printer-mass-print-confidential.yaml",
-      "sha256": "9e0aefacacd2b8815f8ebb820c8342c27de284bd870f133868633f11c854a0c5"
+      "quarantine_reason": "not executable (aggregate): `page_count_per_user` sums pages across print jobs. Counting jobs instead would fire on 500 one-page prints and miss one 1,500-page print, which inverts what the rule is for.",
+      "sha256": "6b57f770030cdb02c6a28727d254e1d7f2687826960cd1d96cdc95d2e0c5e05e"
     },
     {
       "id": "det-data-exfil-014",
@@ -38932,10 +38979,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/data-exfil/container-mass-image-export.yaml",
-      "sha256": "48c18e0a641c00a7d0ef2c936a5d6dc6b92b0a66849c7512e7be697587ed59ee"
+      "quarantine_reason": "superseded by the windowed rule wd-container-mass-image-export; this stateless form named a counter no source emits",
+      "sha256": "7e8fbc532b3a248700664237f61c4fde2d55f8767f9d732551124d35747a8fa8"
     },
     {
       "id": "det-data-exfil-019",
@@ -38983,10 +39031,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/data-exfil/secrets-mass-fetch.yaml",
-      "sha256": "be1c3076bfa548b3c9a7c01be00da2987359b81cac27f574715abea4718399f1"
+      "quarantine_reason": "superseded by the windowed rule wd-secrets-mass-fetch; this stateless form named a counter no source emits",
+      "sha256": "e2f3de8ee0b6bdd78836cf9dc35490c76c5d9f5e0f158087e355207386012328"
     },
     {
       "id": "det-endpoint-001",
@@ -39058,10 +39107,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/endpoint/ransomware-file-extension-change.yaml",
-      "sha256": "022552298877ee4430201bd15b408efca222b1fcb8574b366955f648d149f55c"
+      "quarantine_reason": "superseded by the windowed rule wd-ransomware-file-extension-change; this stateless form named a counter no source emits",
+      "sha256": "53820bc0d41024bd4b63288619edad669938d2695c92c74e8c741a26f228ace3"
     },
     {
       "id": "det-endpoint-004",
@@ -41268,7 +41318,7 @@
       "enabled": true,
       "executable": true,
       "path": "detections/endpoint/win-procdump-lsass.yaml",
-      "sha256": "f9ce8c1905639e2ff6d9bf888ebdb43d4ce90002da394b87970ebd8c6c1f48ed"
+      "sha256": "74a2adaebcfc8c6c1998621e2e2b93abfc12ece6d578b75695b1573c880b2ee0"
     },
     {
       "id": "det-endpoint-092",
@@ -41515,10 +41565,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/endpoint/win-dcsync-via-replication.yaml",
-      "sha256": "d24ef85ca4947366004a5d44c0237cd781d577b98843f807702ef15f21d784ba"
+      "quarantine_reason": "not executable (needs-inventory): asks whether the replicating account is a domain controller. That needs a directory inventory of DC machine accounts; `identity_nodes` carries a privilege tier per principal and no such flag.",
+      "sha256": "6e91e68fc557d499900940313406cf94950ae9e4b8aeb6e8d2d91342b8e44123"
     },
     {
       "id": "det-endpoint-102",
@@ -42440,10 +42491,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/endpoint/linux-bashrc-modified-by-other-user.yaml",
-      "sha256": "c1b4c05c210199bc384ae90694227b5e84f43bddb91d79473caf5c58ace568bd"
+      "quarantine_reason": "not executable (needs-connector-field): compares the acting uid with the file owner's uid. The acting uid is emitted and the owner's is not, so the comparison resolves to nothing. An EDR file-write event carries the owner; surfacing it is connector work.",
+      "sha256": "cc5992ffa893502cd43175a97ec74d6a2f044e4a28e20b9adca0b99327a6313a"
     },
     {
       "id": "det-endpoint-139",
@@ -42465,10 +42517,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/endpoint/linux-zshrc-modified-by-other-user.yaml",
-      "sha256": "e9afa054a50fb70992783ad32ea39f15cf98ae337bc84c5ca81cd9df63719203"
+      "quarantine_reason": "not executable (needs-connector-field): compares the acting uid with the file owner's uid, and no source emits the owner. Same gap as the bashrc rule beside it.",
+      "sha256": "3cd1e6e8fb88bcb344eb9ceb83e58a39709663fd4a8df9c817bd9e051f2ebc9a"
     },
     {
       "id": "det-endpoint-140",
@@ -42943,7 +42996,7 @@
       "enabled": true,
       "executable": true,
       "path": "detections/endpoint/linux-suid-binary-create.yaml",
-      "sha256": "ddea068f5f1a32a4fd23c79b464192229a6c00e3095a44760677dfec1b9617cd"
+      "sha256": "3d3ca5b7f2181109fee0a0b5955bdaf540989956fff011bfaecd4ecc967e6570"
     },
     {
       "id": "det-endpoint-159",
@@ -42968,7 +43021,7 @@
       "enabled": true,
       "executable": true,
       "path": "detections/endpoint/linux-guid-binary-create.yaml",
-      "sha256": "e72010b019d39c76506e7e699487041c004008e4d122c4664d19643e133e5f2c"
+      "sha256": "02ae1b8931fa60b6bd38d23f5646258168151d0d16f57dcc9354360f1fc120de"
     },
     {
       "id": "det-endpoint-160",
@@ -44365,10 +44418,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/endpoint/macos-keychain-db-read-by-other-uid.yaml",
-      "sha256": "7bb0f15de4393bb1494efd9b97919bf49b98857195bff4c3b5dfd98342070b48"
+      "quarantine_reason": "not executable (needs-connector-field): compares the reading uid with the keychain owner's uid, and no source emits the owner.",
+      "sha256": "4dedf02467737bad5de7bd0f4dab2012df27751364714a0c942d36c6c6c5c713"
     },
     {
       "id": "det-endpoint-216",
@@ -44669,7 +44723,7 @@
       "enabled": true,
       "executable": true,
       "path": "detections/endpoint/macos-hyperkit-launch-untrusted.yaml",
-      "sha256": "90613cf5832155b845a99380e7a52c2e08773fb5c3a61603338b80017d3f2743"
+      "sha256": "60416ddeb3d1c53c5f8f25f105052145e7d1480f4a20b308a6e4517332196762"
     },
     {
       "id": "det-endpoint-228",
@@ -46646,10 +46700,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/identity/brute-force-login.yaml",
-      "sha256": "d3a12403d8301306827a11de1bf4d3f06124a699c4647fafcc36628895fdc4ed"
+      "quarantine_reason": "superseded by the windowed rule wd-brute-force-login; this stateless form named a counter no source emits",
+      "sha256": "655b3071468f624b3e43b8612244f12a5ecd0df1afa1672efdf8447d8c78625b"
     },
     {
       "id": "det-identity-002",
@@ -46696,10 +46751,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/identity/password-spray.yaml",
-      "sha256": "5d5000a11b71725bfdacd6b6cd0ffb1e55fddd22f99dd5289ef53dc5af629925"
+      "quarantine_reason": "superseded by the windowed rule wd-okta-password-spray; this stateless form named a counter no source emits",
+      "sha256": "8a95c7a3821eb6bb005c3c30a9c00609e591f70ff51ef99472417e372684bae4"
     },
     {
       "id": "det-identity-004",
@@ -46821,10 +46877,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/identity/mfa-fatigue.yaml",
-      "sha256": "9e7fa58685ace079a1d5aabc25eb0f87f8a2cfd26449a02602f1aea5a39481ad"
+      "quarantine_reason": "superseded by the windowed rule wd-okta-mfa-push-bombing; this stateless form named a counter no source emits",
+      "sha256": "9e0540d3832709679cf31b87867c546bc9b2c5e437109b18a405994ae8bc6e88"
     },
     {
       "id": "det-identity-009",
@@ -46971,10 +47028,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/identity/shared-account-login-spike.yaml",
-      "sha256": "49d0fd4644419aadd6c524d97109d98f1bdbb03c53a57faa836277c9743d58dc"
+      "quarantine_reason": "superseded by the windowed rule wd-shared-account-login-spike; this stateless form named a counter no source emits",
+      "sha256": "a3cc6c9769d04a19a2cdb128019456c164802a7c5c23352a001f5c7fdf7c8427"
     },
     {
       "id": "det-identity-015",
@@ -47221,10 +47279,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/identity/app-token-broad-default.yaml",
-      "sha256": "e3839bca699a59da546ccafd93cbaaf1cdc7b360331ba986e87f449179c13209"
+      "quarantine_reason": "not executable (needs-connector-field): integration_installation.create entries carry the app's name but not its permission set, so `permission_administration` is never present. The installed app's permissions are exposed by GET /orgs/{org}/installations; surfacing that is connector work.",
+      "sha256": "8bf57a9cc950b80d33dce074e9acb9daaa7c9a1b46a0781211c5cdaa9980bb20"
     },
     {
       "id": "det-identity-025",
@@ -47421,10 +47480,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/identity/kerberoasting.yaml",
-      "sha256": "e47442963dfbe3d8b196da4ccec625e365151c427779b19218b66274d45ce4f9"
+      "quarantine_reason": "not executable (operand-not-emitted): counts distinct service principal names requested per account. Windows 4769 carries the SPN in `ServiceName`, which no source in this tree lifts, so there is nothing to be distinct about.",
+      "sha256": "ad722793a720b7f38cacace4b71f6739ef370541a4b641bc73ad3a259699b0a2"
     },
     {
       "id": "det-identity-033",
@@ -47646,10 +47706,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/identity/ident-password-spray-many-targets.yaml",
-      "sha256": "acbcc9071211e2b449a6d7ddafad985df383a545e2113ad490da2d31f6cf547d"
+      "quarantine_reason": "not executable (aggregate): pairs a distinct-user count with a `tries_per_user` ceiling, which is a mean inside the window. Keeping only the distinct half would widen the rule into a brute-force detection `wd-bruteforce-auth` already covers.",
+      "sha256": "117f5c21f5682968e9ca5d728e45673d2113b51d3fbc7e37c1789b24eb808354"
     },
     {
       "id": "det-identity-042",
@@ -47671,10 +47732,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/identity/ident-password-spray-distributed.yaml",
-      "sha256": "ba7ee636198c0507154f0d0de95cd3829c0314f4758fe3ac0d564e90d8f9b698"
+      "quarantine_reason": "superseded by the windowed rule wd-ident-password-spray-distributed; this stateless form named a counter no source emits",
+      "sha256": "ab535d70302fff58a428a79364c86a77b1a4c59d8bb7b9e48947a94d6e299f8d"
     },
     {
       "id": "det-identity-043",
@@ -47696,10 +47758,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/identity/ident-credstuffing-known-breached-list.yaml",
-      "sha256": "5edff83321b0a0cebcefe359fa65905a02735486b1c3ce976b09da0a47095329"
+      "quarantine_reason": "superseded by the windowed rule wd-ident-credstuffing-known-breached-list; this stateless form named a counter no source emits",
+      "sha256": "0e86726aaafb9c4c19070e80935dcf3cde8c65ac3ece3a501096347dd71a1595"
     },
     {
       "id": "det-identity-044",
@@ -47821,10 +47884,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/identity/ident-mfa-fatigue-burst.yaml",
-      "sha256": "bdb3f4000a44dff44649c7500fbf80d282792e3fd8f6af18f270f3699571b459"
+      "quarantine_reason": "superseded by the windowed rule wd-ident-mfa-fatigue-burst; this stateless form named a counter no source emits",
+      "sha256": "2f0612bddeba2a522dc88750b20309bec3b108909189f7690e17a19c44ebf394"
     },
     {
       "id": "det-identity-049",
@@ -47871,10 +47935,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/identity/ident-account-locked-many-times.yaml",
-      "sha256": "3a10550d0bcb6de79e8f2dc9521ae1b0af6cf1f602b4824f950cfa56796d308c"
+      "quarantine_reason": "superseded by the windowed rule wd-ident-account-locked-many-times; this stateless form named a counter no source emits",
+      "sha256": "30b2d58e606fe709df81cf981f675e945fef3a0ee274541f2274e38b13e758e9"
     },
     {
       "id": "det-identity-051",
@@ -47996,10 +48061,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/identity/ident-fido2-key-added-then-removed-old.yaml",
-      "sha256": "f4b13b89ad3565bb9643193e55c5c21cf8cbc8a465938242fb42a8a285cafada"
+      "quarantine_reason": "not executable (needs-external-source): wants the enrolment age of the factor being removed. The IdP holds it on the factor record; no audit event carries it.",
+      "sha256": "ee688d0398ead4dc67662644061a6d07b5f8485ad01062b4d98bd59f560ea07b"
     },
     {
       "id": "det-identity-056",
@@ -48096,10 +48162,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/identity/ident-session-timeout-extended-priv.yaml",
-      "sha256": "9a373aa9a6a175b68302072000507e9a6e40a369fbfc6121058417579a8f2940"
+      "quarantine_reason": "not executable (needs-inventory): asks whether a policy's scope is privileged. The scope is emitted; what is missing is a list of which scopes are privileged, which no source provides and no tenant configures today.",
+      "sha256": "4545d4c8552f22c40a58d15da4a9ef527a4aaf9284849583f4f4499783ea104d"
     },
     {
       "id": "det-identity-060",
@@ -48246,10 +48313,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/identity/ident-totp-skewed-clock.yaml",
-      "sha256": "2a68b98b0374d54a545c0847ebbcbda6fd8f9892468fc0741a2a6c85f7cef69a"
+      "quarantine_reason": "superseded by the windowed rule wd-ident-totp-skewed-clock; this stateless form named a counter no source emits",
+      "sha256": "febfc2edf78212322d700a9c1d33d0ad3a3001245f55f58e379860233f489b49"
     },
     {
       "id": "det-identity-066",
@@ -48346,10 +48414,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/identity/ident-pim-activation-self-approval.yaml",
-      "sha256": "62d06042576f1213050be6e25f138581b6e7b4a3a994c8fe186ce6a8e4d88573"
+      "quarantine_reason": "not executable (needs-connector-field): compares the approver with the requester. The requester is emitted as `actor`; no identity source in this tree emits the approver, so a self-approval cannot be distinguished from an approval.",
+      "sha256": "e447491a06018da66c246a6d81d3f857e617e322c0f891fecb779fb29447784a"
     },
     {
       "id": "det-identity-070",
@@ -48396,10 +48465,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/identity/ident-priv-role-burst-granted.yaml",
-      "sha256": "0436e7689b478465ae07b5b5f51c577a189a6dd717197f8dcb917080c584eba1"
+      "quarantine_reason": "superseded by the windowed rule wd-ident-priv-role-burst-granted; this stateless form named a counter no source emits",
+      "sha256": "b275110b06293cd9df693f3ae1472d0f1ae7af97894935a4f3ab4d9ada08c5d6"
     },
     {
       "id": "det-identity-072",
@@ -48421,10 +48491,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/identity/ident-svc-account-interactive-login.yaml",
-      "sha256": "59f246821383293c8a4e4a5fb84648022d9e32756a8145cd32c803e6e2dce423"
+      "quarantine_reason": "not executable (needs-connector-field): asks whether a logon was interactive. Windows 4624 answers it in `LogonType` (2, 10 and 11 are interactive) and no source lifts that field, so the boolean has nothing to derive from.",
+      "sha256": "36104ddc9687ef897c0fdf63c78e91c6ac90202ff64b21e036943129167aa58a"
     },
     {
       "id": "det-identity-073",
@@ -48496,10 +48567,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/identity/ident-app-impersonation-priv.yaml",
-      "sha256": "f992053a0951136374eb33d81408673952bfe564259ca5ddb1451af9ae38a75e"
+      "quarantine_reason": "not executable (needs-connector-field): asks whether the impersonated user is privileged. The privilege lookup now exists; the impersonated user is not emitted by any source, so there is no subject to look up.",
+      "sha256": "d4d3ff1d175a6491ef9a7a39f351e0a4ee2e0f369ea9a0194d3bc3afcdb242c9"
     },
     {
       "id": "det-identity-076",
@@ -48521,10 +48593,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/identity/ident-priv-role-removed-bulk.yaml",
-      "sha256": "dcaf7a842e5921193d608c309314de78998127c11a5ef0a87528ab548c0a0a35"
+      "quarantine_reason": "superseded by the windowed rule wd-ident-priv-role-removed-bulk; this stateless form named a counter no source emits",
+      "sha256": "3d5cfe4d3bf16641024b8a7338a5dd6ee8b5c5e62b24237a852aab4b0a19e0eb"
     },
     {
       "id": "det-identity-077",
@@ -48546,10 +48619,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/identity/ident-orphan-svc-acct-many-keys.yaml",
-      "sha256": "933ade67ee315007fccaab232b78e1f2618e05f3a1e70a8cfc0126b298fea62d"
+      "quarantine_reason": "not executable (not-windowed): `active_keys_per_account` is the state of an account at one moment, reported by an inventory event. A window counts what happened, not what is true; this needs the posture snapshot (depth plan 2.5).",
+      "sha256": "9be9d853f159833edcf0afd6b1cf9f702526ec7911cc5ff501aaf0f600f9c036"
     },
     {
       "id": "det-identity-078",
@@ -48671,10 +48745,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/identity/ident-ad-gpo-modified-priv.yaml",
-      "sha256": "90517daae40443307bbdcf69ec0ca01c9eb2dbeb1af46513598709268ae4cd28"
+      "quarantine_reason": "not executable (needs-inventory): asks whether a modified GPO is linked to a privileged scope. Neither the GPO link nor a list of privileged scopes exists here.",
+      "sha256": "02a7875f223ebfe32a313efd55ecfa1c1518a365a86a87f4036696373bb1a084"
     },
     {
       "id": "det-identity-083",
@@ -48796,10 +48871,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/identity/ident-ad-machine-account-quota-abuse.yaml",
-      "sha256": "62c0a6fe579a8b95fa47a5f5483f37992df331cae9fe1d3b9eac42220db6a57c"
+      "quarantine_reason": "superseded by the windowed rule wd-ident-ad-machine-account-quota-abuse; this stateless form named a counter no source emits",
+      "sha256": "19209213b458f51b88058c4464eeed6b2d80f8729225e1d7886bce02709ca37a"
     },
     {
       "id": "det-identity-088",
@@ -49021,10 +49097,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/identity/ident-kerberos-failure-spike-from-host.yaml",
-      "sha256": "ee42e0daee55690e475fcdf7426f0ee52f28dec2325ee71919c94fc3e6acabd4"
+      "quarantine_reason": "superseded by the windowed rule wd-ident-kerberos-failure-spike-from-host; this stateless form named a counter no source emits",
+      "sha256": "11d56dd7cfe89b12cd755af82120ac7645d667087924fcc4e5d667ed7a88b2e5"
     },
     {
       "id": "det-identity-097",
@@ -49046,10 +49123,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/identity/ident-ntlm-relay-indicator.yaml",
-      "sha256": "3e12d23fd6267f36a2f42f3e5ca73a29ea3b47fac29864e0d62465716e2fee21"
+      "quarantine_reason": "not executable (needs-connector-field): compares the workstation named in the logon with the address it came from. Windows 4624 carries both as `WorkstationName` and `IpAddress`; neither is lifted as a top-level field, so neither side of the comparison resolves.",
+      "sha256": "ab1ba1a108b662d6a0b02fc1c3c0adbe32c1662bafdd6a6998722f0f502e53e0"
     },
     {
       "id": "det-identity-098",
@@ -49121,10 +49199,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/identity/ident-pass-the-ticket-anomalous-tgt-source.yaml",
-      "sha256": "79920bed0bc5489e7955b08475d27da9be4b2bafe3cab3090ab899527a5ee339"
+      "quarantine_reason": "not executable (needs-connector-field): compares the address a Kerberos ticket was issued to with the address using it. That needs two events joined on the ticket, which is a correlation, and neither address is emitted today.",
+      "sha256": "96b243fbd17c39386292761f18de494a66ff10ccd91d2d7564a8a25a99385761"
     },
     {
       "id": "det-identity-101",
@@ -49271,10 +49350,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/identity/ident-okta-admin-app-assigned-many-users.yaml",
-      "sha256": "43f08f14eeb9a97ad953a6078e60bfb7b8a2cc92c13803a1dbb8dd1669a70446"
+      "quarantine_reason": "superseded by the windowed rule wd-ident-okta-admin-app-assigned-many-users; this stateless form named a counter no source emits",
+      "sha256": "f223dd4c655d4926345b9de6c1b1dff3efc70fc6d09dd4d83fd6455c6ee78e74"
     },
     {
       "id": "det-identity-107",
@@ -49546,10 +49626,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/identity/ident-okta-mass-deactivate-users.yaml",
-      "sha256": "c7632b4a6f4a7294d11cc8672e838cafaa3ef443be5867fa519fb4e4bd5c59ad"
+      "quarantine_reason": "superseded by the windowed rule wd-ident-okta-mass-deactivate-users; this stateless form named a counter no source emits",
+      "sha256": "e31587a149d39b590dca9e9ddc8d7ef9a4f5b748f765930918372e30ee85d624"
     },
     {
       "id": "det-identity-118",
@@ -49846,10 +49927,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/identity/ident-ping-admin-role-burst.yaml",
-      "sha256": "3747c320c44b54a32f4b9a7a4f47ad7b4447611cb127c26f0fed66976c25ea69"
+      "quarantine_reason": "superseded by the windowed rule wd-ident-ping-admin-role-burst; this stateless form named a counter no source emits",
+      "sha256": "747a1f844378e90c56961797e6dd17843a50f845c3abae6341e70c9a36522bfe"
     },
     {
       "id": "det-identity-130",
@@ -50071,10 +50153,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/identity/ident-oidc-many-clients-from-single-actor.yaml",
-      "sha256": "f9a5b7754bf16d90d6161c7727d96677443728aea32c8d3c35a7cfc945fe65db"
+      "quarantine_reason": "superseded by the windowed rule wd-ident-oidc-many-clients-from-single-actor; this stateless form named a counter no source emits",
+      "sha256": "4b158fca1d6ccdeab39ad515551592e631e3b4b9a6fd2396c440da6b0e5350d7"
     },
     {
       "id": "det-identity-139",
@@ -50471,10 +50554,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/identity/ident-github-pat-classic-created-with-broad-scopes.yaml",
-      "sha256": "f2799fdd6d0cba81929a38a331dbf194124f9c5bf772414a286d759e4d3fb6cd"
+      "quarantine_reason": "not executable (needs-external-source): classic-PAT creation never reaches the org audit log \u2014 the documented personal_access_token.* lifecycle covers fine-grained tokens \u2014 and no audit entry carries a created token's scopes: the common `token_scopes` field describes the token that authenticated the API call, not the token being created.",
+      "sha256": "3857957fad4cd0871d68735956badce1c5d0d27abdf05c16dcee134dd2f3def1"
     },
     {
       "id": "det-identity-155",
@@ -50496,10 +50580,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/identity/ident-github-org-collaborator-removed-bulk.yaml",
-      "sha256": "2b5695b8a9f752d5fd161e8e90f322821dc00b616616448a071ad0f4dd1c8763"
+      "quarantine_reason": "superseded by the windowed rule wd-ident-github-org-collaborator-removed-bulk; this stateless form named a counter no source emits",
+      "sha256": "279068b5a71ddf9125aa7b1cf1b6f0e83cdcaa761e2a194a3618f7b1eb760942"
     },
     {
       "id": "det-identity-156",
@@ -50521,10 +50606,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/identity/ident-github-deploy-key-added-org-wide.yaml",
-      "sha256": "31597897bb8b0a6af8a852689610f456ccebd525c97ee435bba1e07fdc289a12"
+      "quarantine_reason": "superseded by the windowed rule wd-ident-github-deploy-key-added-org-wide; this stateless form named a counter no source emits",
+      "sha256": "c35989d8944dcda686869c3e3d88af85ffa2e294ee188fb01a0fd4b176e9c338"
     },
     {
       "id": "det-identity-157",
@@ -50646,10 +50732,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/network/c2-beacon-high-frequency.yaml",
-      "sha256": "8cc24269f77c5f8c66b7383f42835fcbab6352988ee17560ee7522b60499e42b"
+      "quarantine_reason": "not executable (aggregate): `interval_consistency` is the regularity of inter-arrival times across the window \u2014 a variance, not a count. Keeping only the connection count turns a beacon detection into a chatty-host detection.",
+      "sha256": "961a20687e2ecdfcf3133d99897c429b37b084f2352efd6efa9e5dcdf369f6ad"
     },
     {
       "id": "det-network-002",
@@ -50671,10 +50758,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/network/dns-data-exfiltration.yaml",
-      "sha256": "82874ea6ea82a9359a779e8a4d249a4e88fa66ee1bad029f885029755174973a"
+      "quarantine_reason": "not executable (aggregate): `avg_subdomain_len` is a mean over the window. Dropping it leaves '100 DNS queries in 30 minutes', which every workstation clears.",
+      "sha256": "208f9b32ecc07c73bd5713f396451b1831164e60b3f78b5fa0855200a57c6b3e"
     },
     {
       "id": "det-network-003",
@@ -50696,10 +50784,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/network/port-scan-internal.yaml",
-      "sha256": "361f061dbbd69153aa26b257c4aee729e550b2e639a091f9c8617e6ffc49bf89"
+      "quarantine_reason": "not executable (multi-distinct): requires distinct destination ports *and* distinct destinations per source. The engine holds one distinct operand per rule; splitting this into two rules would fire twice on one scan and once on neither half.",
+      "sha256": "3fc069ed9663908f6521a6c6a7d41611ce905a581e817e1ba3c1a26166ebe9c0"
     },
     {
       "id": "det-network-004",
@@ -50721,10 +50810,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/network/ssh-failed-from-internet.yaml",
-      "sha256": "4540ebc8ca659bb3414ae514f09c19181be020d0857824c71642052d38bfce6c"
+      "quarantine_reason": "superseded by the windowed rule wd-ssh-failed-from-internet; this stateless form named a counter no source emits",
+      "sha256": "b6d4eaa64be49f609b6b0896f072f1417d14847583a179cc7a68d6c60a95c57e"
     },
     {
       "id": "det-network-005",
@@ -50746,10 +50836,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/network/smb-lateral-movement.yaml",
-      "sha256": "3090822a773fa366d2d1bcbafa1678f3bc40a42da8b4f694260713135564b80a"
+      "quarantine_reason": "superseded by the windowed rule wd-smb-lateral-movement; this stateless form named a counter no source emits",
+      "sha256": "31c010bd53fe21f3398318c77c3de1e62b2e4613d15f82b260896e598b2d5434"
     },
     {
       "id": "det-network-006",
@@ -50821,10 +50912,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/network/newly-registered-domain-traffic.yaml",
-      "sha256": "057aec7cd6a3ee71569f7bed994faacb67605c916337cb6dbf6e10621e74eac4"
+      "quarantine_reason": "not executable (needs-external-source): wants a domain's registration age, which comes from RDAP or WHOIS. Nothing in this tree queries either, and answering it from when this deployment first saw the domain would fire on most of the internet.",
+      "sha256": "4359781d0f7bbce674a247135b2a7300420761b7064884cc362fda7b32ac6a26"
     },
     {
       "id": "det-network-009",
@@ -50846,10 +50938,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/network/dns-fast-flux.yaml",
-      "sha256": "41f30b5415bdefa3d094bc86bd0dffa1bd0d257479b653297faa99027d381924"
+      "quarantine_reason": "not executable (operand-not-emitted): counts distinct A records, which live as a list inside a single DNS response rather than one per event. The engine counts distinct values of one field per event, so it cannot see inside the answer set.",
+      "sha256": "3b0c3eaf3c48bc3302fe1096f0279ef796ec9015e744381d420ce260a0bb3cd0"
     },
     {
       "id": "det-network-010",
@@ -50921,10 +51014,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/network/icmp-tunnel.yaml",
-      "sha256": "fbbcf5c80e17db102f7dacb6eed86d1f9610cdf2dfbd0699af2c71d5405b4941"
+      "quarantine_reason": "not executable (aggregate): `avg_payload_bytes` is a mean over the window, and `packet_count` is a per-flow sum. Counting flow records measures neither.",
+      "sha256": "5b9d79468fd9119dd6c2b109bdc38c828094f354440351c84f4b6cc245aa7030"
     },
     {
       "id": "det-network-013",
@@ -50996,10 +51090,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/network/egress-to-rare-asn.yaml",
-      "sha256": "64bee3753107cb428e95f179cdef7fd4aa964e62e986bad9171417b8eb7ac99e"
+      "quarantine_reason": "not executable (rarity): fires when a destination ASN has been seen *fewer* than five times in thirty days. The engine fires when a count is high; a rarity signal needs the first-seen store (depth plan 3.3) and the baseline module (3.4).",
+      "sha256": "e0ac3673e46f8aa467f5416ed59d1d8ba24b849e89c9e43258a76e81594c917f"
     },
     {
       "id": "det-network-016",
@@ -51046,10 +51141,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/network/ldap-bind-anomaly.yaml",
-      "sha256": "310bc5b1f556040d90b7d71a431b03537890b7fe72efee90912134a448c8dd71"
+      "quarantine_reason": "superseded by the windowed rule wd-ldap-bind-anomaly; this stateless form named a counter no source emits",
+      "sha256": "59344b7af75eee79c90402ef34d4bbc5dfb14ca0c4569feb15782ea9abad2476"
     },
     {
       "id": "det-network-018",
@@ -51096,10 +51192,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/network/ddos-syn-flood.yaml",
-      "sha256": "516820591074cbd2e139e7c6f8d637d773b5b5b32896e06e46e06feed17010d9"
+      "quarantine_reason": "superseded by the windowed rule wd-ddos-syn-flood; this stateless form named a counter no source emits",
+      "sha256": "337707d7dbec4e4607b0580235a1686fb4ca8bdc32640fde4ce93c1fb3178318"
     },
     {
       "id": "det-network-020",
@@ -51146,10 +51243,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/network/internal-host-spamming-mail.yaml",
-      "sha256": "ba9caeed6a84b0a816ebb07efd616414689750a856ba5b6e67ba01cdb32d245f"
+      "quarantine_reason": "superseded by the windowed rule wd-internal-host-spamming-mail; this stateless form named a counter no source emits",
+      "sha256": "c5e750fd0be94d0b6a3bd01174f4070097d74c9609e815f10e01cdd3e5f5f9df"
     },
     {
       "id": "det-network-022",
@@ -51397,10 +51495,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/network/net-dns-newly-registered-domain.yaml",
-      "sha256": "9ee0d5678db29c8113018cc0b8311a624287f21827183910d386e3b2fd36646b"
+      "quarantine_reason": "not executable (needs-external-source): wants a domain's registration age from RDAP or WHOIS, which nothing here queries. Same gap as the proxy-side rule beside it.",
+      "sha256": "5bf1bd34f9d1a37e0e49e2cf8af21f6155c6b9d5eff24b0864598a01e767f373"
     },
     {
       "id": "det-network-032",
@@ -51447,10 +51546,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/network/net-dns-nxdomain-spike.yaml",
-      "sha256": "00f3597377ca2805f7e24b3a01085723edb4ed2ac35d17468a880970ca69acb6"
+      "quarantine_reason": "superseded by the windowed rule wd-net-dns-nxdomain-spike; this stateless form named a counter no source emits",
+      "sha256": "1e63d5700b0a5986e3763082c934f06528f185722cc4f6c2b03460e2f86e74bc"
     },
     {
       "id": "det-network-034",
@@ -51472,10 +51572,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/network/net-dns-any-query-spike.yaml",
-      "sha256": "51b8dc0b30dce8338ac562d4e896311f56ac54eea3cb6982f9d1c83530d0ce29"
+      "quarantine_reason": "superseded by the windowed rule wd-net-dns-any-query-spike; this stateless form named a counter no source emits",
+      "sha256": "16264987165bc049c5aefae955df21e5e02cd3e72425d638d900e5973cbd3bda"
     },
     {
       "id": "det-network-035",
@@ -51573,10 +51674,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/network/net-dns-tunnel-pattern-len.yaml",
-      "sha256": "e3886c10249496ebc76861df49d919804a13c776280b9c651366be055cf8514c"
+      "quarantine_reason": "not executable (not-windowed): `subdomain_hex_ratio` is a property of one query name, not a count over a window; the reachability gate reads it as windowed because the name ends in `_ratio`. It is cheap to derive from the query name and belongs with the derived fields, not here.",
+      "sha256": "2fb9ca1247d28bcfa6f1c69770c1228dee25e10a4c3abb862b99d5202f0ad64d"
     },
     {
       "id": "det-network-039",
@@ -51673,10 +51775,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/network/net-dns-fast-flux.yaml",
-      "sha256": "f81dcbd3ddc763c67e15779a42e97baa5281ef834a90e2b7c5a52fb0d3668996"
+      "quarantine_reason": "not executable (not-windowed): `answer_count` is the number of records in one DNS response, a per-event field, not a count over a window.",
+      "sha256": "cf707dd8d385769c244ed8e0fb9cd1c2d92349b8ce8456909cf50a36c01ccd51"
     },
     {
       "id": "det-network-043",
@@ -52623,10 +52726,11 @@
       "verified": true,
       "source": "core",
       "tier": "stable",
-      "enabled": true,
-      "executable": true,
+      "enabled": false,
+      "executable": false,
       "path": "detections/network/net-dhcp-starvation.yaml",
-      "sha256": "3a70653c3dc37de36157c56d349353a4a4a8d1c30377e757fb7e2e2e7bec8ea0"
+      "quarantine_reason": "superseded by the windowed rule wd-net-dhcp-starvation; this stateless form named a counter no source emits",
+      "sha256": "37f59330c3c08915c50a50b80206362455c4b45e87db7a6b2eba07f41c1a0c82"
     },
     {
       "id": "det-network-081",
@@ -52652,6 +52756,614 @@
       "executable": true,
       "path": "detections/network/net-stp-topology-change-from-edge.yaml",
       "sha256": "9290467d3a6710e910c7c1405b10c903ecc05b8d60dadf1ba41bec54de83892c"
+    },
+    {
+      "id": "det-threat-anomaly-001",
+      "type": "detection",
+      "name": "AWS Access Key Created From a Client This Principal Has Never Used",
+      "description": "AiSOC v1 curated detection. Triggers on the threat-anomaly signal described by 'AWS Access Key Created From a Client This Principal Has Never Used'. Watch the 2 documented false-positive cases before tuning.",
+      "version": "1.0.0",
+      "author": "AiSOC",
+      "tags": [
+        "tlp.white"
+      ],
+      "severity": "high",
+      "category": "threat-anomaly",
+      "mitre_techniques": [
+        "T1098.001",
+        "T1078.004"
+      ],
+      "log_source": "aws",
+      "playbook": "tpl-credential-compromise",
+      "verified": true,
+      "source": "core",
+      "tier": "stable",
+      "enabled": true,
+      "executable": true,
+      "path": "detections/threat-anomaly/ta-aws-access-key-created-from-rare-client.yaml",
+      "sha256": "7ca0b94403e6f50143727ac570bc6b9ddff8fa2dd0291b203d68cfeb11e8e07d"
+    },
+    {
+      "id": "det-threat-anomaly-002",
+      "type": "detection",
+      "name": "AWS Policy Attached by a Principal Who Does Not Normally Attach Policies",
+      "description": "AiSOC v1 curated detection. Triggers on the threat-anomaly signal described by 'AWS Policy Attached by a Principal Who Does Not Normally Attach Policies'. Watch the 2 documented false-positive cases before tuning.",
+      "version": "1.0.0",
+      "author": "AiSOC",
+      "tags": [
+        "tlp.white"
+      ],
+      "severity": "high",
+      "category": "threat-anomaly",
+      "mitre_techniques": [
+        "T1098.003"
+      ],
+      "log_source": "aws",
+      "playbook": "tpl-privilege-escalation",
+      "verified": true,
+      "source": "core",
+      "tier": "stable",
+      "enabled": true,
+      "executable": true,
+      "path": "detections/threat-anomaly/ta-aws-policy-attached-by-rare-actor-action.yaml",
+      "sha256": "7012dc5fcee7715194be2fb6c98bd3a035d45eb6490b78c19f5a749ac8407d87"
+    },
+    {
+      "id": "det-threat-anomaly-003",
+      "type": "detection",
+      "name": "AWS Control-Plane Call From a Country This Principal Has Never Used",
+      "description": "AiSOC v1 curated detection. Triggers on the threat-anomaly signal described by 'AWS Control-Plane Call From a Country This Principal Has Never Used'. Watch the 3 documented false-positive cases before tuning.",
+      "version": "1.0.0",
+      "author": "AiSOC",
+      "tags": [
+        "tlp.white"
+      ],
+      "severity": "medium",
+      "category": "threat-anomaly",
+      "mitre_techniques": [
+        "T1078.004"
+      ],
+      "log_source": "aws",
+      "playbook": "tpl-triage",
+      "verified": true,
+      "source": "core",
+      "tier": "stable",
+      "enabled": true,
+      "executable": true,
+      "path": "detections/threat-anomaly/ta-aws-api-call-from-rare-country.yaml",
+      "sha256": "dab481d16d2853a29b19dfbfb958ec2ab5210e6e9e08d3a70efde8cce2ef1b03"
+    },
+    {
+      "id": "det-threat-anomaly-004",
+      "type": "detection",
+      "name": "AWS S3 Read Volume Far Above This Principal's Normal",
+      "description": "AiSOC v1 curated detection. Triggers on the threat-anomaly signal described by 'AWS S3 Read Volume Far Above This Principal's Normal'. Watch the 2 documented false-positive cases before tuning.",
+      "version": "1.0.0",
+      "author": "AiSOC",
+      "tags": [
+        "tlp.white"
+      ],
+      "severity": "high",
+      "category": "threat-anomaly",
+      "mitre_techniques": [
+        "T1530"
+      ],
+      "log_source": "aws",
+      "playbook": "tpl-data-exfiltration",
+      "verified": true,
+      "source": "core",
+      "tier": "stable",
+      "enabled": true,
+      "executable": true,
+      "path": "detections/threat-anomaly/ta-aws-volume-spike-on-s3-reads.yaml",
+      "sha256": "22aa2a94f4facde674e2bb325cf6b20ff069be2d5c437fc9303eb4a4bda716e0"
+    },
+    {
+      "id": "det-threat-anomaly-005",
+      "type": "detection",
+      "name": "AWS Resource This Principal Has Never Touched",
+      "description": "AiSOC v1 curated detection. Triggers on the threat-anomaly signal described by 'AWS Resource This Principal Has Never Touched'. Watch the 2 documented false-positive cases before tuning.",
+      "version": "1.0.0",
+      "author": "AiSOC",
+      "tags": [
+        "tlp.white"
+      ],
+      "severity": "medium",
+      "category": "threat-anomaly",
+      "mitre_techniques": [
+        "T1580"
+      ],
+      "log_source": "aws",
+      "playbook": "tpl-triage",
+      "verified": true,
+      "source": "core",
+      "tier": "stable",
+      "enabled": true,
+      "executable": true,
+      "path": "detections/threat-anomaly/ta-aws-rare-resource-touched-by-principal.yaml",
+      "sha256": "cb14029193505e8eccab5d16ef8c344e45b7837e74cf05f2b7e7eab9b3f2d3da"
+    },
+    {
+      "id": "det-threat-anomaly-006",
+      "type": "detection",
+      "name": "AWS Privileged Call Volume Far Above This Principal's Peer Group",
+      "description": "AiSOC v1 curated detection. Triggers on the threat-anomaly signal described by 'AWS Privileged Call Volume Far Above This Principal's Peer Group'. Watch the 2 documented false-positive cases before tuning.",
+      "version": "1.0.0",
+      "author": "AiSOC",
+      "tags": [
+        "tlp.white"
+      ],
+      "severity": "medium",
+      "category": "threat-anomaly",
+      "mitre_techniques": [
+        "T1078.004"
+      ],
+      "log_source": "aws",
+      "playbook": "tpl-triage",
+      "verified": true,
+      "source": "core",
+      "tier": "stable",
+      "enabled": true,
+      "executable": true,
+      "path": "detections/threat-anomaly/ta-aws-peer-deviation-on-privileged-call.yaml",
+      "sha256": "75e00c3a07053cd324f0a9f88247fce5690745d21d7b949713d7043e74282262"
+    },
+    {
+      "id": "det-threat-anomaly-007",
+      "type": "detection",
+      "name": "MFA Factor Reset From a Country This Principal Has Never Used",
+      "description": "AiSOC v1 curated detection. Triggers on the threat-anomaly signal described by 'MFA Factor Reset From a Country This Principal Has Never Used'. Watch the 2 documented false-positive cases before tuning.",
+      "version": "1.0.0",
+      "author": "AiSOC",
+      "tags": [
+        "tlp.white"
+      ],
+      "severity": "critical",
+      "category": "threat-anomaly",
+      "mitre_techniques": [
+        "T1556.006",
+        "T1098.005"
+      ],
+      "log_source": "okta",
+      "playbook": "tpl-account-takeover",
+      "verified": true,
+      "source": "core",
+      "tier": "stable",
+      "enabled": true,
+      "executable": true,
+      "path": "detections/threat-anomaly/ta-okta-mfa-reset-from-rare-country.yaml",
+      "sha256": "b0dd0387f22b17959adedee45670b0e6f071ec6b5e40fbf9be86e7123771c4a0"
+    },
+    {
+      "id": "det-threat-anomaly-008",
+      "type": "detection",
+      "name": "Admin Role Granted by a Principal Who Does Not Normally Grant Roles",
+      "description": "AiSOC v1 curated detection. Triggers on the threat-anomaly signal described by 'Admin Role Granted by a Principal Who Does Not Normally Grant Roles'. Watch the 2 documented false-positive cases before tuning.",
+      "version": "1.0.0",
+      "author": "AiSOC",
+      "tags": [
+        "tlp.white"
+      ],
+      "severity": "critical",
+      "category": "threat-anomaly",
+      "mitre_techniques": [
+        "T1098.003"
+      ],
+      "log_source": "okta",
+      "playbook": "tpl-privilege-escalation",
+      "verified": true,
+      "source": "core",
+      "tier": "stable",
+      "enabled": true,
+      "executable": true,
+      "path": "detections/threat-anomaly/ta-okta-admin-role-granted-rare-action.yaml",
+      "sha256": "b04bbe4cd9f9cdc2ab0acb7204acc6b5309eab94ad2d0de0684be5ab2770df6a"
+    },
+    {
+      "id": "det-threat-anomaly-009",
+      "type": "detection",
+      "name": "Sign-In From a Client Family This Principal Has Never Used",
+      "description": "AiSOC v1 curated detection. Triggers on the threat-anomaly signal described by 'Sign-In From a Client Family This Principal Has Never Used'. Watch the 3 documented false-positive cases before tuning.",
+      "version": "1.0.0",
+      "author": "AiSOC",
+      "tags": [
+        "tlp.white"
+      ],
+      "severity": "medium",
+      "category": "threat-anomaly",
+      "mitre_techniques": [
+        "T1078.004",
+        "T1550"
+      ],
+      "log_source": "okta",
+      "playbook": "tpl-triage",
+      "verified": true,
+      "source": "core",
+      "tier": "stable",
+      "enabled": true,
+      "executable": true,
+      "path": "detections/threat-anomaly/ta-okta-login-from-rare-client-family.yaml",
+      "sha256": "0cb44beaf0b84fe6a6a258c2a675d42533566cea6d6d2c245a1e67efa16ced3b"
+    },
+    {
+      "id": "det-threat-anomaly-010",
+      "type": "detection",
+      "name": "Identity-Provider Change by a Principal Who Does Not Normally Make Them",
+      "description": "AiSOC v1 curated detection. Triggers on the threat-anomaly signal described by 'Identity-Provider Change by a Principal Who Does Not Normally Make Them'. Watch the 2 documented false-positive cases before tuning.",
+      "version": "1.0.0",
+      "author": "AiSOC",
+      "tags": [
+        "tlp.white"
+      ],
+      "severity": "critical",
+      "category": "threat-anomaly",
+      "mitre_techniques": [
+        "T1556.007"
+      ],
+      "log_source": "okta",
+      "playbook": "tpl-account-takeover",
+      "verified": true,
+      "source": "core",
+      "tier": "stable",
+      "enabled": true,
+      "executable": true,
+      "path": "detections/threat-anomaly/ta-okta-rare-action-on-identity-provider.yaml",
+      "sha256": "7cb391bdfa3b262f78a94b705690d131b5392e85a0f1f00f90149f13f9c4bc55"
+    },
+    {
+      "id": "det-threat-anomaly-011",
+      "type": "detection",
+      "name": "Conditional Access Policy Changed by a Rare Actor",
+      "description": "AiSOC v1 curated detection. Triggers on the threat-anomaly signal described by 'Conditional Access Policy Changed by a Rare Actor'. Watch the 2 documented false-positive cases before tuning.",
+      "version": "1.0.0",
+      "author": "AiSOC",
+      "tags": [
+        "tlp.white"
+      ],
+      "severity": "critical",
+      "category": "threat-anomaly",
+      "mitre_techniques": [
+        "T1556.009",
+        "T1484.002"
+      ],
+      "log_source": "azure",
+      "playbook": "tpl-privilege-escalation",
+      "verified": true,
+      "source": "core",
+      "tier": "stable",
+      "enabled": true,
+      "executable": true,
+      "path": "detections/threat-anomaly/ta-entra-conditional-access-change-rare-action.yaml",
+      "sha256": "6f84bba94cc7f12e157667061446978ebdf9c17d4652208848a4b7fd30049a94"
+    },
+    {
+      "id": "det-threat-anomaly-012",
+      "type": "detection",
+      "name": "Entra Sign-In Volume Far Above This Principal's Normal",
+      "description": "AiSOC v1 curated detection. Triggers on the threat-anomaly signal described by 'Entra Sign-In Volume Far Above This Principal's Normal'. Watch the 2 documented false-positive cases before tuning.",
+      "version": "1.0.0",
+      "author": "AiSOC",
+      "tags": [
+        "tlp.white"
+      ],
+      "severity": "high",
+      "category": "threat-anomaly",
+      "mitre_techniques": [
+        "T1110.003"
+      ],
+      "log_source": "azure",
+      "playbook": "tpl-triage",
+      "verified": true,
+      "source": "core",
+      "tier": "stable",
+      "enabled": true,
+      "executable": true,
+      "path": "detections/threat-anomaly/ta-entra-signin-volume-spike.yaml",
+      "sha256": "f78e614c2a4941a605bd3758842dd256d0ca1c2eee58a9fe7dbb31c11f8078c6"
+    },
+    {
+      "id": "det-threat-anomaly-013",
+      "type": "detection",
+      "name": "Group Membership Changes Far Above the Principal's Peer Group",
+      "description": "AiSOC v1 curated detection. Triggers on the threat-anomaly signal described by 'Group Membership Changes Far Above the Principal's Peer Group'. Watch the 2 documented false-positive cases before tuning.",
+      "version": "1.0.0",
+      "author": "AiSOC",
+      "tags": [
+        "tlp.white"
+      ],
+      "severity": "medium",
+      "category": "threat-anomaly",
+      "mitre_techniques": [
+        "T1098"
+      ],
+      "log_source": "identity",
+      "playbook": "tpl-triage",
+      "verified": true,
+      "source": "core",
+      "tier": "stable",
+      "enabled": true,
+      "executable": true,
+      "path": "detections/threat-anomaly/ta-identity-peer-deviation-on-group-change.yaml",
+      "sha256": "2b41939658c8029e098fc06044fbfd3c924766628bf7d6c0a0a55424be07defa"
+    },
+    {
+      "id": "det-threat-anomaly-014",
+      "type": "detection",
+      "name": "OAuth Application Activity Far Above Its Own Normal",
+      "description": "AiSOC v1 curated detection. Triggers on the threat-anomaly signal described by 'OAuth Application Activity Far Above Its Own Normal'. Watch the 2 documented false-positive cases before tuning.",
+      "version": "1.0.0",
+      "author": "AiSOC",
+      "tags": [
+        "tlp.white"
+      ],
+      "severity": "high",
+      "category": "threat-anomaly",
+      "mitre_techniques": [
+        "T1550.001",
+        "T1530"
+      ],
+      "log_source": "google-workspace",
+      "playbook": "tpl-data-exfiltration",
+      "verified": true,
+      "source": "core",
+      "tier": "stable",
+      "enabled": true,
+      "executable": true,
+      "path": "detections/threat-anomaly/ta-saas-oauth-app-volume-spike.yaml",
+      "sha256": "e35b253aa6d457f60fc9a953bb482832d8050fcab0f34e98b2753836b0db2d11"
+    },
+    {
+      "id": "det-threat-anomaly-015",
+      "type": "detection",
+      "name": "Workspace Admin Action This Principal Has Never Performed",
+      "description": "AiSOC v1 curated detection. Triggers on the threat-anomaly signal described by 'Workspace Admin Action This Principal Has Never Performed'. Watch the 2 documented false-positive cases before tuning.",
+      "version": "1.0.0",
+      "author": "AiSOC",
+      "tags": [
+        "tlp.white"
+      ],
+      "severity": "high",
+      "category": "threat-anomaly",
+      "mitre_techniques": [
+        "T1098"
+      ],
+      "log_source": "google-workspace",
+      "playbook": "tpl-triage",
+      "verified": true,
+      "source": "core",
+      "tier": "stable",
+      "enabled": true,
+      "executable": true,
+      "path": "detections/threat-anomaly/ta-workspace-rare-admin-action.yaml",
+      "sha256": "b8d316a1fbea56a90eb65b6cd3a4b4d019c6a92eefe118bc91b08bc5a1d4d939"
+    },
+    {
+      "id": "det-threat-anomaly-016",
+      "type": "detection",
+      "name": "Drive Download Volume Far Above This Principal's Normal",
+      "description": "AiSOC v1 curated detection. Triggers on the threat-anomaly signal described by 'Drive Download Volume Far Above This Principal's Normal'. Watch the 2 documented false-positive cases before tuning.",
+      "version": "1.0.0",
+      "author": "AiSOC",
+      "tags": [
+        "tlp.white"
+      ],
+      "severity": "high",
+      "category": "threat-anomaly",
+      "mitre_techniques": [
+        "T1530"
+      ],
+      "log_source": "google-workspace",
+      "playbook": "tpl-data-exfiltration",
+      "verified": true,
+      "source": "core",
+      "tier": "stable",
+      "enabled": true,
+      "executable": true,
+      "path": "detections/threat-anomaly/ta-workspace-drive-download-volume-spike.yaml",
+      "sha256": "32889448b1e0e0779717b4f7145790c7f46739762ab66dd72c15b62a10dadef3"
+    },
+    {
+      "id": "det-threat-anomaly-017",
+      "type": "detection",
+      "name": "Mailbox Rule Created From a Client This Principal Has Never Used",
+      "description": "AiSOC v1 curated detection. Triggers on the threat-anomaly signal described by 'Mailbox Rule Created From a Client This Principal Has Never Used'. Watch the 2 documented false-positive cases before tuning.",
+      "version": "1.0.0",
+      "author": "AiSOC",
+      "tags": [
+        "tlp.white"
+      ],
+      "severity": "high",
+      "category": "threat-anomaly",
+      "mitre_techniques": [
+        "T1114.003",
+        "T1564.008"
+      ],
+      "log_source": "m365",
+      "playbook": "tpl-account-takeover",
+      "verified": true,
+      "source": "core",
+      "tier": "stable",
+      "enabled": true,
+      "executable": true,
+      "path": "detections/threat-anomaly/ta-m365-mailbox-rule-from-rare-client.yaml",
+      "sha256": "f885aa960e6945cb64b9d706f979b6a57f68a8c295ab1485407df4fa1e88dd98"
+    },
+    {
+      "id": "det-threat-anomaly-018",
+      "type": "detection",
+      "name": "Slack Workspace Admin Action This Principal Has Never Performed",
+      "description": "AiSOC v1 curated detection. Triggers on the threat-anomaly signal described by 'Slack Workspace Admin Action This Principal Has Never Performed'. Watch the 2 documented false-positive cases before tuning.",
+      "version": "1.0.0",
+      "author": "AiSOC",
+      "tags": [
+        "tlp.white"
+      ],
+      "severity": "medium",
+      "category": "threat-anomaly",
+      "mitre_techniques": [
+        "T1098"
+      ],
+      "log_source": "slack",
+      "playbook": "tpl-triage",
+      "verified": true,
+      "source": "core",
+      "tier": "stable",
+      "enabled": true,
+      "executable": true,
+      "path": "detections/threat-anomaly/ta-slack-rare-admin-action.yaml",
+      "sha256": "0739f3715a5f5000398ba9b3c4b31dc28ec7d5e09e511beda37b51df3b987ef3"
+    },
+    {
+      "id": "det-threat-anomaly-019",
+      "type": "detection",
+      "name": "Salesforce Export Volume Far Above This Principal's Normal",
+      "description": "AiSOC v1 curated detection. Triggers on the threat-anomaly signal described by 'Salesforce Export Volume Far Above This Principal's Normal'. Watch the 2 documented false-positive cases before tuning.",
+      "version": "1.0.0",
+      "author": "AiSOC",
+      "tags": [
+        "tlp.white"
+      ],
+      "severity": "high",
+      "category": "threat-anomaly",
+      "mitre_techniques": [
+        "T1530"
+      ],
+      "log_source": "salesforce",
+      "playbook": "tpl-data-exfiltration",
+      "verified": true,
+      "source": "core",
+      "tier": "stable",
+      "enabled": true,
+      "executable": true,
+      "path": "detections/threat-anomaly/ta-salesforce-report-export-volume-spike.yaml",
+      "sha256": "58fd5d049a03ebcfc47bb5997d195d53e88ec39f210d2aad555b611d179302aa"
+    },
+    {
+      "id": "det-threat-anomaly-020",
+      "type": "detection",
+      "name": "GitHub Organisation Setting Changed by a Rare Actor",
+      "description": "AiSOC v1 curated detection. Triggers on the threat-anomaly signal described by 'GitHub Organisation Setting Changed by a Rare Actor'. Watch the 2 documented false-positive cases before tuning.",
+      "version": "1.0.0",
+      "author": "AiSOC",
+      "tags": [
+        "tlp.white"
+      ],
+      "severity": "high",
+      "category": "threat-anomaly",
+      "mitre_techniques": [
+        "T1098",
+        "T1195.001"
+      ],
+      "log_source": "github",
+      "playbook": "tpl-triage",
+      "verified": true,
+      "source": "core",
+      "tier": "stable",
+      "enabled": true,
+      "executable": true,
+      "path": "detections/threat-anomaly/ta-github-rare-action-on-org-settings.yaml",
+      "sha256": "9d198aec8f66639696e411d2b07ba079c5e4993c162bbd73401114989f9a76c7"
+    },
+    {
+      "id": "det-threat-anomaly-021",
+      "type": "detection",
+      "name": "Repository Clone Volume Far Above This Principal's Normal",
+      "description": "AiSOC v1 curated detection. Triggers on the threat-anomaly signal described by 'Repository Clone Volume Far Above This Principal's Normal'. Watch the 2 documented false-positive cases before tuning.",
+      "version": "1.0.0",
+      "author": "AiSOC",
+      "tags": [
+        "tlp.white"
+      ],
+      "severity": "high",
+      "category": "threat-anomaly",
+      "mitre_techniques": [
+        "T1213.003"
+      ],
+      "log_source": "github",
+      "playbook": "tpl-data-exfiltration",
+      "verified": true,
+      "source": "core",
+      "tier": "stable",
+      "enabled": true,
+      "executable": true,
+      "path": "detections/threat-anomaly/ta-github-clone-volume-spike.yaml",
+      "sha256": "d614dc221cc77dded330e7ddd2ac1bf882348a0326d7451e6a7d9b62c3ed7021"
+    },
+    {
+      "id": "det-threat-anomaly-022",
+      "type": "detection",
+      "name": "GitLab Token Action From a Country This Principal Has Never Used",
+      "description": "AiSOC v1 curated detection. Triggers on the threat-anomaly signal described by 'GitLab Token Action From a Country This Principal Has Never Used'. Watch the 3 documented false-positive cases before tuning.",
+      "version": "1.0.0",
+      "author": "AiSOC",
+      "tags": [
+        "tlp.white"
+      ],
+      "severity": "high",
+      "category": "threat-anomaly",
+      "mitre_techniques": [
+        "T1098.001"
+      ],
+      "log_source": "gitlab",
+      "playbook": "tpl-triage",
+      "verified": true,
+      "source": "core",
+      "tier": "stable",
+      "enabled": true,
+      "executable": true,
+      "path": "detections/threat-anomaly/ta-gitlab-token-action-from-rare-country.yaml",
+      "sha256": "244e7a48ec5c9ade72482b1323861ec371e21f786e737f5b330e0b260bd91c94"
+    },
+    {
+      "id": "det-threat-anomaly-023",
+      "type": "detection",
+      "name": "Kubernetes Verb This Service Account Has Never Used",
+      "description": "AiSOC v1 curated detection. Triggers on the threat-anomaly signal described by 'Kubernetes Verb This Service Account Has Never Used'. Watch the 2 documented false-positive cases before tuning.",
+      "version": "1.0.0",
+      "author": "AiSOC",
+      "tags": [
+        "tlp.white"
+      ],
+      "severity": "high",
+      "category": "threat-anomaly",
+      "mitre_techniques": [
+        "T1609",
+        "T1078.003"
+      ],
+      "log_source": "kubernetes",
+      "playbook": "tpl-privilege-escalation",
+      "verified": true,
+      "source": "core",
+      "tier": "stable",
+      "enabled": true,
+      "executable": true,
+      "path": "detections/threat-anomaly/ta-k8s-rare-verb-by-service-account.yaml",
+      "sha256": "200a3b1651d66dfbc9e91e7fe04ff6d0ec8a01b2d70cca577c03c7251e1450dd"
+    },
+    {
+      "id": "det-threat-anomaly-024",
+      "type": "detection",
+      "name": "Pod Exec Volume Far Above This Principal's Normal",
+      "description": "AiSOC v1 curated detection. Triggers on the threat-anomaly signal described by 'Pod Exec Volume Far Above This Principal's Normal'. Watch the 2 documented false-positive cases before tuning.",
+      "version": "1.0.0",
+      "author": "AiSOC",
+      "tags": [
+        "tlp.white"
+      ],
+      "severity": "medium",
+      "category": "threat-anomaly",
+      "mitre_techniques": [
+        "T1609"
+      ],
+      "log_source": "kubernetes",
+      "playbook": "tpl-triage",
+      "verified": true,
+      "source": "core",
+      "tier": "stable",
+      "enabled": true,
+      "executable": true,
+      "path": "detections/threat-anomaly/ta-k8s-exec-volume-spike.yaml",
+      "sha256": "b4bf5adbe45969b9ad405a27ddeee4809b6f6da8c7cab3081b4af51433215047"
     },
     {
       "id": "mitre-car-car-2013-01-003",
@@ -236777,7 +237489,7 @@
       "id": "phishing-investigation-v1",
       "type": "playbook",
       "name": "Phishing: Email Investigation & Remediation",
-      "description": "Triggered by a phishing alert from an email gateway or a user report. Extracts IOCs, blocks the sender domain, and resets credentials that may have been compromised. The retraction step requires EMAIL_GATEWAY_URL, which no compose file or .env.example sets, so on a default deployment the message is NOT retracted and the step is skipped.",
+      "description": "Triggered by a phishing alert from an email gateway or a user report. Extracts IOCs, blocks the sender domain, and resets credentials that may have been compromised. The retraction step here still requires EMAIL_GATEWAY_URL, which no compose file or .env.example sets, so on a default deployment the message is NOT retracted and the step is skipped. Depth 7.1 added a real mailbox purge, and it is not this step: report the message to POST /phishing/reports and purge the campaign through POST /phishing/campaigns/{id}/purge, which dispatches purge_email once per recipient under the capability contract, verifies each mailbox and can be reversed. That path needs AISOC_FEATURE_MAILBOX_REMEDIATION and a Microsoft 365 or Google Workspace connector; it is not reachable as a playbook step because the engine has no purge_email step type.",
       "version": "1.0.0",
       "author": "Beenu - beenu@cyble.com",
       "tags": [
@@ -236799,7 +237511,7 @@
       "pack": true,
       "enabled": true,
       "path": "playbooks/packs/v1/phishing/phishing-investigation.playbook.json",
-      "sha256": "73f354344458fe6ed95f28835b5cc40c045c67716f5c56f909b6df3b8406ef7a"
+      "sha256": "09377aedb0296894ec461caad295b3596a8ea9cdf90151463df094698ca85a27"
     },
     {
       "id": "phishing-response-v1",
@@ -237334,6 +238046,34 @@
       "sha256": "f43f461d2a8df2e2145bc75c185789d7c33acc11edb676b279537d8d02a921bf"
     },
     {
+      "id": "user-verification-containment-v1",
+      "type": "playbook",
+      "name": "Suspicious Sign-In: Ask the User, Then Their Manager",
+      "description": "Asks the person whose account signed in whether they recognise it, escalates to their manager from the directory when nobody answers, and branches on the signed answer. 'No, that wasn't me' and 'nobody answered' both reach containment behind an analyst approval; 'yes, that was me' closes the case. Never asked on a confirmed true positive, and auto-sent only for alert classes the tenant opted into.",
+      "version": "1.0.0",
+      "author": "AiSOC",
+      "tags": [
+        "suspicious-signin",
+        "identity",
+        "verification"
+      ],
+      "severity": "high",
+      "trigger": "alert",
+      "steps": 6,
+      "category": "suspicious-signin",
+      "mitre_techniques": [
+        "T1078",
+        "T1556"
+      ],
+      "verified": true,
+      "source": "core",
+      "tier": "stable",
+      "pack": true,
+      "enabled": true,
+      "path": "playbooks/packs/v1/suspicious-signin/user-verification-containment.playbook.json",
+      "sha256": "f91739dcea93b07819eafb551df3817d65d430dcac9bb0f59e9e5c9cf1e96a1e"
+    },
+    {
       "id": "web-application-attack-v1",
       "type": "playbook",
       "name": "Web Application Attack Response",
@@ -237530,6 +238270,34 @@
       "sha256": "0708ead966c294912d2e897af9fb4d46f49539231730b95f96ff80812c960de5"
     },
     {
+      "id": "aws-cloudtrail-s3",
+      "type": "plugin",
+      "name": "AWS CloudTrail (S3 + SQS)",
+      "description": "CloudTrail organisation trail delivered to S3 and announced on SQS. Reads management events, data events and VPC flow logs for every member account from one queue. The queue is the cursor, so nothing is lost across a restart, and each poll is bounded so a backlog drains over several polls instead of flooding ingest in one pass. Use this instead of the LookupEvents connector for anything larger than a single account.",
+      "version": "1.0.0",
+      "author": "AiSOC Core Team",
+      "tags": [
+        "cloud",
+        "aws",
+        "cloudtrail",
+        "s3",
+        "sqs",
+        "vpc-flow-logs",
+        "connector"
+      ],
+      "plugin_type": "connector",
+      "license": "MIT",
+      "homepage": "https://github.com/beenuar/AiSOC/tree/main/services/connectors/app/connectors/aws_cloudtrail_s3.py",
+      "min_aisoc_version": "17.0.0",
+      "sdks": [],
+      "mitre_techniques": [],
+      "verified": true,
+      "source": "core",
+      "tier": "stable",
+      "path": "plugins/aws-cloudtrail-s3/plugin.yaml",
+      "sha256": "3bbc0dd1af4ac24986fb368d0c6223e1990f6a35a768b33b7eb604ee0d5a69a9"
+    },
+    {
       "id": "aws-guardduty",
       "type": "plugin",
       "name": "AWS GuardDuty Connector",
@@ -237655,6 +238423,33 @@
       "tier": "stable",
       "path": "plugins/azure-entra/plugin.yaml",
       "sha256": "33e77f0603f49a52ab042819189ebe5c9260ddb241c0b2ab10903794e2d63e37"
+    },
+    {
+      "id": "azure-event-hubs",
+      "type": "plugin",
+      "name": "Azure Event Hubs (Capture)",
+      "description": "Entra sign-in logs, Entra audit logs and the Azure Activity log streamed to an Event Hub by a diagnostic setting and captured to a storage account. One configuration covers a whole tenant at the rate it actually produces events, with no Graph throttle. Latency is the Capture window the operator chooses (one to fifteen minutes), so keep the Entra connector alongside it if a high-signal subset needs to be faster.",
+      "version": "1.0.0",
+      "author": "AiSOC Core Team",
+      "tags": [
+        "cloud",
+        "azure",
+        "entra",
+        "event-hubs",
+        "activity-log",
+        "connector"
+      ],
+      "plugin_type": "connector",
+      "license": "MIT",
+      "homepage": "https://github.com/beenuar/AiSOC/tree/main/services/connectors/app/connectors/azure_event_hubs.py",
+      "min_aisoc_version": "17.0.0",
+      "sdks": [],
+      "mitre_techniques": [],
+      "verified": true,
+      "source": "core",
+      "tier": "stable",
+      "path": "plugins/azure-event-hubs/plugin.yaml",
+      "sha256": "985bb360b3ecb9cb252c48a84b321d85dfb454e9ac4483ef62353a0373d8fd10"
     },
     {
       "id": "box",
@@ -238149,6 +238944,33 @@
       "tier": "stable",
       "path": "plugins/gcp-cloud-audit/plugin.yaml",
       "sha256": "2fc3ae5041c6566ab3c9d7dc8ab7551b7d38f7cb2dc67834b2f6a26591b53382"
+    },
+    {
+      "id": "gcp-pubsub",
+      "type": "plugin",
+      "name": "GCP Pub/Sub (log sink)",
+      "description": "Google Cloud logs streamed through a Cloud Logging sink onto a Pub/Sub subscription. Carries whatever the sink's filter selects - audit, Data Access, VPC flow, firewall, GKE - for a whole organisation, at the rate the estate produces it rather than at the rate the Logging read API allows. The subscription is the cursor: messages are acknowledged only after their entries have been read.",
+      "version": "1.0.0",
+      "author": "AiSOC Core Team",
+      "tags": [
+        "cloud",
+        "gcp",
+        "pubsub",
+        "log-sink",
+        "audit",
+        "connector"
+      ],
+      "plugin_type": "connector",
+      "license": "MIT",
+      "homepage": "https://github.com/beenuar/AiSOC/tree/main/services/connectors/app/connectors/gcp_pubsub.py",
+      "min_aisoc_version": "17.0.0",
+      "sdks": [],
+      "mitre_techniques": [],
+      "verified": true,
+      "source": "core",
+      "tier": "stable",
+      "path": "plugins/gcp-pubsub/plugin.yaml",
+      "sha256": "a85821c3575f1383d34e0e1ec095bdaea9a1d128bda039a62b24c1f9c93990ec"
     },
     {
       "id": "gcp-scc",

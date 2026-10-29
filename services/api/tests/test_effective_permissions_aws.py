@@ -130,8 +130,15 @@ def reference_is_allowed(
     Implements the public AWS evaluation rules:
         explicit deny anywhere → DENY
         SCP doesn't allow → DENY (across the org boundary)
-        identity allow OR (resource allow on named principal) → ALLOW
+        (identity allow AND permissions boundary allows)
+            OR (resource allow on named principal) → ALLOW
         otherwise → DENY (default deny)
+
+    The boundary clause is deliberately written as a conjunction on the
+    *identity* arm only. A permissions boundary does not cap a
+    resource-based policy that names the principal directly, so hoisting it
+    to the whole disjunction would be the plausible wrong answer — and one
+    that under-reports access an attacker really has.
     """
 
     principal = next(p for p in snapshot["principals"] if p["id"] == principal_id)
@@ -148,6 +155,14 @@ def reference_is_allowed(
     for scp_id in snapshot.get("scps", []):
         if scp_id in policies_by_id:
             deny_sources.append(policies_by_id[scp_id])
+
+    # A Deny written inside a boundary document is an ordinary explicit deny
+    # and outranks even a resource policy, so it belongs here rather than in
+    # the capping step below.
+    boundary_id = principal.get("permissions_boundary")
+    boundary = policies_by_id.get(boundary_id) if boundary_id else None
+    if boundary is not None:
+        deny_sources.append(boundary)
 
     for policy in deny_sources:
         is_resource_policy = policy.get("kind") == "resource"
@@ -184,9 +199,12 @@ def reference_is_allowed(
         if not scp_allows:
             return False
 
-    # 3. Identity allow OR resource allow on named principal.
-    for policy in _gather_identity_policies(principal, snapshot):
-        for stmt in _as_list(policy.get("document", {}).get("Statement")):
+    # 3a. Does the boundary permit this action at all? Computed once, before
+    #     the identity arm, because it gates that arm and nothing else.
+    boundary_permits = True
+    if boundary is not None:
+        boundary_permits = False
+        for stmt in _as_list(boundary.get("document", {}).get("Statement")):
             if stmt.get("Effect") != "Allow":
                 continue
             if not _resource_match(stmt.get("Resource", "*"), resource_arn):
@@ -194,7 +212,22 @@ def reference_is_allowed(
             if not _condition_match(stmt.get("Condition"), ctx):
                 continue
             if _action_match(stmt.get("Action"), action):
-                return True
+                boundary_permits = True
+                break
+
+    # 3b. Identity allow (capped by the boundary) OR resource allow on a
+    #     named principal (not capped).
+    if boundary_permits:
+        for policy in _gather_identity_policies(principal, snapshot):
+            for stmt in _as_list(policy.get("document", {}).get("Statement")):
+                if stmt.get("Effect") != "Allow":
+                    continue
+                if not _resource_match(stmt.get("Resource", "*"), resource_arn):
+                    continue
+                if not _condition_match(stmt.get("Condition"), ctx):
+                    continue
+                if _action_match(stmt.get("Action"), action):
+                    return True
 
     if rp_id and rp_id in policies_by_id:
         rp = policies_by_id[rp_id]
@@ -258,9 +291,21 @@ def test_fixture_exposes_at_least_50_pairs(snapshot: dict[str, Any]) -> None:
 
 @pytest.fixture(scope="module")
 def reference_pairs(snapshot: dict[str, Any]) -> list[tuple[str, str, set[str]]]:
-    """Compute reference allow-sets for 50 pairs (42 base + 8 extras)."""
+    """Compute reference allow-sets for **every** principal × resource pair.
 
-    base = _all_pairs(snapshot)
+    This used to take ``pairs[:50]`` against a fixture that produced exactly
+    50. Adding the two permissions-boundary principals took the product to
+    56, so the slice started *rotating* coverage rather than extending it —
+    and the pair it dropped first was the uncapped control, which is the
+    one that proves the cap is doing the work. A slice that silently
+    narrows when the fixture grows is a gate that weakens as the thing it
+    guards gets more interesting.
+
+    The floor below stays, because the point of the original number was
+    "enough pairs to be meaningful", and that is worth keeping as an
+    assertion rather than as a comment.
+    """
+
     extras = [
         # Same fixture re-evaluated — exercises the resolver's caching boundary.
         ("u-alice", "res-key-finance"),
@@ -272,17 +317,17 @@ def reference_pairs(snapshot: dict[str, Any]) -> list[tuple[str, str, set[str]]]
         ("u-erin", "res-bucket-reports"),
         ("u-alice", "res-bucket-artifacts"),
     ]
-    pairs = base + extras
+    pairs = _all_pairs(snapshot) + extras
     assert len(pairs) >= 50, f"expected ≥50 pairs, got {len(pairs)}"
-    return [(pid, rid, reference_decision(snapshot, pid, rid)) for pid, rid in pairs[:50]]
+    return [(pid, rid, reference_decision(snapshot, pid, rid)) for pid, rid in pairs]
 
 
-def test_resolver_matches_reference_simulator_on_50_pairs(
+def test_resolver_matches_reference_simulator_on_every_pair(
     snapshot: dict[str, Any],
     reference_pairs: list[tuple[str, str, set[str]]],
 ) -> None:
     """Resolver allow-set must equal the reference simulator's allow-set on
-    every one of the 50 sampled (principal, resource) pairs.
+    every (principal, resource) pair the fixture can produce.
     """
 
     resolver = AwsIamResolver(snapshot=snapshot)
@@ -420,8 +465,8 @@ def test_phase_4_1_providers_now_report_full_coverage(
     assert resolver_cls.coverage == "full"
 
 
-def test_supported_providers_contains_all_five() -> None:
-    assert set(SUPPORTED_PROVIDERS) == {"aws", "azure", "gcp", "okta", "gws"}
+def test_supported_providers_contains_every_resolver() -> None:
+    assert set(SUPPORTED_PROVIDERS) == {"aws", "azure", "gcp", "okta", "gws", "github"}
 
 
 def test_resolver_result_serialises_to_dict(snapshot: dict[str, Any]) -> None:
@@ -437,3 +482,127 @@ def test_resolver_result_serialises_to_dict(snapshot: dict[str, Any]) -> None:
     if payload["decisions"]:
         decision = payload["decisions"][0]
         assert {"actions", "policy_chain", "resource_id"} <= decision.keys()
+
+
+# ---------------------------------------------------------------------------
+# Permissions boundaries (depth plan 2.5)
+#
+# Before this, `aws.py` detected a boundary and appended a note saying the
+# deny side "may over-permit" — so the resolver returned the *uncapped*
+# answer and labelled it. A containment decision taken on that answer
+# over-states what an identity can reach.
+#
+# The three cases below are the ones that distinguish a correct model from
+# a plausible wrong one, so each is asserted separately rather than folded
+# into the 50-pair cross-check.
+# ---------------------------------------------------------------------------
+
+
+def _actions_for(result: Any, resource_id: str) -> set[str]:
+    for decision in result.decisions:
+        if decision.resource_id == resource_id:
+            return set(decision.actions)
+    return set()
+
+
+def _denies_for(result: Any, resource_id: str) -> set[str]:
+    for decision in result.decisions:
+        if decision.resource_id == resource_id:
+            return set(decision.deny_actions)
+    return set()
+
+
+def test_a_boundary_caps_what_an_identity_policy_granted(
+    snapshot: dict[str, Any],
+) -> None:
+    """frank's group grants s3:PutObject on reports-prod; his boundary
+    permits only reads. The capped action must be gone."""
+
+    frank = AwsIamResolver(snapshot=snapshot).resolve("u-frank")
+    assert "s3:PutObject" not in _actions_for(frank, "res-bucket-reports")
+
+
+def test_the_cap_is_the_boundary_and_not_something_else_about_frank(
+    snapshot: dict[str, Any],
+) -> None:
+    """The positive control. gina carries identical group membership and no
+    boundary, so she must keep the action frank lost.
+
+    Without this, a resolver that dropped the grant for an unrelated reason
+    — a broken group walk, a bad ARN match — would pass the test above and
+    look like a working boundary."""
+
+    resolver = AwsIamResolver(snapshot=snapshot)
+    gina = resolver.resolve("u-gina")
+    frank = resolver.resolve("u-frank")
+
+    assert "s3:PutObject" in _actions_for(gina, "res-bucket-reports")
+    assert "s3:PutObject" not in _actions_for(frank, "res-bucket-reports")
+
+
+def test_a_boundary_does_not_cap_a_resource_policy_naming_the_principal(
+    snapshot: dict[str, Any],
+) -> None:
+    """The case a plausible wrong implementation gets backwards.
+
+    The artifacts bucket policy names frank's ARN and grants s3:PutObject.
+    His boundary does not permit PutObject anywhere. AWS applies a boundary
+    to identity-based policies only, so this grant stands — and a resolver
+    that intersected the whole candidate set with the boundary would report
+    that frank cannot write to a bucket he can write to."""
+
+    frank = AwsIamResolver(snapshot=snapshot).resolve("u-frank")
+    assert "s3:PutObject" in _actions_for(frank, "res-bucket-artifacts")
+
+
+def test_a_deny_inside_a_boundary_outranks_a_resource_policy(
+    snapshot: dict[str, Any],
+) -> None:
+    """A Deny written in a boundary document is an ordinary explicit deny,
+    not a cap, so it wins over the resource-policy arm too."""
+
+    frank = AwsIamResolver(snapshot=snapshot).resolve("u-frank")
+    for resource_id in ("res-bucket-reports", "res-bucket-artifacts"):
+        assert "s3:DeleteObject" not in _actions_for(frank, resource_id)
+
+
+def test_a_capped_action_is_reported_rather_than_silently_absent(
+    snapshot: dict[str, Any],
+) -> None:
+    """What the boundary stopped is the whole reason a reviewer looks.
+
+    An action that simply never appears is indistinguishable from one
+    nobody ever granted, so the cap surfaces in deny_actions and the
+    boundary appears as a hop in the provenance chain."""
+
+    frank = AwsIamResolver(snapshot=snapshot).resolve("u-frank")
+    assert "s3:PutObject" in _denies_for(frank, "res-bucket-reports")
+
+    kinds = {step.kind for decision in frank.decisions for step in decision.policy_chain}
+    assert "permissions-boundary" in kinds
+
+
+def test_an_unresolvable_boundary_says_so_instead_of_over_permitting(
+    snapshot: dict[str, Any],
+) -> None:
+    """A boundary attached to the principal but missing from the snapshot
+    cannot be applied. Reporting the uncapped answer silently would
+    over-permit in exactly the case the boundary exists to prevent, so the
+    result carries a note naming the policy id."""
+
+    broken = json.loads(json.dumps(snapshot))
+    broken["policies"] = [p for p in broken["policies"] if p["id"] != "p-boundary-s3-read"]
+
+    result = AwsIamResolver(snapshot=broken).resolve("u-frank")
+    assert any("p-boundary-s3-read" in note for note in result.notes)
+    assert any("over-permit" in note for note in result.notes)
+
+
+def test_the_resolver_no_longer_claims_boundaries_are_unmodelled(
+    snapshot: dict[str, Any],
+) -> None:
+    """The note this replaced said the deny side 'may over-permit' whenever
+    a boundary was present. It must not fire when the boundary resolved."""
+
+    frank = AwsIamResolver(snapshot=snapshot).resolve("u-frank")
+    assert not any("not modelled" in note for note in frank.notes)

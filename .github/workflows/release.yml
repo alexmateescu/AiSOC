@@ -362,6 +362,7 @@ jobs:
           - threatintel
           - ueba
           - slack-bot
+          - teams-bot
           - honeytokens
           - purple-team
           - osquery-tls
@@ -432,6 +433,14 @@ jobs:
             context: services/slack-bot
             dockerfile: Dockerfile
             image: ghcr.io/beenuar/aisoc-slack-bot
+          # teams-bot shipped in the matrix with no include block, so it had
+          # no image to be tagged with and `docker/build-push-action` refused
+          # with "tag is needed when pushing to registry" on both
+          # architectures — the one image a release could not publish.
+          - service: teams-bot
+            context: services/teams-bot
+            dockerfile: Dockerfile
+            image: ghcr.io/beenuar/aisoc-teams-bot
 
           # Named by docker-compose.yml and the Helm chart since they were
           # written, and published by nothing until now. The chart has no
@@ -466,7 +475,7 @@ jobs:
 
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
 
-      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -528,7 +537,7 @@ jobs:
           mkdir -p /tmp/digests
           touch "/tmp/digests/${DIGEST#sha256:}"
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: digest.${{ matrix.service }}.${{ matrix.platform }}
           path: /tmp/digests/*
@@ -566,6 +575,7 @@ jobs:
           - threatintel
           - ueba
           - slack-bot
+          - teams-bot
           - honeytokens
           - purple-team
           - osquery-tls
@@ -597,6 +607,8 @@ jobs:
             image: ghcr.io/beenuar/aisoc-ueba
           - service: slack-bot
             image: ghcr.io/beenuar/aisoc-slack-bot
+          - service: teams-bot
+            image: ghcr.io/beenuar/aisoc-teams-bot
           - service: honeytokens
             image: ghcr.io/beenuar/aisoc-honeytokens
           - service: purple-team
@@ -604,7 +616,7 @@ jobs:
           - service: osquery-tls
             image: ghcr.io/beenuar/aisoc-osquery-tls
     steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           # Dot-separated, not hyphen-separated: `digest-web-*` also matches
           # `digest-web-demo-amd64`, so the console's manifest job downloaded
@@ -618,7 +630,7 @@ jobs:
 
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
 
-      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -651,34 +663,92 @@ jobs:
       # Resolved per image because a republish or a half-release can leave one
       # image's channel behind the others, and each must be judged on its own.
       #
-      # A miss is not a failure. No `stable` tag yet is the ordinary state of a
-      # first release and must leave the value empty so the channel is taken;
-      # a registry hiccup is reported and also leaves it empty, which is the
-      # safe direction -- the worst case is `stable` advancing within the major
-      # it is already on.
+      # Read through the registry HTTP API — manifest, then config blob —
+      # exactly as the chart half below already does, NEVER through a
+      # `docker buildx imagetools inspect` template. The template's shape is
+      # a property of whatever buildx the runner image ships that day, and
+      # when it broke (`.Image` stopped resolving on multi-arch indexes) the
+      # old read returned empty with stderr discarded, "empty" read as
+      # "first release", and the v20.0.0 and v20.1.0 publishes each carried
+      # `stable` across the v19 -> v20 boundary the guard exists to refuse —
+      # silently, under a green run.
+      #
+      # Three states, not two. A **404** is the ordinary first-release state:
+      # the channel may be taken. A tag that is **present but unreadable** —
+      # a non-404 registry answer, or a manifest whose version label cannot
+      # be resolved — BLOCKS the channel for this release: refusing is
+      # recoverable (the next release or a deliberate promotion moves it),
+      # a wrong crossing is not. That is the same fail-closed reasoning the
+      # chart guard already documents, applied to the read as well as the
+      # decision.
       - id: stable-major
         env:
           IMAGE: ${{ matrix.image }}
           IS_DEMO: ${{ matrix.demo }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -uo pipefail
+          MEDIA="application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json"
+          repo="${IMAGE#ghcr.io/}"
           major=""
+          blocked="false"
           if [ "${IS_DEMO}" != "true" ]; then
-            current=$(docker buildx imagetools inspect "${IMAGE}:stable" \
-                        --format '{{ index .Image.Config.Labels "org.opencontainers.image.version" }}' \
-                      2>/dev/null || true)
-            case "${current}" in
-              v[0-9]*|[0-9]*)
-                major="${current#v}"
-                major="${major%%.*}"
-                ;;
-              *)
-                echo "::notice::no resolvable \`stable\` tag for ${IMAGE} (got '${current}'); treating as a first release"
-                ;;
-            esac
+            reg_token=$(curl -fsS -u "x:${GH_TOKEN}" \
+              "https://ghcr.io/token?scope=repository:${repo}:pull&service=ghcr.io" \
+              | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])' || true)
+            code=$(curl -s -o /tmp/stable-manifest.json -w '%{http_code}' \
+              -H "Authorization: Bearer ${reg_token}" -H "Accept: ${MEDIA}" \
+              "https://ghcr.io/v2/${repo}/manifests/stable" || echo "000")
+            if [ "$code" = "404" ]; then
+              echo "::notice::no \`stable\` tag for ${IMAGE} (404); treating as a first release"
+            elif [ "$code" = "200" ]; then
+              # index -> a platform manifest -> config blob -> version label.
+              digest=$(python3 -c '
+          import json,sys
+          m = json.load(open("/tmp/stable-manifest.json"))
+          if "manifests" in m:
+              plats = [x["digest"] for x in m["manifests"] if x.get("platform",{}).get("architecture") in ("amd64","arm64")]
+              print(plats[0] if plats else "")
+          else:
+              print("self")' || true)
+              if [ "$digest" = "self" ]; then
+                cp /tmp/stable-manifest.json /tmp/stable-image.json
+              elif [ -n "$digest" ]; then
+                curl -fsS -H "Authorization: Bearer ${reg_token}" -H "Accept: ${MEDIA}" \
+                  "https://ghcr.io/v2/${repo}/manifests/${digest}" > /tmp/stable-image.json || : > /tmp/stable-image.json
+              else
+                : > /tmp/stable-image.json
+              fi
+              config=$(python3 -c '
+          import json,sys
+          try:
+              print(json.load(open("/tmp/stable-image.json"))["config"]["digest"])
+          except Exception:
+              print("")' || true)
+              current=""
+              if [ -n "$config" ]; then
+                current=$(curl -fsSL -H "Authorization: Bearer ${reg_token}" \
+                  "https://ghcr.io/v2/${repo}/blobs/${config}" \
+                  | python3 -c 'import json,sys; c=json.load(sys.stdin); print((c.get("config",{}).get("Labels") or {}).get("org.opencontainers.image.version",""))' || true)
+              fi
+              case "${current}" in
+                v[0-9]*|[0-9]*)
+                  major="${current#v}"
+                  major="${major%%.*}"
+                  ;;
+                *)
+                  blocked="true"
+                  echo "::error::\`${IMAGE}:stable\` exists but its version label could not be read (got '${current}'); the channel is held for this release — dispatch image-channel.yml to move it deliberately"
+                  ;;
+              esac
+            else
+              blocked="true"
+              echo "::error::reading \`${IMAGE}:stable\` answered HTTP ${code}; the channel is held for this release — a present-but-unreadable channel must never be mistaken for a first release"
+            fi
           fi
           echo "major=${major}" >> "$GITHUB_OUTPUT"
-          echo "stable channel for ${IMAGE} is on major '${major:-<none>}'"
+          echo "blocked=${blocked}" >> "$GITHUB_OUTPUT"
+          echo "stable channel for ${IMAGE} is on major '${major:-<none>}' (blocked=${blocked})"
 
 
       - id: image-tags
@@ -687,6 +757,7 @@ jobs:
           REPUBLISH: ${{ github.event_name == 'workflow_dispatch' }}
           PROMOTE_STABLE: ${{ inputs.promote_stable }}
           STABLE_MAJOR: ${{ steps.stable-major.outputs.major }}
+          STABLE_BLOCKED: ${{ steps.stable-major.outputs.blocked }}
           IMAGE: ${{ matrix.image }}
           IS_DEMO: ${{ matrix.demo }}
         run: |
@@ -725,7 +796,10 @@ jobs:
               # dispatch arm is the only way `stable` ever reaches a major,
               # and it is separate from the republish arm above so repairing
               # an old tag cannot drag `stable` backwards with it.
-              if { [ "$REPUBLISH" != "true" ] && [ "$IS_MAJOR" != "true" ] && [ "$SAME_MAJOR" = "true" ]; } || [ "$PROMOTE_STABLE" = "true" ]; then
+              # STABLE_BLOCKED means the channel exists but could not be
+              # read; moving it then would be a guess, so only the deliberate
+              # promotion arm may move a blocked channel.
+              if { [ "$REPUBLISH" != "true" ] && [ "$IS_MAJOR" != "true" ] && [ "$SAME_MAJOR" = "true" ] && [ "${STABLE_BLOCKED:-false}" != "true" ]; } || [ "$PROMOTE_STABLE" = "true" ]; then
                 echo "${IMAGE}:stable"
               fi
             fi
@@ -770,7 +844,44 @@ jobs:
       - name: Sign image (cosign keyless)
         env:
           DIGEST: ${{ steps.manifest.outputs.digest }}
-        run: cosign sign --yes "${{ matrix.image }}@${DIGEST}"
+        # Hardened against the two ways one signing can observe itself and
+        # fail (mirrors publish-images.yml, where the second was measured):
+        #
+        #  * A job rerun after a *later* step failed re-signs a digest that
+        #    already carries this repository's valid signature. Verify-first
+        #    makes that a skip instead of a second signature.
+        #  * Rekor can accept the entry while the client times out and
+        #    retries the identical payload, which answers 409
+        #    createLogEntryConflict against the step's own first POST and
+        #    aborts before the registry attachment is written (measured on
+        #    the 2026-10-21 main publish: the conflicting entry's
+        #    integratedTime sat inside the failing step's own window, and the
+        #    digest had no registry signature afterwards). A fresh attempt
+        #    uses a fresh ephemeral key and cannot conflict, so retry once;
+        #    the trailing verify turns "the artifact ended up signed anyway"
+        #    into a pass and anything else stays a hard failure.
+        run: |
+          set -euo pipefail
+          verify() {
+            cosign verify \
+              --certificate-identity-regexp "^https://github.com/${{ github.repository }}/" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              "${{ matrix.image }}@${DIGEST}" >/dev/null 2>&1
+          }
+          if verify; then
+            echo "already signed by this repository's workflows; skipping re-sign of ${DIGEST}"
+            exit 0
+          fi
+          if cosign sign --yes "${{ matrix.image }}@${DIGEST}"; then
+            exit 0
+          fi
+          echo "first sign attempt failed; retrying once with a fresh ephemeral key"
+          sleep 10
+          if cosign sign --yes "${{ matrix.image }}@${DIGEST}"; then
+            exit 0
+          fi
+          echo "second sign attempt failed; accepting only if a valid signature exists"
+          verify
 
       - name: Attach CycloneDX SBOM attestation
         env:
@@ -828,7 +939,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v6
         with:
           node-version: '22'
           registry-url: https://registry.npmjs.org
@@ -991,7 +1102,7 @@ jobs:
       # monorepo tag, so a release often has nothing new for a given package.
       - name: Publish to PyPI
         if: needs.package-credentials.outputs.pypi == 'armed'
-        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
         with:
           packages-dir: ${{ matrix.dir }}/dist
           skip-existing: true
@@ -1146,7 +1257,7 @@ jobs:
 
       - name: Log in to GHCR
         if: github.event_name == 'push'
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -1170,27 +1281,40 @@ jobs:
       # image half was built, so `helm install` with no `--version` has always
       # resolved to whatever the registry hands back.
       #
-      # The rule is the image rule, keyed on the *chart's* own major rather than
-      # the application's: the break an operator is protected from here is a
-      # values-schema break, and the chart versions independently of
-      # `appVersion`. `helm push` cannot write a non-SemVer tag, so the channel
-      # is a manifest copy with buildx, which is already on the runner.
-      - name: Move the `stable` chart channel
-        id: chart-channel
+      # TWO version lines guard the channel, not one. The chart's own major
+      # announces a values-schema break. But the chart's values default every
+      # unpinned image tag to `Chart.AppVersion`, so the channel also carries
+      # operators across *application* majors — which is how v20.0.0 (chart
+      # 7.9.0, not a chart major) moved chart `stable` onto a breaking app
+      # release while every image `stable` tag correctly stayed on v19 (#1440).
+      # A channel is a property of history, so both majors are read from where
+      # the channel IS (the registry), never from the release in hand.
+      #
+      # The work is split across three steps so the *decision* is a pure block
+      # tests/test_release_channel_tags.py executes with each ladder of
+      # releases — the same lift-the-exact-block pattern as `image-tags`,
+      # because a copy of the logic would agree with itself while the
+      # workflow drifted.
+      #
+      # NOT `docker buildx imagetools create`. That tool composes image
+      # *indexes*: on v17.1.0, the first release to reach this far, it wrapped
+      # the chart manifest in a fresh single-entry OCI index with no
+      # annotations — so `:stable` pointed at a wrapper no helm client should
+      # be handed, and the verify below correctly refused it ("resolves to
+      # '<nothing>'"). A channel tag must serve the *same bytes* as the
+      # version tag: GET the manifest, PUT it under `stable`, unchanged.
+      - name: Read where the chart channel is
+        id: chart-state
         if: github.event_name == 'push'
         env:
           CHART_VERSION: ${{ steps.package.outputs.version }}
-          PROMOTE_STABLE: ${{ inputs.promote_stable }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -uo pipefail
-          CHART=oci://ghcr.io/beenuar/charts/aisoc
-          REF=ghcr.io/beenuar/charts/aisoc
-
-          incoming_major="${CHART_VERSION%%.*}"
-          is_major=false
-          case "$CHART_VERSION" in
-            *.0.0) is_major=true ;;
-          esac
+          MEDIA="application/vnd.oci.image.manifest.v1+json"
+          reg_token=$(curl -fsS -u "x:${GH_TOKEN}" \
+            "https://ghcr.io/token?scope=repository:beenuar/charts/aisoc:pull,push&service=ghcr.io" \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')
 
           # Where the channel is now, read from the tag's OCI manifest.
           #
@@ -1206,12 +1330,63 @@ jobs:
           # The manifest carries `org.opencontainers.image.version`, which is
           # the chart version helm packaged. `|| true` because a missing tag
           # is the ordinary state before the first promotion, not an error.
-          current=$(docker buildx imagetools inspect "${REF}:stable" --raw 2>/dev/null \
+          current=$(curl -fsS -H "Authorization: Bearer ${reg_token}" -H "Accept: ${MEDIA}" \
+                      "https://ghcr.io/v2/beenuar/charts/aisoc/manifests/stable" 2>/dev/null \
                       | python3 -c 'import json,sys; print((json.load(sys.stdin).get("annotations") or {}).get("org.opencontainers.image.version",""))' \
                       2>/dev/null || true)
+
+          # A chart tag's appVersion, without pulling a tarball: the helm OCI
+          # *config blob* is Chart.yaml serialized as JSON, so it is manifest
+          # -> config.digest -> blob. Empty on any failure — the decide step
+          # owns the failure semantics, this step only reports facts.
+          app_major_of() {
+            local tag="$1" digest
+            digest=$(curl -fsS -H "Authorization: Bearer ${reg_token}" -H "Accept: ${MEDIA}" \
+                       "https://ghcr.io/v2/beenuar/charts/aisoc/manifests/${tag}" 2>/dev/null \
+                       | python3 -c 'import json,sys; print(json.load(sys.stdin)["config"]["digest"])' 2>/dev/null || true)
+            if [ -n "$digest" ]; then
+              curl -fsSL -H "Authorization: Bearer ${reg_token}" \
+                   "https://ghcr.io/v2/beenuar/charts/aisoc/blobs/${digest}" 2>/dev/null \
+                | python3 -c 'import json,sys; v=(json.load(sys.stdin).get("appVersion") or "").lstrip("v"); print(v.split(".")[0] if v and v.split(".")[0].isdigit() else "")' \
+                  2>/dev/null || true
+            fi
+          }
+
+          channel_app_major=""
+          if [ -n "$current" ]; then
+            channel_app_major=$(app_major_of stable)
+          fi
+          incoming_app_major=$(app_major_of "${CHART_VERSION}")
+
+          echo "channel: chart '${current:-<none>}', app major '${channel_app_major:-<none>}'; incoming: chart ${CHART_VERSION}, app major '${incoming_app_major:-<none>}'"
+          {
+            echo "channel_chart_version=${current}"
+            echo "channel_app_major=${channel_app_major}"
+            echo "incoming_app_major=${incoming_app_major}"
+          } >> "$GITHUB_OUTPUT"
+
+      # The decision, pure over the facts above so the ladder tests can run
+      # this exact block. Everything here is a string comparison; no network.
+      - name: Decide whether the chart channel moves
+        id: chart-decide
+        if: github.event_name == 'push'
+        env:
+          CHART_VERSION: ${{ steps.package.outputs.version }}
+          PROMOTE_STABLE: ${{ inputs.promote_stable }}
+          CHANNEL_CHART_VERSION: ${{ steps.chart-state.outputs.channel_chart_version }}
+          CHANNEL_APP_MAJOR: ${{ steps.chart-state.outputs.channel_app_major }}
+          INCOMING_APP_MAJOR: ${{ steps.chart-state.outputs.incoming_app_major }}
+        run: |
+          set -uo pipefail
+          incoming_major="${CHART_VERSION%%.*}"
+          is_major=false
+          case "$CHART_VERSION" in
+            *.0.0) is_major=true ;;
+          esac
+
           channel_major=""
-          case "$current" in
-            [0-9]*) channel_major="${current%%.*}" ;;
+          case "$CHANNEL_CHART_VERSION" in
+            [0-9]*) channel_major="${CHANNEL_CHART_VERSION%%.*}" ;;
           esac
 
           same_major=true
@@ -1219,25 +1394,71 @@ jobs:
             same_major=false
           fi
 
-          if { [ "$is_major" != "true" ] && [ "$same_major" = "true" ]; } || [ "${PROMOTE_STABLE}" = "true" ]; then
-            docker buildx imagetools create --tag "${REF}:stable" "${REF}:${CHART_VERSION}"
-            # Read the tag back and require it to name the version we just
-            # pushed. `helm show chart --version stable` cannot do this for
-            # the reason above, and a promotion nobody verified is how a
-            # channel silently points at the wrong chart.
-            moved_to=$(docker buildx imagetools inspect "${REF}:stable" --raw 2>/dev/null \
-                         | python3 -c 'import json,sys; print((json.load(sys.stdin).get("annotations") or {}).get("org.opencontainers.image.version",""))' \
-                         2>/dev/null || true)
-            if [ "$moved_to" != "$CHART_VERSION" ]; then
-              echo "::error title=Helm::stable was pushed but resolves to '${moved_to:-<nothing>}', not ${CHART_VERSION}"
-              exit 1
+          # The appVersion guard (#1440). An empty *channel* app major is the
+          # ordinary first-release state and allows movement, exactly like the
+          # chart-major read above. An empty *incoming* app major while the
+          # channel names one is different: refusing is recoverable (the next
+          # release or a deliberate promotion moves the channel), a wrong
+          # crossing is not, so that direction fails closed.
+          app_same_major=true
+          reason=""
+          if [ -n "$CHANNEL_APP_MAJOR" ]; then
+            if [ -z "$INCOMING_APP_MAJOR" ]; then
+              app_same_major=false
+              reason="the incoming chart's appVersion could not be read"
+            elif [ "$CHANNEL_APP_MAJOR" != "$INCOMING_APP_MAJOR" ]; then
+              app_same_major=false
+              reason="appVersion crosses v${CHANNEL_APP_MAJOR} -> v${INCOMING_APP_MAJOR}"
             fi
-            echo "::notice title=Helm::stable chart channel now resolves to ${CHART_VERSION}"
-            echo "moved=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "::notice title=Helm::stable chart channel left at ${current:-<none>}; chart ${CHART_VERSION} crosses a major. Dispatch with promote_stable: true to move it."
-            echo "moved=false" >> "$GITHUB_OUTPUT"
           fi
+
+          if { [ "$is_major" != "true" ] && [ "$same_major" = "true" ] && [ "$app_same_major" = "true" ]; } || [ "${PROMOTE_STABLE}" = "true" ]; then
+            echo "move=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice title=Helm::stable chart channel left at ${CHANNEL_CHART_VERSION:-<none>}${reason:+ (${reason})}; dispatch chart-channel.yml (or release with promote_stable: true) to move it deliberately."
+            echo "move=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Move the `stable` chart channel
+        id: chart-channel
+        if: github.event_name == 'push' && steps.chart-decide.outputs.move == 'true'
+        env:
+          CHART_VERSION: ${{ steps.package.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          MEDIA="application/vnd.oci.image.manifest.v1+json"
+          reg_token=$(curl -fsS -u "x:${GH_TOKEN}" \
+            "https://ghcr.io/token?scope=repository:beenuar/charts/aisoc:pull,push&service=ghcr.io" \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')
+
+          # GET the version tag's manifest and refuse to promote anything
+          # whose own annotation does not name CHART_VERSION — then PUT the
+          # identical bytes under `stable`.
+          curl -fsS -H "Authorization: Bearer ${reg_token}" -H "Accept: ${MEDIA}" \
+            "https://ghcr.io/v2/beenuar/charts/aisoc/manifests/${CHART_VERSION}" -o /tmp/chart-manifest.json
+          source_version=$(python3 -c 'import json; print((json.load(open("/tmp/chart-manifest.json")).get("annotations") or {}).get("org.opencontainers.image.version",""))')
+          if [ "$source_version" != "$CHART_VERSION" ]; then
+            echo "::error title=Helm::the ${CHART_VERSION} tag's manifest names '${source_version:-<nothing>}'; refusing to promote it"
+            exit 1
+          fi
+          curl -fsS -X PUT -H "Authorization: Bearer ${reg_token}" -H "Content-Type: ${MEDIA}" \
+            --data-binary @/tmp/chart-manifest.json \
+            "https://ghcr.io/v2/beenuar/charts/aisoc/manifests/stable" > /dev/null
+          # Read the tag back and require it to name the version we just
+          # pushed. `helm show chart --version stable` cannot do this for
+          # the reason above, and a promotion nobody verified is how a
+          # channel silently points at the wrong chart.
+          moved_to=$(curl -fsS -H "Authorization: Bearer ${reg_token}" -H "Accept: ${MEDIA}" \
+                       "https://ghcr.io/v2/beenuar/charts/aisoc/manifests/stable" 2>/dev/null \
+                       | python3 -c 'import json,sys; print((json.load(sys.stdin).get("annotations") or {}).get("org.opencontainers.image.version",""))' \
+                       2>/dev/null || true)
+          if [ "$moved_to" != "$CHART_VERSION" ]; then
+            echo "::error title=Helm::stable was pushed but resolves to '${moved_to:-<nothing>}', not ${CHART_VERSION}"
+            exit 1
+          fi
+          echo "::notice title=Helm::stable chart channel now resolves to ${CHART_VERSION}"
+          echo "moved=true" >> "$GITHUB_OUTPUT"
 
 
       - name: Explain a packaged-but-unpushed chart

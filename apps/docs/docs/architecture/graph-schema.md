@@ -31,7 +31,7 @@ Each of those questions is a graph traversal. Doing the traversal on raw events 
 
 Just as important, the graph is the **shared substrate** the agent uses to build context. When the agent investigates an alert, it doesn't search logs — it walks the graph from the alert's `:OCCURRED_ON` anchor outward through `:ACCESSES`, `:HAS_PERMISSION`, `:PEER_OF`, and `:MEMBER_OF` edges, and the result is bounded, audit-able, and reproducible. The graph is what makes the L0–L4 autonomy claim defensible.
 
-The schema is intentionally small — 17 node labels, 14 relationship types — and intentionally split into **structural edges** (what *is*, from configuration snapshots) and **event edges** (what *happened*, from observed events). Every event edge carries `ts`, `source_event_id`, and `snapshot_id` so any state can be reconstructed at any point in time.
+The schema is intentionally small, and the authoritative counts are the ones `scripts/export_graph_schema.py --check` prints from [`schemas/graph-schema.yaml`](https://github.com/beenuar/AiSOC/blob/main/schemas/graph-schema.yaml) rather than a number written here, which would go stale on the next additive change and did. It is intentionally split into **structural edges** (what *is*, from configuration snapshots) and **event edges** (what *happened*, from observed events). Every event edge carries `ts`, `source_event_id`, and `snapshot_id` so any state can be reconstructed at any point in time.
 
 ## Schema at a glance
 
@@ -206,6 +206,15 @@ A detection rule — Sigma, custom YAML, hunt-as-code. Connected to the Alerts i
 - **Created when**: a detection rule is published (DAC pipeline) or hot-loaded.
 - **Properties**: `id` (required), `name` (required), `source` (required), `severity`, `updated_at`.
 
+### `AIAsset`
+
+One observed AI asset: an AI application, a coding agent, an MCP server, an IDE extension, a model-provider key, or an OAuth grant to an AI application. One label carrying a `kind` property rather than six labels, for the same reason `Identity` superclasses `User` and `ServiceAccount` — every question asked of this data is asked *across* the kinds ("what does this person run", "what runs on this laptop"), so six labels would make each of those a six-way union and would give the vocabulary six places to drift.
+
+This is the graph projection. The durable record is the `aisoc_ai_assets` table, written by the fusion recorder; the node exists so an investigation can traverse from a person or a device to what AI they run without leaving the graph.
+
+- **Created when**: `ai-runtime` or `ai-finding` telemetry arrives from the SDK or a gateway, or process activity names a known coding-agent binary.
+- **Properties**: `id` (required), `tenant_id` (required), `kind` (required), `external_id` (required), `display_name`, `vendor`, `model`.
+
 ## Relationships
 
 Relationships are split into two classes:
@@ -340,6 +349,18 @@ not per event.
 
 - **Required edge properties**: `ts`, `source_event_id`, `snapshot_id`.
 - **Additional properties**: `bytes_in`, `object_path`.
+
+### `:OPERATES` — `User` → `AIAsset`
+
+**Event edge.** The person an AI asset acted for. Absent rather than guessed when the telemetry did not say: an AI asset nobody is accountable for is the finding, and writing a placeholder would hide it.
+
+- **Required edge properties**: `ts`, `source_event_id`, `snapshot_id`.
+
+### `:HOSTS` — `Endpoint` → `AIAsset`
+
+**Event edge.** The device an AI asset ran on. This is the edge containment reads — without it a kill-switch has nowhere to act, which is why the inventory scores an AI asset with no device as exposed rather than as merely unknown.
+
+- **Required edge properties**: `ts`, `source_event_id`, `snapshot_id`.
 
 ## Versioning
 

@@ -19,6 +19,14 @@ Endpoint contract
     Hard-delete the row. The platform falls back to env-var configuration
     on the next request (the existing v1 behaviour).
 
+* ``POST   /api/v1/llm/credentials/test``
+    Place one minimal completion with the stored credential.
+
+* ``POST   /api/v1/llm/credentials/models``
+    List the chat models a ``custom`` endpoint serves, so the console can
+    offer them instead of requiring a hand-typed id. See
+    :mod:`app.services.llm_model_discovery`.
+
 Why this lives in services/api
 ------------------------------
 
@@ -62,6 +70,7 @@ from app.models.llm_credential import TenantLlmCredential
 from app.security.credential_vault import CredentialVaultError, get_vault
 from app.services.audit import emit_audit
 from app.services.llm_credential_probe import ProbeResult, probe_credential
+from app.services.llm_model_discovery import Discovery, discover_chat_models
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +107,31 @@ _PROVIDERS_REQUIRING_KEY: frozenset[str] = frozenset({"openai", "anthropic", "az
 # --------------------------------------------------------------- request / response models
 
 
+def _check_base_url(v: str | None) -> str | None:
+    if v is None:
+        return v
+    v = v.strip()
+    if not v:
+        return None
+    # Light shape check — we don't want to over-validate (operators
+    # legitimately run weird proxies on weird ports inside private
+    # networks) but we should reject obvious garbage so the UI gets
+    # a useful 422 instead of a 500 at request time.
+    parsed = urlparse(v)
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError("base_url must be an http(s) URL")
+    if not parsed.hostname:
+        raise ValueError("base_url must include a hostname")
+    return v
+
+
+def _blank_to_none(v: str | None) -> str | None:
+    if v is None:
+        return v
+    v = v.strip()
+    return v or None
+
+
 class LlmCredentialUpsert(BaseModel):
     """Payload for ``PUT /api/v1/llm/credentials``.
 
@@ -119,29 +153,12 @@ class LlmCredentialUpsert(BaseModel):
     @field_validator("base_url")
     @classmethod
     def _validate_base_url(cls, v: str | None) -> str | None:
-        if v is None:
-            return v
-        v = v.strip()
-        if not v:
-            return None
-        # Light shape check — we don't want to over-validate (operators
-        # legitimately run weird proxies on weird ports inside private
-        # networks) but we should reject obvious garbage so the UI gets
-        # a useful 422 instead of a 500 at request time.
-        parsed = urlparse(v)
-        if parsed.scheme not in {"http", "https"}:
-            raise ValueError("base_url must be an http(s) URL")
-        if not parsed.hostname:
-            raise ValueError("base_url must include a hostname")
-        return v
+        return _check_base_url(v)
 
     @field_validator("api_key")
     @classmethod
     def _validate_api_key(cls, v: str | None) -> str | None:
-        if v is None:
-            return v
-        v = v.strip()
-        return v or None
+        return _blank_to_none(v)
 
 
 class LlmCredentialView(BaseModel):
@@ -520,4 +537,126 @@ async def test_llm_credential(
         provider=existing.provider,
         model=result.model,
         latency_ms=result.latency_ms,
+    )
+
+
+# --------------------------------------------------------- model discovery
+
+
+class LlmModelDiscoveryRequest(BaseModel):
+    """Where to list models from, for a form that may not be saved yet.
+
+    Both fields are optional. ``base_url`` falls back to the stored ``custom``
+    credential's. ``api_key`` is used for this one request and never stored;
+    when it is omitted the stored key is used, but only if the target is the
+    stored base URL -- see :func:`discover_llm_models`.
+    """
+
+    base_url: str | None = Field(default=None, max_length=512)
+    api_key: str | None = Field(default=None, max_length=4096)
+
+    @field_validator("base_url")
+    @classmethod
+    def _validate_base_url(cls, v: str | None) -> str | None:
+        return _check_base_url(v)
+
+    @field_validator("api_key")
+    @classmethod
+    def _validate_api_key(cls, v: str | None) -> str | None:
+        return _blank_to_none(v)
+
+
+class DiscoveredModelView(BaseModel):
+    id: str
+    name: str | None = None
+
+
+class LlmModelDiscoveryResult(BaseModel):
+    """The chat models an endpoint listed, or why there are none.
+
+    ``outcome`` uses the Test button's vocabulary. Anything other than ``ok``
+    leaves ``models`` empty and the console falls back to the hand-typed id,
+    which is the path that always worked; nothing is invented to fill the gap.
+    """
+
+    outcome: Literal["ok", "refused", "unreachable", "unverified"]
+    detail: str
+    models: list[DiscoveredModelView]
+    listed: int
+    excluded: int
+    truncated: bool
+
+
+def _same_endpoint(a: str | None, b: str | None) -> bool:
+    return bool(a and b) and (a or "").strip().rstrip("/") == (b or "").strip().rstrip("/")
+
+
+@router.post(
+    "/models",
+    response_model=LlmModelDiscoveryResult,
+    summary="List the chat models a custom OpenAI-compatible endpoint serves",
+)
+async def discover_llm_models(
+    payload: LlmModelDiscoveryRequest,
+    current_user: Annotated[AuthUser, Depends(require_permission("settings:write"))],
+    db: DBSession,
+) -> LlmModelDiscoveryResult:
+    """Ask ``GET {base_url}/models`` and return the chat-capable entries.
+
+    For the ``custom`` provider, whose model was otherwise a hand-typed id.
+
+    `settings:write`, like `/test`: this dials an operator-supplied URL with
+    private addresses permitted, which is not something a read-only role
+    should be able to point at the network.
+
+    The stored key goes only to the stored base URL. A form that has changed
+    the base URL and left the key blank gets a keyless request, not the saved
+    key sent somewhere it was never configured to go; an endpoint that needs a
+    key then answers 401 and the detail says so.
+    """
+    res = await db.execute(select(TenantLlmCredential).where(TenantLlmCredential.tenant_id == current_user.tenant_id))
+    existing: TenantLlmCredential | None = res.scalar_one_or_none()
+    stored = existing if existing is not None and existing.provider == "custom" else None
+
+    base_url = payload.base_url or (stored.base_url if stored else None)
+    if not base_url:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Model discovery needs a base URL: enter one, or save a custom credential first.",
+        )
+
+    api_key = payload.api_key
+    if api_key is None and stored is not None and stored.api_key_vault and _same_endpoint(stored.base_url, base_url):
+        try:
+            api_key = get_vault().decrypt(stored.api_key_vault)
+        except CredentialVaultError:
+            return LlmModelDiscoveryResult(
+                outcome="refused",
+                detail=(
+                    "The stored key could not be decrypted. It was encrypted with a vault key "
+                    "this deployment no longer has; re-enter it to fix."
+                ),
+                models=[],
+                listed=0,
+                excluded=0,
+                truncated=False,
+            )
+
+    result: Discovery = await discover_chat_models(base_url=base_url, api_key=api_key)
+    logger.info(
+        "settings.llm.discover",
+        extra={
+            "tenant": str(current_user.tenant_id),
+            "outcome": result.outcome,
+            "listed": result.listed,
+            "offered": len(result.models),
+        },
+    )
+    return LlmModelDiscoveryResult(
+        outcome=result.outcome,
+        detail=result.detail,
+        models=[DiscoveredModelView(id=m.id, name=m.name) for m in result.models],
+        listed=result.listed,
+        excluded=result.excluded,
+        truncated=result.truncated,
     )

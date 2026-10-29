@@ -67,12 +67,61 @@ ONE_SHOT: frozenset[str] = frozenset({"ollama-pull"})
 #: number. Deliberately a list of exact sites rather than a search for any
 #: integer near the word "services": a gate that guesses which numbers are
 #: claims would either miss the one that matters or flag prose forever.
+# Prose in this repository writes small counts as words as often as digits
+# ("the sixteen CORE containers"), and a gate that could only read digits
+# could not watch those sentences at all — which is how
+# `apps/docs/docs/installation.md` sat at "fourteen" while every registered
+# digit site was correct. The range covers the profile counts plus headroom;
+# anything outside it is reported rather than silently skipped.
+_NUMBER_WORDS: dict[str, int] = {
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+    "thirteen": 13,
+    "fourteen": 14,
+    "fifteen": 15,
+    "sixteen": 16,
+    "seventeen": 17,
+    "eighteen": 18,
+    "nineteen": 19,
+    "twenty": 20,
+    "twenty-one": 21,
+    "twenty-two": 22,
+    "twenty-three": 23,
+    "twenty-four": 24,
+}
+
+
+def _as_count(raw: str) -> int | None:
+    """A captured claim as an integer, whether written in digits or words."""
+    text = raw.strip().lower()
+    if text.isdigit():
+        return int(text)
+    return _NUMBER_WORDS.get(text)
+
+
 CLAIM_SITES: tuple[tuple[str, str, str], ...] = (
     # Three figures that had drifted to 10, fifteen and fifteen against a
     # compose file supporting neither. Registered rather than merely
     # corrected: an unregistered figure is one nobody notices going stale,
     # which is how all three got there.
+    # The contributor guide at the repository root. Both figures are in its
+    # opening "get it running" block, which is the first thing a reader runs,
+    # so a stale one there is wrong before anything else can be.
+    ("AGENTS.md", "core", r"CORE profile: (\d+) long-running services"),
+    ("AGENTS.md", "prod:full", r"adds the rest \((\d+) services"),
     ("install.sh", "core", r"Starting the (\d+)-service CORE stack"),
+    # The installation page's Requirements table, where the memory figure is
+    # justified *by* the container count ("steady-state RSS across the N CORE
+    # containers"). It read "fourteen" for as long as connectors and actions
+    # had been in CORE: written as a word, so neither the digit-based claim
+    # sites nor the unregistered-figure sweep below could see it. This is the
+    # entry that makes the word form watchable.
+    (
+        "apps/docs/docs/installation.md",
+        "core",
+        r"Steady-state RSS across the ([a-z-]+|\d+) CORE containers",
+    ),
     ("apps/docs/docs/deployment/walkthrough.mdx", "core", r"starts the (\d+) CORE services"),
     ("Makefile", "core", r"`missing` on all (\d+) first-party services"),
     # The production deployment page. `prod:full` is a separate figure from
@@ -113,6 +162,20 @@ CLAIM_SITES: tuple[tuple[str, str, str], ...] = (
         "full",
         r"`full` is (\d+) long-running containers",
     ),
+    # The repository-overview page, which carries the service map a reader
+    # navigating the code actually consults. It listed `connectors` and
+    # `actions` under `full` long after both moved into CORE; registering the
+    # counts beside that table is what makes the next such move fail here.
+    (
+        "apps/docs/docs/architecture/overview.md",
+        "core",
+        r"CORE is (\d+) long-running services",
+    ),
+    (
+        "apps/docs/docs/architecture/overview.md",
+        "full",
+        r"`full` is (\d+) long-running services",
+    ),
     (
         "apps/docs/docs/quickstart.md",
         "core",
@@ -127,6 +190,21 @@ CLAIM_SITES: tuple[tuple[str, str, str], ...] = (
         "docs/audit/REPOSITORY_REALITY.md",
         "core",
         r"CORE profile: (\d+) long-running services",
+    ),
+    # The depth plan's progress file. It republishes both counts in its
+    # re-derived-figures table and in a deviation explaining why the `full`
+    # baseline was not taken on a host that size, so both are claims and
+    # both are registered. Registered when written rather than after it
+    # drifted, which is the only time registering is cheap.
+    (
+        "DEPTH_PROGRESS.md",
+        "core",
+        r"\*\*PASS\*\* -- (\d+) services healthy",
+    ),
+    (
+        "DEPTH_PROGRESS.md",
+        "full",
+        r"The `full` profile is (\d+) services",
     ),
     # The five below went unchecked until ADR-0007 moved CORE to 16 and they
     # kept saying 14. Two of them are the landing page and the FAQ, so the
@@ -365,7 +443,12 @@ def scan() -> tuple[dict[str, int], dict[str, set[str]], list[str]]:
                 f"CLAIM_SITES, or it was deleted and the entry is stale."
             )
             continue
-        published = int(found.group(1))
+        published = _as_count(found.group(1))
+        if published is None:
+            errors.append(
+                f"{rel}: matched {found.group(1)!r} for the {profile!r} count, which is neither a number nor a number word this gate knows"
+            )
+            continue
         if published != counts[profile]:
             errors.append(
                 f"{rel}: publishes {published} services for the {profile!r} profile; "

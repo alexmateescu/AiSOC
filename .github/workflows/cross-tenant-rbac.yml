@@ -79,7 +79,7 @@ jobs:
       # pull in pydantic, sqlalchemy, structlog, jose, …) without us
       # having to maintain a parallel pin list here.
       API_DEPS: >-
-        "fastapi>=0.117,<0.142" "pydantic[email]" pydantic-settings "sqlalchemy[asyncio]" asyncpg
+        "fastapi>=0.117,<0.162" "pydantic[email]" pydantic-settings "sqlalchemy[asyncio]" asyncpg
         structlog "PyJWT>=2.8,<3" "cryptography>=46,<51" "passlib[bcrypt]" tenacity pyyaml
         prometheus-client "opentelemetry-sdk" "opentelemetry-api"
         "opentelemetry-exporter-otlp-proto-grpc"
@@ -122,7 +122,7 @@ jobs:
 
       - name: Upload junit report
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: tenant-isolation-junit-${{ github.run_id }}
           path: services/api/tenant-isolation.junit.xml

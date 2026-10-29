@@ -250,7 +250,8 @@ async def test_datadog_fetch_logs_emits_normalized_events():
     assert len(events) == 1
     ev = events[0]
     assert ev["source"] == "datadog"
-    assert ev["severity"] == "high"  # status:critical → high
+    assert ev["severity"] == "critical"
+    assert ev["raw_event"]["attributes"]["status"] == "critical"
     assert ev["raw_event"]["attributes"]["service"] == "nginx"
 
 
@@ -396,6 +397,35 @@ def test_lacework_capabilities():
     caps = set(LaceworkConnector.capabilities())
     assert Capability.PULL_ALERTS in caps
     assert Capability.ENRICH_VULN in caps
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        {
+            "_kind": "alert",
+            "id": "alert-1",
+            "alertName": "Cloud account compromise",
+            "severity": "critical",
+        },
+        {
+            "_kind": "policy",
+            "id": "policy-1",
+            "policyId": "lacework-global-1",
+            "policyTitle": "Public cloud storage",
+            "severity": "critical",
+            "resourceType": "AwsS3Bucket",
+            "resourceId": "bucket-1",
+        },
+    ],
+)
+def test_lacework_preserves_critical_severity(raw: dict[str, str]):
+    """Vendor-native critical alerts and policies must remain in the P1 tier."""
+    connector = LaceworkConnector(account="acme", key_id="key", secret="secret")
+    normalized = connector.normalize(raw)
+
+    assert normalized["severity"] == "critical"
+    assert normalized["raw_event"]["severity"] == "critical"
 
 
 # ---------------------------------------------------------------------------

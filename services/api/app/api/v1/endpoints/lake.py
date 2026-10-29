@@ -36,8 +36,9 @@ import uuid
 from datetime import datetime
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 
 from app.api.v1.deps import AuthUser, DBSession, require_permission
 from app.core.logging import safe_log_value
@@ -48,7 +49,10 @@ from app.db.clickhouse import (
     execute_lake_query,
     fetch_lake_schema,
 )
+from app.models.lake_query_job import LakeQueryJob
 from app.services.audit import emit_audit
+from app.services.lake_cold_query import ColdEstimateUnavailable, ScanEstimate, estimate_scan
+from app.services.lake_query_runner import cancel_job, claim_job, new_query_id, read_progress, run_job
 from app.services.lake_rate_limit import get_lake_rate_limiter
 from app.services.lake_sql import (
     ALLOWED_TABLES,
@@ -120,6 +124,16 @@ class LakeQueryRequest(BaseModel):
         gt=0,
         le=60.0,
         description=("Optional wall-clock cap. Defaults to the server cap (30s). Useful for agent loops that need to fail fast."),
+    )
+    force_sync: bool = Field(
+        default=False,
+        description=(
+            "Run synchronously even when the estimate says the query must read the cold "
+            "volume. Off by default: the synchronous path is bounded by the 30-second default "
+            "and 60-second maximum above, and a cold read that does not fit inside them used "
+            "to come back as a bare timeout with no indication of how much data was involved. "
+            "Set this only when you already know the scan is small."
+        ),
     )
 
 
@@ -305,6 +319,44 @@ async def execute_lake_sql(
             detail=f"lake SQL invalid: {exc}",
         ) from exc
 
+    # ---- Step 1b: is this a cold scan? ----------------------------------
+    #
+    # Depth 4.3. Before this, a query over the cold volume either returned
+    # inside the published 30-second default or raised a bare timeout,
+    # which tells an analyst nothing about whether a longer deadline would
+    # have helped or how much data was involved.
+    #
+    # The routing rule deliberately does not predict a duration. Doing so
+    # would need a bytes-per-second figure, and the only honest source for
+    # one is a measurement on the deployment's own hardware. A query is
+    # routed to a job when ClickHouse's own estimate says it must read the
+    # cold volume, which is the case the plan names.
+    estimate: ScanEstimate | None = None
+    if not body.force_sync:
+        try:
+            estimate = await estimate_scan(rewrite.sql)
+        except ColdEstimateUnavailable as exc:
+            # Not fatal. An un-estimable query runs the way it always did,
+            # because refusing it would make the lake unusable on a
+            # deployment whose system tables this role cannot read. Logged
+            # so a permanently unreadable estimator is visible rather than
+            # silently turning the feature off.
+            logger.info("lake.sql.estimate_unavailable tenant_id=%s reason=%s", current_user.tenant_id, exc)
+        if estimate is not None and estimate.touches_cold:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "error": "cold_scan",
+                    "message": (
+                        "this query reads the cold tier, which does not reliably finish inside the "
+                        f"{_DEFAULT_API_TIMEOUT_SECONDS:.0f}s synchronous bound. Submit it to "
+                        "POST /api/v1/lake/query-jobs, which reports progress, or set force_sync "
+                        "if you already know the scan is small."
+                    ),
+                    "estimate": estimate.as_dict(),
+                },
+            )
+
     # ---- Step 2: execute ------------------------------------------------
     try:
         result = await execute_lake_query(
@@ -399,6 +451,284 @@ async def execute_lake_sql(
         elapsed_ms=result.elapsed_ms,
         executed_at=datetime.utcnow(),
     )
+
+
+# ----------------------------------------------- cold-tier query jobs
+#
+# Depth plan 4.3, third bullet. A cold-tier scan outlives its request, so
+# it becomes a row rather than a coroutine: the API runs more than one
+# replica, and an in-process registry would lose every job on a restart
+# and 404 half of them on the other replica.
+
+
+class LakeEstimateRequest(BaseModel):
+    """Ask what a query would read, without running it."""
+
+    sql: str = Field(..., min_length=1, max_length=200_000)
+    row_cap: int | None = Field(default=None, ge=1, le=MAX_ROW_CAP)
+
+
+class LakeEstimateResponse(BaseModel):
+    estimated_rows: int
+    estimated_parts: int
+    estimated_bytes: int
+    cold_bytes: int
+    warm_bytes: int
+    touches_cold: bool
+    tables: list[str]
+    #: ``None`` when no retrieval price is configured. Never 0.0, which
+    #: would read as "free".
+    estimated_usd: float | None
+    cost_basis: str
+
+
+class LakeQueryJobRequest(BaseModel):
+    sql: str = Field(..., min_length=1, max_length=200_000)
+    row_cap: int | None = Field(default=None, ge=1, le=MAX_ROW_CAP)
+
+
+class LakeQueryJobResponse(BaseModel):
+    """A job's state. The fields a console needs to show progress honestly."""
+
+    id: uuid.UUID
+    status: str
+    referenced_tables: list[str]
+    row_cap: int
+    estimate: dict[str, Any]
+    rows_read: int
+    bytes_read: int
+    total_rows_approx: int
+    #: Nullable. ClickHouse publishes ``total_rows_approx`` best-effort,
+    #: so a running query can have a numerator and no denominator — and a
+    #: bar that invents 100% because the denominator was zero is worse
+    #: than one that says it does not know.
+    progress_ratio: float | None
+    columns: list[str] | None
+    rows: list[list[Any]] | None
+    row_count: int | None
+    error: str | None
+    created_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+
+
+def _job_response(job: LakeQueryJob) -> LakeQueryJobResponse:
+    return LakeQueryJobResponse(
+        id=job.id,
+        status=job.status,
+        referenced_tables=list(job.referenced_tables or []),
+        row_cap=job.row_cap,
+        estimate=job.estimate or {},
+        rows_read=job.rows_read,
+        bytes_read=job.bytes_read,
+        total_rows_approx=job.total_rows_approx,
+        progress_ratio=job.progress_ratio,
+        columns=list(job.result_columns) if job.result_columns else None,
+        rows=job.result_rows,
+        row_count=job.row_count,
+        error=job.error,
+        created_at=job.created_at,
+        started_at=job.started_at,
+        finished_at=job.finished_at,
+    )
+
+
+def _rewrite_or_raise(sql: str, tenant_id: uuid.UUID, row_cap: int | None):
+    try:
+        return rewrite_for_tenant(sql, tenant_id, row_cap=row_cap)
+    except LakeSqlForbiddenError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=f"lake SQL forbidden: {exc}") from exc
+    except LakeSqlSyntaxError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"lake SQL invalid: {exc}") from exc
+
+
+@router.post("/estimate", response_model=LakeEstimateResponse)
+async def estimate_lake_sql(
+    body: LakeEstimateRequest,
+    response: Response,
+    current_user: Annotated[AuthUser, Depends(require_permission("lake:query"))],
+) -> LakeEstimateResponse:
+    """What would this query read, and where does that data live?
+
+    Charged at the schema rate rather than the query rate: an estimate
+    runs ``EXPLAIN ESTIMATE`` and two system-table reads, none of which
+    touch tenant data. Pricing it like a scan would train analysts to
+    skip the estimate, which is the opposite of the point.
+    """
+    await _acquire_or_429(response=response, tenant_id=current_user.tenant_id, cost=_SCHEMA_COST)
+    rewrite = _rewrite_or_raise(body.sql, current_user.tenant_id, body.row_cap)
+    try:
+        estimate = await estimate_scan(rewrite.sql)
+    except ColdEstimateUnavailable as exc:
+        # 503, not an empty estimate. "We could not estimate" and "this
+        # reads nothing" are opposite answers and must not share a
+        # response shape.
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"the scan could not be estimated: {exc}",
+        ) from exc
+    return LakeEstimateResponse(**estimate.as_dict())
+
+
+@router.post("/query-jobs", response_model=LakeQueryJobResponse, status_code=status.HTTP_202_ACCEPTED)
+async def submit_lake_query_job(
+    body: LakeQueryJobRequest,
+    background: BackgroundTasks,
+    response: Response,
+    request: Request,
+    current_user: Annotated[AuthUser, Depends(require_permission("lake:query"))],
+    db: DBSession,
+) -> LakeQueryJobResponse:
+    """Submit a query that is allowed to take longer than the synchronous bound.
+
+    The estimate is taken once, here, and stored on the job. It is never
+    recomputed: it is the number the analyst agreed to before the scan
+    started, and moving it afterwards would make the record of what they
+    were told untrue.
+    """
+    await _acquire_or_429(response=response, tenant_id=current_user.tenant_id, cost=_QUERY_COST)
+    rewrite = _rewrite_or_raise(body.sql, current_user.tenant_id, body.row_cap)
+
+    try:
+        estimate = (await estimate_scan(rewrite.sql)).as_dict()
+    except ColdEstimateUnavailable as exc:
+        # The job still runs. An un-estimable query is exactly the one an
+        # analyst most wants the progress state for, and refusing it here
+        # would leave them with only the synchronous path that times out.
+        logger.info("lake.job.estimate_unavailable tenant_id=%s reason=%s", current_user.tenant_id, exc)
+        estimate = {"unavailable": str(exc)}
+
+    job = LakeQueryJob(
+        tenant_id=current_user.tenant_id,
+        submitted_by=current_user.user_id,
+        submitted_email=current_user.email,
+        rewritten_sql=rewrite.sql,
+        row_cap=rewrite.row_cap,
+        referenced_tables=sorted(rewrite.referenced_tables),
+        query_id="pending",
+        estimate=estimate,
+    )
+    db.add(job)
+    await db.flush()
+    job.query_id = new_query_id(job.id)
+    await db.commit()
+    await db.refresh(job)
+
+    await _audit_query_attempt(
+        db=db,
+        tenant_id=current_user.tenant_id,
+        user_id=current_user.user_id,
+        user_email=current_user.email,
+        request=request,
+        outcome="job_submitted",
+        referenced_tables=sorted(rewrite.referenced_tables),
+        row_cap=rewrite.row_cap,
+    )
+
+    background.add_task(_start_job, job.id)
+    logger.info(
+        "lake.job.submitted job_id=%s tenant_id=%s tables=%s cold_bytes=%s",
+        job.id,
+        current_user.tenant_id,
+        sorted(rewrite.referenced_tables),
+        estimate.get("cold_bytes"),
+    )
+    return _job_response(job)
+
+
+async def _start_job(job_id: uuid.UUID) -> None:
+    """Claim and run one job.
+
+    Separated from the endpoint so the claim is the same conditional
+    UPDATE whether the job is started by the submitting replica or picked
+    up later: two replicas must not both start one scan.
+    """
+    from app.db.database import AsyncSessionLocal  # noqa: PLC0415 — avoids an import cycle at module load
+
+    async with AsyncSessionLocal() as session:
+        if not await claim_job(session, job_id):
+            logger.info("lake.job.already_claimed job_id=%s", job_id)
+            return
+    await run_job(AsyncSessionLocal, job_id)
+
+
+@router.get("/query-jobs", response_model=list[LakeQueryJobResponse])
+async def list_lake_query_jobs(
+    current_user: Annotated[AuthUser, Depends(require_permission("lake:query"))],
+    db: DBSession,
+    limit: int = 50,
+) -> list[LakeQueryJobResponse]:
+    result = await db.execute(
+        select(LakeQueryJob)
+        .where(LakeQueryJob.tenant_id == current_user.tenant_id)
+        .order_by(LakeQueryJob.created_at.desc())
+        .limit(max(1, min(limit, 200)))
+    )
+    return [_job_response(job) for job in result.scalars().all()]
+
+
+async def _load_job(db: Any, tenant_id: uuid.UUID, job_id: uuid.UUID) -> LakeQueryJob:
+    """Fetch one job, scoped to the caller's tenant.
+
+    The predicate is in the query rather than left to row-level security
+    alone: a job id is a handle a console holds, and RLS here is defence
+    in depth rather than the only control.
+    """
+    result = await db.execute(
+        select(LakeQueryJob).where(
+            LakeQueryJob.id == job_id,
+            LakeQueryJob.tenant_id == tenant_id,
+        )
+    )
+    job = result.scalar_one_or_none()
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="lake query job not found")
+    return job
+
+
+@router.get("/query-jobs/{job_id}", response_model=LakeQueryJobResponse)
+async def get_lake_query_job(
+    job_id: uuid.UUID,
+    current_user: Annotated[AuthUser, Depends(require_permission("lake:query"))],
+    db: DBSession,
+) -> LakeQueryJobResponse:
+    """One job's state, with a live progress read while it is running.
+
+    The live read is folded into the response but is **not** written back
+    over a terminal state: a late progress row must not make a finished
+    job look like it started again.
+    """
+    job = await _load_job(db, current_user.tenant_id, job_id)
+    if job.status == "running":
+        progress = await read_progress(job.query_id)
+        if progress is not None:
+            job.rows_read = progress.rows_read
+            job.bytes_read = progress.bytes_read
+            job.total_rows_approx = progress.total_rows_approx
+            job.progress_ratio = progress.ratio
+            await db.commit()
+    return _job_response(job)
+
+
+@router.post("/query-jobs/{job_id}/cancel", response_model=LakeQueryJobResponse)
+async def cancel_lake_query_job(
+    job_id: uuid.UUID,
+    current_user: Annotated[AuthUser, Depends(require_permission("lake:query"))],
+    db: DBSession,
+) -> LakeQueryJobResponse:
+    """Stop a running scan.
+
+    A job that has already ended answers 409 rather than being quietly
+    re-marked: cancelling a finished job would rewrite the record of what
+    happened.
+    """
+    job = await _load_job(db, current_user.tenant_id, job_id)
+    if not await cancel_job(db, job):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"this job already ended as {job.status!r}",
+        )
+    return _job_response(job)
 
 
 @router.get(

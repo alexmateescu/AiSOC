@@ -19,10 +19,34 @@ lever that reaches the engine is adding a spec and re-running
 
 | metric | count |
 |--------|------:|
-| rules on disk (total) | 6991 |
-| **executable (loaded by the engine)** | **2603** |
-| non-executable (provenance/coverage only) | 4388 |
+| rules on disk (total) | 7015 |
+| **executable (loaded by the engine)** | **2530** |
+| non-executable (provenance/coverage only) | 4485 |
 | — of which: enabled, but no compiled spec | 0 |
+| windowed rules in `windowed_ruleset.json` | 76 |
+
+The windowed figure is its own row rather than part of the headline because
+a windowed rule is a different kind of thing: it counts events or distinct
+values for one entity over a sliding window and fires on a threshold, so it
+has no YAML under `detections/` and no entry in the marketplace index. Adding
+it to the executable total would make two incomparable numbers into one. The
+engine carries three further built-in rules declared in
+`services/fusion/app/services/windowed_detection.py`, which are not in the
+JSON and so are not in the figure above.
+
+50 of those rules were translated out of the stateless corpus by depth plan
+3.1: they named a counter no source emits, so they were loaded, counted as
+executable and could never fire. Each one's threshold and window are derived
+from the original's own clauses and replayed through the real engine
+(`services/fusion/tests/test_windowed_translation_replay.py`). The other 24 of
+that family could not be expressed as a count over a window and are refused
+with a reason that travels into each rule's `quarantine_reason`.
+
+Four more are Sigma correlation documents compiled by
+`scripts/sigma_correlation.py`. They are **first-party content, not imported
+coverage**: no upstream correlation rule is vendored in this tree, so the
+import path had no corpus and the rules under `detections/sigma-correlations/`
+were hand-authored in the upstream format to give it one.
 
 ## By tier
 
@@ -31,22 +55,23 @@ lever that reaches the engine is adding a spec and re-running
 | car (imported) | 99 | 0 | 0 |
 | chronicle (imported) | 877 | 0 | 0 |
 | community | 1 | 0 | 0 |
-| native | 877 | 833 | 0 |
+| native | 877 | 736 | 0 |
 | sigma (imported) | 3132 | 1770 | 0 |
 | splunk (imported) | 2005 | 0 | 0 |
+| threat-anomaly | 24 | 24 | 0 |
 
 ## Why rules are non-executable
 
 | reason | count |
 |--------|------:|
-| `enabled: false` | 175 |
+| `enabled: false` | 272 |
 | under `_quarantine/` (untranslated on import) | 4213 |
 
 ## How to read the README claim
 
-The imported corpus is large (6991 rules on disk) and valuable as a
+The imported corpus is large (7015 rules on disk) and valuable as a
 provenance-tracked ATT&CK-mapped library, but the number that matters
-operationally is **2603 executable rules** — the ones the engine
+operationally is **2530 executable rules** — the ones the engine
 loads and fires against live telemetry. The README and marketplace must cite
 the executable figure when describing detection *coverage*, and may cite the
 on-disk figure only when explicitly describing the imported *library*.

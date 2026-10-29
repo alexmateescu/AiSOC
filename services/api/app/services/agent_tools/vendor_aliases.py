@@ -52,6 +52,13 @@ VENDOR_CONNECTOR_TYPES: dict[str, tuple[str, ...]] = {
     "defender": ("azure_defender",),
     "entra": ("azure_entra",),
     "aws": ("aws_cloudtrail", "aws_guardduty", "aws_security_hub"),
+    # Depth 7.1. The mailbox arms are named for the product, `m365`, and the
+    # connector a tenant saves is `m365_audit`. `azure_entra` is listed
+    # second because the three credentials both read are the same Azure app
+    # registration: a tenant that configured Entra ID for identity response
+    # has already granted what Graph mail needs, and refusing to find them
+    # would report `no_integration` for a tenant that has one.
+    "m365": ("m365_audit", "azure_entra"),
 }
 
 

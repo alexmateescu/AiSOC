@@ -11,6 +11,8 @@ from typing import Any
 import structlog
 
 from app.connectors.base import BaseConnector, Capability, ConnectorSchema, Field
+from app.connectors.posture import POSTURE_SNAPSHOT_ID
+from app.connectors.posture import aws as aws_posture
 
 logger = structlog.get_logger()
 
@@ -142,16 +144,34 @@ class AWSSecurityHubConnector(BaseConnector):
     # ``{"error": "not recorded"}`` rather than raising — the ingest
     # snapshotter then records "no config" rather than failing the path.
 
-    async def get_resource_config(self, resource_id: str, ts: str) -> dict[str, Any]:
+    async def get_resource_config(self, resource_id: str, at_ts: str | None = None) -> dict[str, Any]:
         if not resource_id:
             return {}
+        if resource_id == POSTURE_SNAPSHOT_ID:
+            collected = await aws_posture.collect(self._boto_session())
+            return collected.to_resource_config()
         # boto3 is synchronous; the connector path is async, so we run
         # the lookup in a worker thread to avoid blocking the event loop.
         # We accept the small thread-pool overhead here because the
         # ingest snapshotter caches results aggressively (TTL bucket).
         import asyncio
 
-        return await asyncio.to_thread(self._get_resource_config_sync, resource_id, ts)
+        return await asyncio.to_thread(self._get_resource_config_sync, resource_id, at_ts or "")
+
+    def _boto_session(self):
+        """A boto3 Session carrying this instance's credentials.
+
+        The posture collector opens several IAM and Organizations clients, so
+        it takes a session rather than the per-call ``boto3.client(**kwargs)``
+        the finding lookups use.
+        """
+        import boto3
+
+        kwargs: dict[str, Any] = {"region_name": self._region}
+        if self._access_key and self._secret_key:
+            kwargs["aws_access_key_id"] = self._access_key
+            kwargs["aws_secret_access_key"] = self._secret_key
+        return boto3.Session(**kwargs)
 
     def _get_resource_config_sync(self, resource_id: str, ts: str) -> dict[str, Any]:
         # Lazy-import boto3 so unit tests that don't exercise this path

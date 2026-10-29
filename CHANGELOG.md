@@ -7,6 +7,1394 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Dependencies:** `@hono/node-server` 1.19.17 → 2.1.5 across the pnpm
+  workspace, resolving
+  [GHSA-rmxm-3fg6-px4f](https://github.com/advisories/GHSA-rmxm-3fg6-px4f)
+  (CVE-2026-118663, medium): `serveStatic` decoded the request path a
+  second time, letting an encoded path bypass middleware guarding static
+  routes. The only dependent is `@modelcontextprotocol/sdk` (used by
+  `services/mcp`), which declares `^1.19.9 || ^2.0.5`, so the patched
+  major is inside the SDK's own supported range; no first-party code
+  calls `serveStatic`. Shipped by moving the existing `pnpm.overrides`
+  floor from `>=1.19.15 <2` to `>=2.1.3 <3` (Dependabot alert #226).
+
+## [20.2.1] - 2026-10-28
+
+### Security
+
+- **ReDoS in phishing header analysis**
+  ([GHSA-9m2j-23jf-gg3p](https://github.com/beenuar/AiSOC/security/advisories/GHSA-9m2j-23jf-gg3p),
+  medium, reported by [q7256](https://github.com/q7256); affects
+  v19.0.0 – v20.2.0). `_ADDRESS_IN_NAME` in
+  `services/api/app/services/phishing/headers.py` was an unanchored scan,
+  so a long `From` display name with no address-like substring was
+  re-consumed from every interior position — quadratic, measured at 33 s
+  for 128 KB and reported at 71 s, and `POST /api/v1/phishing/reports`
+  (authenticated, `cases:write` — the default analyst role) runs it
+  synchronously on the event loop, stalling every other request on the
+  process. Two independent bounds: a `(?<![\w.+-])` lookbehind makes
+  interior starts fail in O(1) with the match set unchanged, and the
+  display name is capped at 1,024 characters before analysis — which also
+  keeps the impersonation finding's stored `evidence` out of the megabyte
+  range on a crafted report. 128 KB now completes in 26 ms, linear. The
+  regression test pins a 1-second budget with ≥30× margin both ways, was
+  demonstrated failing on the pre-fix tree, and a reverted-fix negative
+  control was demonstrated failing again. Every other `re.compile` in the
+  phishing package was audited for the same class; the one suspicious
+  sibling (`campaigns.py` `_OPAQUE`) was measured linear — its leading
+  `\b` already prevents interior-start rescans — and deliberately left
+  unchanged.
+
+## [20.2.0] - 2026-10-28
+
+### Security
+
+- `qs` moves to **6.17.0** via the repo-wide `pnpm.overrides` block
+  ([GHSA-6pq8-jhm2-2vcw](https://github.com/advisories/GHSA-6pq8-jhm2-2vcw),
+  medium: `qs.stringify` with `arrayFormat: 'comma'` throws an uncaught
+  TypeError on array elements carrying a non-callable own `toString`,
+  reachable as a DoS by anything serialising caller-influenced structures
+  into a query string). The override was chosen over per-package bumps
+  because `qs` is transitive and a per-dependency bump would leave the
+  other resolution paths behind. The only runtime `qs` in the lockfile is
+  now 6.17.0; the nearby `6.15.0` is `@types/qs`, a types package.
+- The two remaining Dependabot alerts — `deepmerge` prototype poisoning
+  (LOW, root and `apps/mobile` lockfiles) — are dismissed as tolerable
+  risk rather than fixed, because **no patched version exists**: the
+  latest published `deepmerge` (4.3.1) is inside the vulnerable range.
+  The dismissal records the evidence: the only dependents are dev/build
+  tooling (`jest-config`, `@svgr/plugin-svgo`, `@expo/config`) merging
+  repo-authored configuration, not untrusted input. To be re-checked
+  when upstream ships a release above 4.3.1.
+
+### Fixed
+
+- The Jira connector pulls issues from `GET /rest/api/3/search/jql`. Jira
+  Cloud removed `GET /rest/api/3/search` (it now answers 410 Gone), which left
+  the connector's alert pull failing on every poll. The request already names
+  the fields `normalize()` reads, so the issue shape it receives is unchanged.
+- **The image `stable` channel guard read the registry through a buildx
+  template, and when the runner's buildx stopped resolving it the guard
+  failed open** — the read returned empty with stderr discarded, "empty" was
+  read as "first release", and the v20.0.0 and v20.1.0 publishes each carried
+  image `stable` across the v19 → v20 application major the guard exists to
+  refuse, silently, under green runs. The read now goes through the registry
+  HTTP API (manifest → config blob → version label), exactly as the chart
+  half always did — which is why the chart channel held while the image
+  channel crossed. Three states instead of two: a 404 is the ordinary
+  first-release state and the channel may be taken; a tag that is **present
+  but unreadable blocks the channel** for that release, because refusing is
+  recoverable and a wrong crossing is not; only the deliberate
+  `promote_stable` dispatch may move a blocked channel.
+  `tests/test_release_channel_tags.py` pins both (the blocked-channel test
+  fails against the pre-fix block). `image-channel.yml` is the image half of
+  the chart's repair tool: a dispatch re-points every image's `stable` at a
+  named published release, byte-identical, with before/after evidence per
+  image — and was dispatched to restore the channel to v19.0.0, the recorded
+  owner decision.
+- The nightly reproducible-builds aggregator accepts the lock-only
+  matrix's **designed** skip — its own condition skips it when every
+  service ships an image, which has been true since the last image-less
+  service gained a Dockerfile, and the aggregator had read that intended
+  no-op as "not every service was proved", failing every scheduled run
+  since 2026-10-15 while the push runs stayed green behind their path
+  filters. The skip is accepted exactly when the discovered lock-only set
+  is empty; a skip while lock-only services exist is still lost coverage,
+  and a failed or cancelled leg on either matrix still fails.
+
+### Fixed — a fresh Windows install could not boot, and nothing could see it
+
+- **`install.ps1` now generates `.env`'s secrets instead of copying the
+  template.** `Initialize-EnvFile` was a plain `Copy-Item .env.example .env`;
+  that template ships `ENVIRONMENT=production` with `SECRET_KEY`,
+  `JWT_SECRET`, `METRICS_TOKEN` and `AISOC_CREDENTIAL_KEY` empty, and
+  `enforce_secure_defaults` refuses to start the API in production on exactly
+  those values — so the install ended at "These services are not running:
+  api" with nothing pointing back at the copy. It now runs the same
+  `scripts/ensure_env.py` that `make env` runs, and Python 3 joins Git,
+  Docker, Node and pnpm as a winget-installed prerequisite because three
+  steps of the install are Python programs. `compose-smoke.yml` had already
+  worked around this for itself, with a comment noting that a bare copy "has
+  provisioned an environment no real deployment would boot".
+- **A port already in use no longer stops the install on Windows.**
+  `Test-CorePortsFree` exited 3 and told the operator to edit
+  `docker-compose.yml` by hand, on the two conditions most likely in this
+  audience's environment — an existing Postgres on 5432, an Ollama on 11434 —
+  while `README.md` promised the opposite. It now runs the same
+  `scripts/resolve_port_conflicts.py` that `make up` runs, and every compose
+  call in the installer goes through one helper so a remapped stack is
+  addressed consistently. The closing banner reads the moved console address
+  from `.env` rather than printing a hardcoded `localhost:3000`.
+- `--no-pull` and `--rebuild` in `install.sh` were parsed into an array that
+  nothing read once the demo handoff was removed, so both were accepted and
+  silently ignored while `--help` documented them. They now set
+  `AISOC_PULL_POLICY=never` and `make up UP_FLAGS=--build` respectively, and
+  the script's header describes the flow it actually runs.
+- Both installers linked an issue template that did not exist, under two
+  different names, at the moment a failing install asks for help.
+  `.github/ISSUE_TEMPLATE/installer-failure.yml` now exists and both point
+  at it.
+
+### Changed — one way in, and no on-ramp that cannot prove itself
+
+- **The devcontainer and the sandbox README no longer send people to
+  `pnpm aisoc:demo`.** That compose file has no ingest service, no fusion
+  service and Kafka disabled — its own header says not to use it to evaluate
+  whether AiSOC works — and both installers were rewritten to remove the
+  handoff, but a fresh Codespace's attach banner and the sandbox's "when
+  you're ready for the real stack" line were still pointing at it. Both now
+  say `make up`. A parity-gate check covers all eight on-ramp surfaces at
+  once, exempting blockquotes and `:::caution` admonitions so the warnings
+  that keep evaluators *away* from that stack can stay.
+- **`render.yaml` and `infra/render/` are removed.** The blueprint's header
+  claimed a "Deploy to Render" button in `README.md` that has never existed,
+  and what it deployed was a ~$63/month stack with `AISOC_DISABLE_KAFKA` set
+  on three services and no ingest or fusion at all — a paid one-click path to
+  a populated console that cannot answer whether the pipeline works. Its
+  path filters in `isolation.yml` and its two `.gitleaksignore` exemptions go
+  with it. The Fly, Railway and Coolify recipes are untouched and deploy the
+  same lean shape; they deserve the same scrutiny.
+- The README's quick start now names all four on-ramps — `make up`, the
+  Windows and Unix one-liners, `pip install aisoc-sandbox`, and Codespaces —
+  where previously a Windows reader met only `make up`, a command their OS
+  does not have. Still inside the 250-line cap, paid for by reflowing.
+
+### Fixed — install documentation that described a different product
+
+- `apps/docs/docs/quickstart.md` advertised a machine 1.5 GB smaller than the
+  measured requirement (6.5 GB / ~18 GB / py3.11+ against the measured 8 GB /
+  20 GB / 3.9+), re-introduced the `cp .env.example .env` step the Makefile
+  eliminated, described `.env.example` as shipping secrets it no longer
+  ships, and attributed the port check to a script that does not perform it.
+- `apps/docs/docs/installation.md` said "fourteen CORE containers" (sixteen)
+  and told Windows users to run PowerShell as Administrator, which
+  `install.ps1`'s own guidance contradicts. `.env.example`'s header said
+  "the four generated secrets" (fifteen).
+- Four surfaces still advertised Swagger at `http://localhost:8000/api/docs`,
+  which the production-class stack `make up` starts answers 404 on:
+  `docs/QUICK_INSTALL.md`, `scripts/lab.sh`'s banner, and the `make up`
+  transcripts in `quickstart.md` and `deployment/walkthrough.mdx`.
+  `apps/docs/docs/api/rest.md` now says plainly that `make up` does not serve
+  them and names `make up-dev`, which does.
+- The sandbox README's badge said "not yet published" and its install section
+  said the upload was blocked on credentials, while PyPI has been serving
+  `aisoc-sandbox` 0.1.0; it also claimed the production stack needs an LLM
+  API key, which has not been true since the bundled local model shipped.
+- `.pr-body.md` — a pull-request body draft from the v20.1.0 media close-out
+  (#1492) committed to the repository root by accident — is removed. Nothing
+  referenced it; session scratch does not belong in the tree.
+
+### Added — gates, so none of the above drifts back
+
+- `tests/test_installer_parity_gate.py` asserts that both installers generate
+  the `.env` secrets and that `install.ps1` resolves port conflicts and
+  passes the port overlay to every compose call — the two holes that let the
+  Windows breakers ship for as long as they existed. Three existing
+  assertions were matching the installer's `-NoLaunch` *help text* rather
+  than its invocations, so they now read action lines with the output
+  cmdlets removed.
+- `installer-smoke.yml` gains a `windows-latest` job that dot-sources the
+  installer's own `Initialize-EnvFile` and fails if any generated secret
+  comes out empty. The existing Windows jobs run `-Diagnose` only, which
+  makes no changes, and a full install needs Docker Desktop — this needs
+  neither.
+- `scripts/check_profile_service_counts.py` reads number words as well as
+  digits and registers the installation page's requirements table, which is
+  where "fourteen" survived every digit-based check.
+## [20.1.0] - 2026-10-22
+
+### Security
+
+- `@vitest/mocker` moves to 4.1.12 in all three npm lockfiles (root
+  workspaces, `services/realtime`, `services/mcp/cursor-extension`), closing
+  CVE-2026-112949 and CVE-2026-112950 (#1468). The bump rode the Oct-22
+  Dependabot wave rather than waiting for it to be noticed as a security
+  item.
+- The complete 2026-10 Pillow advisory set — published to OSV in waves across
+  the day, 28 CVEs against 12.3.0 at last count, every fix 13.0.0-only
+  (verified per-CVE via OSV) — is recorded against `services/threatintel`'s
+  known fastembed-capped lock with one expiring justification: fastembed
+  ≤ 0.9.0 caps `pillow <13`, the service's only fastembed use is text-only
+  `TextEmbedding`, and all 28 suppressions are re-checked for a lifting
+  release by 2027-01-15. `agents` and `api` already carry the patched 13.0.0
+  and are unaffected.
+
+### Added
+
+- The API answers unauthenticated `GET /api/v1/health` (liveness: the process
+  serves HTTP, nothing else claimed) and `GET /api/v1/health/ready`
+  (readiness: can it do its job, named per dependency) (#1471, part of
+  #1446). `database` is a **block** dependency — without Postgres the status
+  goes 503 and a load balancer should stop sending traffic — while `cache` is
+  **degrade**: Redis loss is reported (`cache: false`) at status 200, because
+  failing readiness over a cache would pull the API out of the balancer to
+  fix a cache. Every probe is hard-capped well inside a prober's budget, so
+  "down and we say so" cannot decay into "down and we say nothing".
+  `services/threatintel`'s `/health` now names its Qdrant leg the same way
+  (`vector_store`, degrade).
+- The chart `stable` channel is guarded by **two version lines, and a
+  dispatchable repair tool exists** (#1469, closing #1440). v20.0.0 — chart
+  7.9.0, not a chart major — carried chart `stable` across an *application*
+  major while every image `stable` tag correctly stayed on v19, because the
+  chart guard read only the chart's own line; the decision now also compares
+  the channel's `appVersion` major, read from the registry, and fails closed
+  when the incoming chart's appVersion cannot be read.
+  `.github/workflows/chart-channel.yml` is the operator decision the guard
+  points at: it re-points `stable` at a named, already-published chart
+  version, byte-identical, in either direction — it was dispatched to roll
+  the channel back to 7.8.0 (appVersion v19.0.0), where it stays until a
+  deliberate promotion. `tests/test_release_channel_tags.py` replays whole
+  release ladders over the lifted decision blocks for both lines.
+
+### Fixed
+
+- **A connector checkpoint no longer advances past events ingest rejected**
+  (#1441, closing #1438; contributed by
+  [meshreyy](https://github.com/meshreyy)). Ingest deliberately reports
+  per-event normalization failures as HTTP 200 with `accepted`/`rejected`
+  counts, so HTTP success alone never proved advancing was safe: a poll whose
+  batch was partially rejected moved the cursor anyway, and the rejected
+  events were lost permanently — a data-loss class, invisible because the
+  poll reported success. The scheduler now persists the staged cursor only
+  when every submitted event was accepted, withholds it otherwise with a
+  warning naming the counts, and re-fetches the page on the next overlapping
+  poll, where the sink deduplicates what was already accepted.
+- The live-agent eval dispatches every incident on **one event loop**, and an
+  incident whose investigation fails outright scores **0 with the reason
+  recorded** (#1472, closing #1466). Per-incident `asyncio.run` left
+  langchain-openai's cached async HTTP client bound to a dead loop, so
+  recon's model call failed on every incident after the first and the agent
+  silently ran its deterministic heuristics — while failed incidents were
+  dropped from the sample, inflating the mean and shrinking the sample below
+  the gate's own size requirement. Failures now participate as 0 in the mean
+  with reasons in the report's `groundedness.zero_scored` block, so the
+  sample always equals the dispatched prefix. The floor was re-derived under
+  the fixed harness and **stays 0.40**, below the lowest fixed-harness run
+  (0.44) with a deliberately thinner margin: one failed investigation costs
+  the mean about 0.05 under zero-fill, so a model failing three or more of
+  ten investigations dips below the floor and reds the job — which is the
+  signal that outcome should produce. The pre-fix runs stay recorded in
+  `live_agent_floor.json` for provenance, labelled as pre-fix.
+- The chaos store-outage legs grade **real behaviour instead of artifacts of
+  their own probe contract** (#1471, part 1 of #1446). The previous shape
+  probed one API URL for all six stores: `/api/v1/health/ready` did not exist
+  (404 → every key "reads None"), the ingest URL pointed at the enrichment
+  service's port, the recovery poll re-read the same 404 forever, and the
+  ClickHouse/Neo4j legs graded containers the `core` profile never started.
+  Each leg now names the readiness surface that owns the store and the
+  dependents the expectation declares; the redis and qdrant legs pass
+  end-to-end. The postgres leg stays red **by design** — fusion and ingest do
+  not yet export the store keys the contract reads — with the finding naming
+  the service; the follow-ups live on #1446, which stays open.
+- The perf harness records the payload bytes the producer actually sent,
+  closing 17 days of scheduled `perf.yml` failures in which
+  `throughput_claims.py --check` required `payload_bytes` as context for
+  `ingest_eps` and nothing had ever written it (#1444).
+- `react-native-screens` is held at the version Expo SDK 54's compatibility
+  table names, and Dependabot is taught the hold so it stops re-proposing the
+  incompatible major (#1443).
+- The monthly adoption snapshot lands on the unprotected `adoption-data`
+  branch, needing no owner credential (#1470, closing #1445): `main` is
+  branch-protected with no bypass actors, so the workflow's direct push
+  failed (GH006) and a `GITHUB_TOKEN` PR can never merge because events that
+  token creates do not trigger the required `pull_request` checks.
+  `docs/adoption/README.md` on `main` is now a pointer; the ledger and its
+  full history live in `snapshot.json` on the data branch.
+- Three CI legs stopped failing for reasons that were never about the code
+  under test: the eval matrix's non-floor leg passes the checker's own
+  deliberate-comparison flag instead of tripping its different-model refusal
+  (#1465); jobs that start PostgreSQL fall back between the two official
+  registries when one throttles (#1434, contributed by
+  [meshreyy](https://github.com/meshreyy)); and the nightly/live suites seed
+  the state the product actually requires — `scripts/ensure_env.py` writes
+  the `.env` the stack reads, and the scheduler live suite admits its stub
+  vendor through the documented `AISOC_SSRF_ALLOW_HOSTS` path rather than a
+  test-only bypass (#1432).
+
+### Changed
+
+- `fastapi` moves to 0.146.0 repo-wide — every one of the 32 declaration
+  sites and all 13 poetry locks in one move, so the version CI tests is the
+  version every image ships (#1473).
+- The Oct-22 Dependabot waves are folded: python (`sqlalchemy` 2.1.6,
+  `strawberry-graphql` 0.336.2, `pydantic-settings` 2.16.1, `langchain-core`
+  1.6.13, `langgraph-sdk` 0.4.8, `tenacity` 9.2.1 across api, actions and
+  agents, #1467) and npm (root workspaces, realtime and the MCP cursor
+  extension, #1468).
+
+## [20.0.0] - 2026-10-21
+
+### BREAKING
+
+- `POST /api/v1/cases/{case_id}/comments` no longer accepts `is_system` in the
+  request body (GHSA-9mc5-hqgh-j6wf). The field let any `cases:write` holder
+  author rows the case summary renders as an unattributed "System note" and the
+  post-mortem drops from the analyst record, so it could not be preserved —
+  system notes are written by the server itself. A client that still sends the
+  field is ignored rather than refused, so existing requests keep succeeding;
+  only generated SDK request types lose the property.
+
+### Security
+
+- Every GET route in `cases.py` now requires `cases:read`, so an API key minted
+  with only `alerts:read` can no longer list cases or read their comments,
+  timeline and evidence chain (GHSA-wwq7-2xvh-qgq6). Role users are unaffected.
+- Outbound webhooks work and are SSRF-hardened (GHSA-898c-wxrw-hx6c): all eight
+  routes open tenant-scoped sessions (registration previously 500ed against the
+  table's row-level security for every tenant), and destinations are validated
+  through the platform SSRF guard at create, update and delivery time.
+- The kill switch can actually be engaged and TAXII collections actually be
+  created: both wrote strict-RLS tables through sessions that never set the
+  tenant, and 500ed on every deployment (siblings of GHSA-898c, found by sweep).
+- The connectors service adopts the platform SSRF guard on every construction
+  path — the stateless test route, resource reads and scheduled polls — so a
+  tenant-controlled `base_url` can no longer reach cloud metadata, loopback or
+  internal services (GHSA-cq4g-g6wp-4m2w). The API refuses the same
+  destinations at connector create/update, before they are encrypted and
+  stored. `AISOC_SSRF_ALLOW_PRIVATE=1` re-admits on-prem SIEMs on private
+  ranges and `AISOC_SSRF_ALLOW_HOSTS` admits exact named hosts; the
+  cloud-metadata blocklist holds regardless of either, and compose delivers
+  both knobs to every service that runs the guard (api, connectors, agents)
+  from one `.env` value — they had shipped reaching only the agents service,
+  so the documented re-admit path changed nothing in the processes that
+  actually refuse the connection.
+- The Oct-21 advisory wave is cleared across every lockfile (#1417): `certifi`
+  ≥ 2026.10.19 (GHSA-6q48-6c7w-9gw2, critical) in all 13 poetry locks,
+  `aiohttp` 3.14.5 in agents/slack-bot/threatintel, `pillow` 13.0.0 in
+  `services/api`, `@modelcontextprotocol/sdk` 1.32.x in `services/mcp`, and
+  `follow-redirects` / `launch-editor` / `vite` 8.3.4 floors in the npm
+  workspaces. `services/agents` then also reached `pillow` 13.0.0 by dropping
+  the unused `fastembed` extra of `qdrant-client` (#1420) — nothing in agents
+  imports PIL or calls the fastembed convenience API. One recorded exception
+  remains: `services/threatintel` genuinely embeds through fastembed, whose
+  every release (≤ 0.9.0) caps `pillow <13`, so its lock stays on 12.3.0 under
+  nine expiring suppressions in `scripts/security_audit_ignores.txt` (text-only
+  embedding input, no PIL import; re-checked for a lifting release until
+  2027-01-15).
+- The semgrep rule packs the scanner ratchet's ceiling was measured with are
+  vendored under `.security/semgrep/` (#1379): the scan reads the committed
+  packs rather than fetching registry heads, `scripts/vendor_semgrep_packs.py
+  --check` verifies them offline, and the ratchet gains a rules-digest arm so
+  the ceiling is bound to the exact pack bytes it was measured against — a
+  registry pack changing under the ceiling now fails instead of silently
+  re-grading the tree.
+
+### Added
+
+- OpenCTI threat-intelligence feed client (#1375, contributed by
+  [alexmateescu](https://github.com/alexmateescu)): an authenticated GraphQL
+  client pages `stixCoreObjects` indicators by `updated_at`, normalises them
+  and extracts IOCs from indicator patterns, wired into the feed scheduler
+  behind `OPENCTI_URL` / `OPENCTI_TOKEN` (disabled by default; fails closed
+  when unconfigured). Validated against a live OpenCTI 7.x platform with the
+  exact request/response pair pinned as fixtures.
+
+### Fixed
+
+- Four connectors preserved a vendor's own top severity instead of collapsing
+  it into `high`: Lacework (#1374), Tines (#1377), Datadog (#1409) and
+  PagerDuty (#1411) now map their native critical tier to `critical`, and
+  Datadog's `emergency` and `alert` levels — which outrank `critical` in its
+  ladder — map to `critical` too (#1427). All four contributed by
+  [meshreyy](https://github.com/meshreyy).
+- The LLM gateway image is pinned to `ghcr.io/berriai/litellm:v1.102.1` in both
+  the root compose file and the Helm chart. Upstream deleted the floating
+  `main-stable` tag those files referenced, so every cold-cache `docker compose
+  up` and fresh Helm install failed with `manifest unknown`; v1.102.1 is the
+  version `main-stable` served when this stack was measured against it.
+
+### Changed
+
+- `fastapi` moves to 0.143.x repo-wide with the open Python bumps folded in
+  (#1419); the thirty mergeable Dependabot bumps of 2026-10-13 land as one
+  integrated tree (#1371); the root npm workspaces (#1423), `services/realtime`
+  (`express` 5.3.0, `pino` 10.4.0, `typescript-eslint` 8.72.0, #1424), the Go
+  services (`go-chi` 5.5.0 in ingest and enrichment, #1425) and the workflow
+  actions plus the mobile screens package (#1426) take their open dependency
+  bumps. The Dependabot queue is at zero.
+
+## [19.0.0] - 2026-10-12
+
+### BREAKING
+
+- **`PATCH /api/v1/alerts/{id}` now refuses a field it cannot apply.** The
+  request model set no `extra=`, so pydantic v2's default `extra="ignore"`
+  dropped anything outside `status`, `priority`, `tags`, `assignee` and
+  `case_id` and still answered **200** with the unchanged row — a success
+  response for a write that did not happen (#1280). The dropped fields were
+  not nonsense: `disposition`, `severity`, `confidence` and `snoozed_until`
+  are all real `alerts` columns and three of them are writable elsewhere,
+  which is why callers sent them. A caller closing an alert with a
+  disposition got a 200 and no disposition.
+
+  The endpoint now answers **422**, naming the field *and* the route that
+  does apply it — `POST /feedback/alert-override` for a disposition,
+  `POST /alerts/{id}/escalate` for severity, `POST /alerts/{id}/snooze` for
+  a snooze. The accepted surface is unchanged, including the `assignee`
+  alias the queue releases alerts with; only previously-ignored fields are
+  affected. The published spec gains `additionalProperties: false` on
+  `AlertUpdateRequest`, and `alertsApi.update` in the console is typed to
+  the five fields rather than `Partial<Alert>`, so a rejected call now fails
+  to compile instead of failing at runtime.
+
+### Fixed
+
+- **Tenant deletion was impossible on any database holding audit rows**
+  (#1330). `audit_log.tenant_id` has declared `ON DELETE CASCADE` since
+  migration 004, and the same migration's immutability trigger refused every
+  DELETE — a cascade is an ordinary DELETE on the child, so
+  `DELETE FROM tenants` raised for any tenant that had ever written an audit
+  row, and `tenant_deletion.py` (the GDPR erasure path) could never complete.
+  The offboarding gate stayed green throughout because its test database held
+  no audit rows. Migration `119` teaches the trigger the distinction
+  migration `117` already used on its checkpoint table: the cascade runs
+  after the parent is gone, a direct DELETE still finds its tenant and is
+  refused (ADR-0014 records the trade — erasure costs the whole tenant,
+  loudly, and selective tampering stays impossible at both the privilege and
+  trigger layers). Proven by the acceptance tests the issue named, in
+  `test_audit_immutability_live.py` — a suite that had been wired into **no
+  workflow at all** since #1231 and now runs in `audit-forgery-live.yml`
+  against real Postgres as the runtime role, with its teardown corrected to
+  go through the two legal paths rather than around them.
+
+- **A fix pass closed the gap between what the enterprise-identity surfaces
+  claimed and what they did.** Six items, each reproduced before it was
+  fixed. **White-label** reached the surfaces the docs listed: both report
+  workers resolve branding (and neither could store an artefact on real
+  Postgres at all — a status-vocabulary mismatch the test double could not
+  show), `send_approval_email` gained the caller it had never had, and the
+  Slack and Teams prompts carry the tenant's product name through a
+  read-only lookup in `services/actions`. Two surfaces were **narrowed
+  rather than built**, with the reason recorded: the sign-in page resolves
+  branding from a credential it does not yet have, and nothing maps a
+  hostname to an organisation, so baking one name in would be wrong for
+  every organisation but one *while looking configured*.
+
+  **Usage metering** counts the path that answered rather than a column
+  both paths write — a deployment with no model had been reporting 100% AI
+  triage — and now classifies all four tiers the worker stamps, not just
+  the deterministic one, with an AST pin that fails on any tier no meter
+  classifies. **SCIM** gained PATCH, group membership and deprovisioning
+  against live Postgres through the real app, and the console
+  token-minting the documentation had promised.
+
+  **The maturity table's evidence was audited and the gate that graded it
+  was wrong.** One row covered three capabilities — SCIM, white-label and
+  metering — citing a single SCIM test, and the gate reported OK on it for
+  four releases, because it matches a row on a prefix and the first
+  capability's evidence was real. Three rows now, three live suites, and
+  metering's cited evidence had been wrong as well as missing: it runs on
+  ClickHouse, not Postgres. `bundles_several_capabilities()` refuses the
+  shape, distinguishing a list from a subordinate clause, with a self-test
+  asserting both directions.
+
+- **Two gates read the shell as if it were pytest's argument list.**
+  `check_ci_install_parity` treated the `tee` target in
+  `pytest … 2>&1 | tee /tmp/wl.txt` as a directory argument, concluding a
+  job that named one file ran a whole service suite and demanding its
+  entire dependency set — thirteen findings from one `tee`. Arguments now
+  stop at the first shell operator, with a redirection consuming its
+  target whether attached or detached. Proven in both directions: a
+  genuine `pytest tests/` still produces all thirteen findings.
+
+- **The copilot stopped inventing investigations, and stopped blaming a
+  missing API key for a model that timed out** (#1275). The template
+  fallback returned one of five rotating paragraphs asserting findings
+  about an estate it had never read — "this IP was seen in 3 other alerts",
+  "the attacker dwell time appears short (< 2 hours)" — and ignored the
+  question entirely, so a ransomware alert came back described as
+  "credential-access activity ... LOLBin pattern". That text is gone. The
+  two fallback conditions are also now distinguished: "no model is
+  configured" and "the configured model did not answer" used to produce one
+  message ending "Configure an LLM key", which is the wrong instruction on a
+  deployment running the bundled local model, where the usual cause is
+  contention with the auto-triage backlog. `CopilotChatResponse` carries an
+  additive `template_reason`; `source` is unchanged.
+- **Auto-triage records the prompt behind its verdict** (#1276). The path
+  that handles every fused alert wrote a verdict and nothing to check it
+  against: its hardcoded `INSERT` named neither `input_hash` nor
+  `output_hash`, `duration_ms` was the literal `0`, and no prompt was kept
+  anywhere — so the most common AI decision in the platform was the one that
+  could not be replayed, while `aisoc_explain_step` is documented as
+  returning "the prompt, response, and tools used". The model call is now a
+  `llm_call` event at seq 0 carrying both hashes and its measured duration,
+  with the literal prompt and response attached to the verdict event as
+  artifacts, which is what `/investigations/{run}/explain` inlines.
+  `graph_step` rows carry a measured duration instead of a hardcoded zero.
+- **The MCP `aisoc_run_hunt` tool works on a default install** (#1274). It
+  declared `tenant_id: z.string().uuid()`, and zod 4 enforces RFC 4122
+  version and variant bits that `00000000-0000-0000-0000-000000000001` —
+  the tenant every `make up` creates — does not set, so the tool was
+  uncallable on a stock deployment. The parameter is removed rather than
+  loosened: the tenant comes from the authenticated principal, and the API
+  handler was already dropping the field, so the isolation had been an
+  accident of schema strictness rather than a control.
+
+- **Seven shipped Okta identity rules can fire for the first time** (#1279).
+  Okta carries its result inside an `outcome` *object*, and
+  `OktaConnector.normalize()` read `outcome["result"]` only to pick a
+  severity before discarding it. The detection engine flattens `raw_event`
+  exactly one level, so the matcher saw `outcome` as
+  `{"result": "FAILURE", ...}` and compared a dict to the string
+  `"FAILURE"` — `wd-brute-force-login` and `wd-okta-password-spray` could
+  never match a failed Okta login, and four native identity rules clausing
+  on `SUCCESS` were equally unreachable. That is why a default install
+  reads as having no identity detections rather than unreachable ones.
+  Fixed in the connector, following the Windows `CommandLine`/`Image`
+  precedent: the matcher and both engines are byte-identical, so the blast
+  radius is one connector and is provable by replay. The vendor object is
+  still preserved verbatim under `raw_event`.
+
+- **A threat-intel batch that stored correctly no longer reports zero**
+  (#1278). `ingest_iocs` returned `indexed`, which was the OpenSearch
+  bulk-index count and nothing else. OpenSearch is a `full`-profile store
+  and `threatintel` runs in CORE, so on a stock install the call raises,
+  `indexed` keeps its `0` initialiser, and the Qdrant write on the next
+  line succeeds — printing `indexed: 0` for ~1,700 CISA KEV entries that
+  landed fine. Each sink now reports itself and `None` means "unreachable"
+  rather than "stored nothing". Two false claims in the tree are corrected
+  alongside: `ioc_match.py` asserted CORE's KEV feed fills
+  `threat_intel_iocs` (it has no Postgres leg at all), and
+  `vuln_promotion_sql.py` named a "093 KEV seed worker" that does not
+  exist. `/threat-intel/iocs` and `/feeds` now state which store they read,
+  so an empty response is distinguishable from a broken feed.
+- **The autonomy settings page announced an autopilot posture no deployment
+  has** ([#1243](https://github.com/beenuar/AiSOC/issues/1243)). On a fresh
+  install, Settings → Autonomy guardrails rendered **"Autopilot · 7 high-blast
+  actions auto-execute"** with ACTIONS 19 / AUTO-EXEC 19. None of it was true,
+  and the two halves of why are worth separating.
+
+  *It was a display defect, not a posture defect.* The console decided an
+  action auto-executed from the confidence threshold beside it —
+  `thresholds.auto < 1` in `AutonomyScorecard.tsx` — and the highest threshold
+  in the shipped table is `0.95`, so all nineteen qualified and the seven
+  high- and critical-blast rows flipped the badge. What actually gates a
+  response verb is the tenant's L0–L4 maturity tier and the verb's capability
+  contract, both in `services/actions`. The deployment default is **L1**,
+  which auto-executes nothing above a read, and every containment verb
+  declares `analyst` approval — so the dispatcher queued all seven, exactly as
+  `README.md` says it does. A security product telling an operator their
+  estate is unattended when it is not is the defect, whichever direction the
+  error runs.
+
+  *The table the page edits has no production reader.* `aisoc_autonomy_thresholds`
+  is read by `services/agents/app/policy/guardrails.py`, which nothing on a
+  production path imports. The page now says so, rather than leaving a column
+  of editable sliders to imply otherwise.
+
+  `GET /api/v1/autonomy-policy` now returns an `effective` block (the resolved
+  tier, where it came from, what it may execute without a human, and which
+  verbs actually do) plus a per-action verdict. Those verdicts come from
+  `evaluate_contract` — the same function both dispatch doors call — reached
+  through a byte-identical mirror at
+  `services/api/app/_vendor/action_contracts/`, with
+  `scripts/sync_vendored_action_contracts.py --check` wired into CI. A second
+  implementation would drift, and the drift is the bug.
+
+  Three smaller things fall out of it. `delete_object` is rendered as **no
+  executor** rather than as a critical-blast verb running unattended: it is not
+  an `ActionType`, has no capability contract and has no executor anywhere in
+  the tree — it was a string in two threshold tables. The card now names the
+  tier the badge was derived from, so the claim has a stated basis. And an
+  absent verdict counts as *not* auto-executing, because inferring one from
+  whatever else is on the row is how this happened the first time.
+
+- **Rule management showed 0 rules while the detection engine ran 2,614 of
+  them** ([#1273](https://github.com/beenuar/AiSOC/issues/1273)). `/detection`
+  rendered "No detection rules yet", `GET /api/v1/rules` answered `[]`,
+  `GET /api/v1/detection/rules` answered `{"rules":[],"total":0}` and the MCP
+  tool `aisoc_query_detections` returned nothing — on a stack that was loading
+  741 + 1,770 stateless rules, 73 windowed rules and 2 sequence rules and
+  firing them at the operator. Every one of those readers queries the Postgres
+  `detection_rules` table, and **nothing in production has ever written a
+  built-in row into it**; `tenant_id` is `NOT NULL` in every migration since
+  `001_init.sql`, so the platform-wide row they look for cannot be inserted at
+  all. The rules that were alerting could not be viewed, disabled or tuned.
+
+  Two halves, and fixing either alone leaves the surface broken:
+
+  - **Packaging.** The compiled artefacts live under
+    `services/fusion/app/data/`, and the API image is built with
+    `services/api` as its Docker context — so no handler could read them in a
+    container however it was written. This is the defect discussion #374
+    reported for `marketplace/index.json`, and it takes the same fix:
+    `scripts/sync_packaged_detection_rulesets.py` writes byte-identical copies
+    into `services/api/app/data/detections/` and `--check` holds them
+    identical in both directions, wired into `ci.yml` and
+    `validate-detections.yml`. Three windowed rules are declared in fusion's
+    Python rather than in any artefact — which is why the engine runs 73
+    windowed rules against a file holding 72 — and are exported alongside by
+    reading the declaration with `ast`, so the published corpus counts are
+    untouched.
+  - **Reading and acting.** `app/services/builtin_rules.py` resolves the
+    corpus and `app/services/detection_catalogue.py` merges it with the
+    tenant's stored tuning, which is what both list routes, both detail
+    routes and `/detection/coverage` now read. Built-ins are **not** seeded
+    into Postgres: the artefact stays the single source of truth for what
+    runs. A built-in materialises a tenant row on first write, under a
+    deterministic UUIDv5 of its engine id and carrying
+    `provenance.source_id` — the key `services/fusion/.../tenant_overlay.py`
+    already joins on — so disabling a rule in the console stops the engine
+    firing it within one 30-second overlay reload. Bulk toggle no longer
+    "silently skips built-ins", which on a default install meant skipping
+    every rule in the product.
+
+  Three honesty consequences, each tested: a built-in's compiled body is
+  read-only and the API refuses an edit to it with 409 rather than storing a
+  change the engine will not run; `confidence`, false-positive rate and hit
+  history are absent from the artefacts, so they travel with
+  `confidence_measured: false` and the Confidence and Drift panels report
+  `summary.unscored` instead of averaging a placeholder across 2,614 rules;
+  and an unreadable corpus renders as a failure naming the paths, never as
+  "no detection rules yet".
+
+  Measured before and after on the same tree: `GET /api/v1/detection/rules`
+  `total` 0 → 2,614, equal to the union of ids returned by fusion's own
+  `_load_ruleset()`, `load_window_rules()` and `load_sequence_rules()` run in
+  a subprocess.
+
+### Added
+
+- **Endpoint discovery of the AI estate, with no new agent** (depth plan 6.2).
+  `packs/aisoc-ai-estate.yaml` finds coding agents and MCP server processes,
+  the configuration files the popular MCP clients read, AI IDE extensions and
+  model-provider credential files, through the osquery agent a fleet already
+  runs. `apps/docs/docs/concepts/ai-estate-discovery.md` records what each
+  source can **and cannot** see, which is the half that makes an empty column
+  readable: a device missing from a provider-audit row is not a finding,
+  because no provider audit log has ever carried one.
+
+  The finding that made this a fix as well as a feature: the endpoint branch
+  of the recorder read `process.name` off the OCSF event, and the canonical
+  OCSF profile carries `title`, `external_id` and the identity aliases and
+  nothing else. `fleetdm`, `osctrl`, `auditd` and `windows_event` all put
+  their process fields in the connector payload under `raw_data`, so that
+  branch found `None` on every endpoint source this product has and could
+  never have produced one row — while its own tests passed, because they
+  built events in the shape the module expected. It now reconstructs the same
+  flat namespace `DetectionEngine._raw_fields` does, and
+  `scripts/check_ai_endpoint_discovery.py` makes reading it a rule.
+
+  Recorded rather than implied: `crowdstrike`, `sentinelone` and
+  `azure_defender` poll the vendor's own **detections**, not raw process
+  telemetry, so they cannot supply a process start. An operator running an
+  EDR and nothing else has a coverage gap here, not a quiet estate, and the
+  documentation says so in a callout.
+
+- **An AI-estate inventory built from observation rather than registration**
+  (depth plan 6.1). `aisoc_ai_assets` (migration `110`, tenant-scoped with
+  forced row-level security) holds every AI app, coding agent, MCP server,
+  IDE extension, model-provider key and OAuth grant AiSOC has seen, with the
+  person and device behind each. The gap it closes is that `aisoc_mcp_servers`
+  records what an operator *declared*, and the row that matters in an AI
+  governance review is the one present in observation and absent from the
+  declaration.
+
+  Measured the way the recurring defect here demands: the writer is in the
+  fusion consumer's raw-events branch, the one path every normalized event
+  already travels on the default profile, because a recorder behind a flag or
+  in a service CORE does not start is a table nothing writes and a page that
+  renders "no AI estate" to a tenant that has one.
+  `scripts/check_ai_asset_inventory.py` makes that a rule rather than a
+  comment — it requires the consumer to call the recorder *and* the service
+  to construct it, since an unconstructed recorder is a `None` every call
+  site skips in silence. `ai-estate-live.yml` writes a fixture estate of
+  three kinds into a real PostgreSQL as the DML-only `aisoc_app` role, and
+  two negative controls re-inject real defects: reverting `NULLS NOT
+  DISTINCT` on the identity constraint turns one provider-key row into
+  three, and a tenant policy of `USING (true)` lets one tenant read
+  another's estate.
+
+  Also: graph schema `v1.2 → v1.3` adds the `AIAsset` label with
+  `(:User)-[:OPERATES]->(:AIAsset)` and `(:Endpoint)-[:HOSTS]->(:AIAsset)`,
+  emitted by `services/ingest` as a post-pass rather than a connector case —
+  AI telemetry arrives on three connector types and as plain process
+  activity, so keying on the connector would have covered one of them and
+  looked complete. A new `ai_estate:read` / `ai_estate:write` permission
+  pair, held by real roles and mintable into an API key, because the
+  inventory names which agent on which laptop holds which provider key and
+  `hunts:read` already demonstrated what a permission no role holds is worth.
+
+- **A reported message's headers, URLs and attachments are analysed once and
+  cited where an auditor looks (depth 7.2).** Nothing in the tree read an
+  `Authentication-Results` header before this — `grep -rl
+  "authentication-results" services/` returned no match — so a message whose
+  SPF and DMARC had both failed at the receiving boundary produced a verdict
+  that had never looked. The analysis is three components in one pass, and
+  the rule it turns on is that **an unanalysed artefact must never read as a
+  clean one**, which is the same rule the submit path already applied to
+  attachments and which `services/api/app/services/phishing/headers.py` now
+  applies to authentication. SPF, DKIM and DMARC each carry three values, and
+  the third is the point: `not_evaluated` is published rather than folded
+  into either of the others, and `neutral`, `none`, `permerror` and
+  `temperror` are **not** passes — treating them as passes is how a domain
+  with a broken SPF record reads as authenticated. A URL on a deployment with
+  no provider configured says so per URL rather than vanishing from the
+  output, and that specific defect was found by a negative control that at
+  first failed to fail, because the tests built their own result list instead
+  of driving the producer. `analysed` and `unanalysed` are counted separately
+  and never summed — in the dataclass, the response model and migration
+  `111`'s column comment — because the sum is the number this product must
+  not publish: five artefacts nothing examined, rendered as "5 artefacts, 0
+  findings", says the opposite of what happened. The verdict is only ever
+  raised, and SPF **and** DMARC must both fail to raise it, because a
+  forwarded message routinely breaks SPF and flagging that would alert on
+  every mailing list in the estate. Citations go into the investigation
+  ledger as `evidence_cited` rows, one per component, written even when a
+  component found nothing — a ledger with no row for the URL check cannot be
+  told from one where the check passed. The ledger suite has no teardown by
+  design: deleting a run cascades to its events, migration `008`'s trigger
+  refuses, and defeating an append-only control to tidy a test fixture would
+  be the wrong fix.
+- **Reported phish now goes from intake to purge (depth 7.1).** The gap was
+  not that phishing was unhandled — `POST /phishing/submit` has triaged
+  artefacts since migration 015 — but that nothing in the product could
+  *remove a message*. The live-action registry held 79 builtin arms and not
+  one could touch a mailbox, so governed dispatch answered
+  `executor_not_found` for `purge_email`: a response that could block the
+  sender's domain at the firewall and could not take back the mail. Five
+  verbs enter both halves of the capability vocabulary (`search_mailboxes`,
+  `purge_email`, `restore_email`, `block_sender`, `unblock_sender`) with ten
+  vendor arms over Microsoft Graph and the Gmail API. Only what the vendors
+  document: purge is a move to `recoverableitemsdeletions` or to Trash, never
+  a hard delete, and `restore_email` is a real reverse rather than a declared
+  one. There is deliberately **no tenant-wide blocked-sender verb**, because
+  neither vendor exposes its organisation-level block list through these
+  APIs; the sender block is per mailbox and says so in the summary an analyst
+  reads, not only in a docstring. Reported-message intake normalises three
+  sources into one record — an M365 report mailbox over Graph, Workspace user
+  reports, and the existing `email_inbox` connector — and the hard case is
+  the common one: a user who reports by forwarding becomes the *sender*, so
+  the adapter reads the original sender and recipients out of the preserved
+  headers and leaves the sender empty rather than naming the victim as the
+  attacker. Campaign grouping is a five-step ladder and `grouping_basis`
+  records which step matched, because four are facts about the message and
+  subject similarity is a judgement. The purge is **one proposal and one
+  dispatch per mailbox**: handing a single executor twenty-five addresses
+  would be one approval covering a list the approver never read.
+  `scaled_impact` turns the recipient count into the tier — MODERATE at one,
+  HIGH at five, SEVERE at twenty-five, where `NEVER_AUTONOMOUS` makes it
+  mandatory-human at any confidence and any autonomy tier — and the proposal
+  and every dispatch under it read the same function, so the approver and the
+  executor cannot see different actions. Verification re-queries the mailbox,
+  and that probe is the one in the service whose confirming answer is an
+  *absence*. Everything ships **off**: `AISOC_FEATURE_MAILBOX_REMEDIATION`
+  and `PHISHING_INTAKE_WORKER_ENABLED` both default false, and a disabled
+  deployment answers FAILED naming the setting rather than simulating a purge
+  — `NotifySlackExecutor` reporting `message_sent: true` for a message it
+  never sent is the precedent. Migration `110`. Gates:
+  `check_action_contract.py` (86 → 97 executors), `check_module_reachability.py`
+  (981 → 986 reachable), `check_vendor_catalog_ids.py`,
+  `test_mailbox_remediation.py` (60 cases through real `respx` HTTP) and
+  `test_phishing_campaign_purge_live.py` (17 cases against a real Postgres
+  with the full chain). **No Microsoft 365 or Google Workspace tenant was
+  exercised**: every vendor claim rests on the documented request shape and a
+  mock.
+- **An adversary-in-the-middle detection family, on sessions (depth 7.3).**
+  The attack is invisible to every rule the corpus had, and the reason is
+  structural rather than a coverage gap: an AiTM proxy relays the victim's
+  credentials *and* their MFA response, so the sign-in is legitimate by every
+  check the identity provider makes. There is no failed authentication to
+  count and often no impossible travel to measure, because the proxy sits in
+  the victim's own country. What gives it away is the stolen session being
+  used from somewhere it was never established — so the entity these rules
+  group by is the **session**, not the user. That is why the connector work
+  had to land first: `OktaConnector.normalize()` returned `None` for
+  `session_id`, `src_asn`, `user_agent`, `client_browser` and
+  `mfa_satisfied` on a System Log row carrying all five, because the engine
+  flattens `raw_event` exactly one level and `authenticationContext` arrives
+  as a dict — the same shape as the `outcome` hoist in #1279. Four rules:
+  three distinct-value rules at threshold two (a second network, a second
+  client family, a second country for one session) and one ordered sequence
+  at `critical` — an MFA-satisfied sign-in, then the same session from
+  another network within half an hour, which a threshold cannot express.
+  `mfa_satisfied` is three-valued, because treating "this event says nothing
+  about MFA" as `False` would fire on every directory read, and a denied push
+  is an MFA event and emphatically not a satisfied one. On Entra,
+  `correlationId` is deliberately **not** a fallback for `sessionId`: one
+  identifies a request and the other a session, and substituting would make
+  every sign-in its own session so the reuse detection could never fire while
+  looking like it worked. The clause "this event carries a session" is spelled
+  `session_id_neq: null`, using an operator that exists — inventing `_exists`
+  would have been read as a field literally named `session_id_exists`, which
+  is the `approver_role_neq` defect one release later. Fixtures are
+  hand-authored from an Okta System Log row and a Microsoft Graph `signIn`
+  resource rather than synthesised from the rules, and the negative twin
+  inverts only the clause each rule is about — same session, same user, same
+  event type, same outcome, same network. Windowed rules 72 → 76.
+
+- **A session has one producer and three readers** (depth 2.4, ADR-0010).
+  `services/ingest` derives a session key from each vendor's own session
+  field, labels how strong it is (`vendor_session` / `vendor_credential` /
+  `vendor_flow` / `derived`) and writes it once; the Postgres, ClickHouse and
+  Neo4j stores read that projection and derive nothing, held by
+  `check_session_projection.py` so the three stores cannot disagree about
+  which session an event belongs to after the next vendor-schema change.
+- **A real security posture, collected and versioned so a detection can read
+  it at event time** (depth 2.5). `__posture_snapshot__` collectors for AWS,
+  Azure, GCP, Google Workspace and GitHub — plus AWS permission boundaries —
+  write versioned snapshots, so a rule evaluates against the posture that was
+  true when the event happened rather than the posture now.
+- **Behavioural baselines run in CORE as a fusion module** (depth 3.4, ADR-0011),
+  rather than requiring the `full`-profile UEBA service, paired with threat
+  conditions so a baseline deviation is only a signal where a threat condition
+  also holds.
+- **An OTLP logs receiver, a Kafka input for customer topics, and a real
+  TAXII 2.1 server** over the tenant IOC store (depth 4.2). The three share
+  the ingest stream-health failure table and take their tenant from a
+  credential, never a body field.
+- **A cold-tier lake query reports an estimated cost and a progress state**
+  instead of timing out silently (depth 4.3). The job is claimed with an
+  atomic conditional `UPDATE` so two API replicas cannot both start the same
+  scan, and a terminal state is never re-opened by a stale progress read.
+- **Throughput: a required-field rule index, entity partitioning, concurrent
+  triage, and a realistic load mix in the harness** (depth 4.4, ADR-0012).
+  The cloud-hardware run is stated as not done rather than implied.
+- **The Helm chart installs CORE, and exactly one scheduler replica leads**
+  (depth 4.5) through a Postgres lease, so a deployment scaled for
+  availability does not poll every vendor twice. The managed-Kubernetes run
+  is recorded as unmeasured.
+- **A playbook can ask the person who signed in, then their manager, and
+  branch on the signed answer** (depth 5.4–5.6). A `verification` pause
+  suspends the run to a durable store and escalates once to the manager
+  resolved from SCIM when nobody answers; "no, that wasn't me" and "nobody
+  answered" both reach containment behind an analyst approval, while "yes"
+  closes the case. Auto-sent only for alert classes a tenant opts into, and
+  never on a confirmed true positive.
+- **AiSOC's own MCP server speaks streamable HTTP, authorized and audited per
+  call** (depth 9.1). An opt-in `mcp` profile exposes the server over HTTP
+  with per-tenant scoped keys, tools enabled per tenant, an audit row for
+  every call including reads, and approval on anything that is not read-only;
+  the tenant comes from the request credential rather than a parameter.
+- **A case's war room** (depth 9.4). One action opens a Slack or Teams channel
+  for a case, invites the assignees, posts the timeline and verdicts as they
+  change, and syncs decisions back, built on `services/slack-bot` and
+  `services/teams-bot`.
+- **A hunt that finds something becomes a cited report** (depth 9.5). A
+  natural-language hunt or a retro-hunt that returns hits produces a case
+  report — what, how, where, when — with ledger citations, exportable as PDF
+  through the existing report path.
+- **The responder app is an installable build with on-device voice and real
+  push delivery** (depth 9.6). `services/realtime` now routes APNs and FCM
+  subscriptions to their real transports instead of signing every one as
+  web-push; the device-build run is maintainer-blocked and says so in the
+  product, not only in the tracker.
+- **WebAuthn as a console second factor, and MFA enforceable per role**
+  (depth 8.1): a platform authenticator registered and asserted against the
+  real ceremony, enforced per tenant and per role.
+- **An enforced audit retention window that leaves the surviving chain
+  verifiable** (depth 8.1, ADR-0013). The purge runs through a
+  `SECURITY DEFINER` function that writes a re-anchoring checkpoint before it
+  deletes, so an intact chain does not read as tampered with, and the runtime
+  role holds no `DELETE` on `audit_log` so the function is the only path.
+- **axe accessibility coverage reached the case workspace and the alert
+  list, and the four defects it found** (depth 8.1) — the two operator views
+  parity 4.7 had left uncovered.
+- **A tenant's configured entitlement limit can refuse work, when the tenant
+  opts in** (depth 8.1), in `services/api/app/services/entitlements.py`. The
+  six operator console pages the item also names are not built, and that is
+  said rather than implied.
+
+- `services/api/app/models/detection_rule.py` maps the `author` column, which
+  has existed since `001_init.sql` and was mapped by nothing — while fusion's
+  tenant overlay reads it on every reload to say *who* silenced a rule when it
+  explains a suppressed match.
+- `DetectionRuleResponse` gains `source_id`, `confidence_measured`, `tuned`
+  and `engine`; `FrontendDetectionRule` gains `isBuiltin`, `sourceId`,
+  `tuned` and `timestampsFromArtefact`; `DriftSummary` and `ConfidenceSummary`
+  gain `unscored`. All additive.
+- `GET /api/v1/rules` and `GET /api/v1/detection/rules` take `search`,
+  `severity`, `mitre`, `limit` and `offset` (plus `category`, `enabled` and
+  `source` on the latter). The canonical route stays a bare array and reports
+  the matching count in `X-Total-Count`. A page bound exists because the whole
+  library serialised is several megabytes.
+- `apps/docs/docs/console/rule-library.md`.
+
+## [18.0.0] - 2026-10-09
+
+### BREAKING
+
+- **Three tables that had no reader now change authorization outcomes.**
+  Migration `087_enterprise_iam.sql` created `permission_conditions`,
+  `privilege_grants` and `workload_identities`, and shipped no reader for any
+  of them — this repository's own CHANGELOG said "nothing reads any of them"
+  and `FIX_PASS_PROGRESS.md` retracted the claim. Depth plan 8.2 gives them
+  readers, and that is an authorization change in both directions:
+  - **A row in `permission_conditions` now denies.** It was inert. Against the
+    pre-fix tree a condition restricting `cases:write` to a CIDR the caller is
+    not in returned **201 Created**; it now returns 403. Any deployment that
+    wrote rows directly into that table will see those denials begin.
+  - **An approved row in `privilege_grants` now confers.** It was inert.
+    Against the pre-fix tree a live grant of `roles:read` to a `viewer`
+    returned **403**; it now returns 200 until `expires_at` passes. A row with
+    `approved_by_id` NULL still confers nothing, by construction rather than
+    by a flag — approval is a gate, not a record.
+  - **`CurrentUser.effective_permissions()` now includes live elevation.**
+    `services/actions` re-authorises approvals against that list, so an
+    elevated analyst is no longer refused there while allowed here.
+  - **A new credential type authenticates.** Secrets prefixed `aisoc_wl_`
+    resolve against `workload_identities`. The shared `AISOC_SERVICE_TOKEN`
+    path is unchanged and still works; this sits beside it. The tenant is a
+    mandatory header verified against the table on both paths, because a
+    credential that works for every tenant is a cross-tenant read whichever
+    way it was minted.
+
+  Reproduced before building, against the shipped code with a real app, real
+  Postgres, real JWTs and `ENVIRONMENT=production` (not `development`, which
+  is in `AUTH_BYPASS_ENVIRONMENTS` and would have resolved an uncredentialed
+  request to a demo admin). The reproduction is now the regression guard:
+  `tests/isolation/test_abac_elevation_live.py`, wired in
+  `access-governance-live.yml` with two negative controls that delete each
+  half of the wiring and require the suite to go red. (#PR)
+
+### Added
+
+- **The retention window a tenant chooses is now the one the lake honours,
+  and a legal hold outranks it.** Three things made the retention promise
+  false, and the tree had all three.
+
+  `aisoc.raw_events` carried `TTL ... + INTERVAL 90 DAY` written into the
+  table. ClickHouse enforces that during merges with no reference to any
+  per-tenant setting, so a tenant who chose 400 days — and whose policy row
+  said 400 — lost every event at day 90. Nothing errored. The console kept
+  saying 400. The table TTL is now a *ceiling* (`MAX_LAKE_DAYS`, 400 days)
+  with the per-tenant window enforced above it by the purge worker, and the
+  three places that number appears are held equal by a gate.
+
+  `retention.alerts_under_legal_hold` and `retention.may_purge` were
+  written, tested, and reachable from no production caller — so "a hold
+  outranks retention unconditionally", which migration `088`'s own comment
+  states, was true of a function and false of the system. The purge worker
+  reads the holds in force before every sweep and withholds what they
+  cover. Unreadable hold evidence withholds too: the opposite default
+  deletes evidence under litigation because a query failed.
+
+  And the run now reports what a hold withheld, by count and by matter
+  reference. A hold that silently stops a purge and a purge that silently
+  had nothing to do look identical in a log, and an auditor asking "did the
+  hold work" can only be answered by a number.
+
+  Two things stated rather than buried. **A deployment whose purge worker
+  is not armed now grows its lake for 400 days instead of 90** — the worker
+  is off and in dry-run by default, so arm it or lower both numbers
+  together. And **a hold currently stops the whole tenant's sweep rather
+  than only its own subjects**, because both purges are bulk statements
+  that cannot evaluate a per-subject predicate row by row; that
+  over-retains, which is recoverable, and narrowing it is recorded as
+  follow-up.
+- **An appliance that speaks only syslog can now reach AiSOC on its own.**
+  The one syslog path that existed, `POST /v1/inbox/cef`, requires something
+  in front of it that already speaks HTTP — so the firewall, the proxy, the
+  legacy IDS and the printer still could not reach AiSOC, only a forwarder
+  could. `services/ingest` now accepts syslog over UDP and TCP and reads all
+  four wire formats the long tail speaks: RFC 5424, RFC 3164, CEF and LEEF.
+
+  The tenant comes from a minted ingest token in the service's own
+  configuration and from nowhere else. Syslog carries no authenticated
+  principal and no header, so anything read off the wire is
+  sender-controlled: a tenant taken from a hostname or a structured-data
+  parameter would be a cross-tenant write requiring no attacker effort at
+  all. One listener therefore serves one tenant, which the setup guide says
+  rather than leaving it to be discovered.
+
+  A line matching none of the four formats is kept as an unstructured
+  message with its text intact, never reported as a structured record with
+  invented fields — a mis-split line puts half the message in the hostname
+  column and an analyst reading that record sees a host that does not
+  exist. Plain syslog lands at OCSF class 1007 in category 1 rather than at
+  2001: category 2 is promoted unconditionally, and filing a firewall's
+  routine daemon chatter as a Security Finding would turn every line into an
+  alert. CEF and LEEF do land at 2001, because a device emitting one of
+  those has already decided the line is a security event.
+
+  `/readyz` names the listener, what it bound, how many messages it has
+  received and what it last failed on. A receiver is legitimately silent for
+  hours, so a listener that failed to bind and one nobody is sending to are
+  indistinguishable unless readiness says which.
+- **Cloud telemetry collected the way an estate actually emits it.** Every
+  cloud connector before this read an API that answers a time window, which
+  is the small-account shape: `cloudtrail:LookupEvents` is capped at two
+  transactions per second per region per account, returns management events
+  only, and never carries data events or VPC flow logs at all. Three
+  connectors read the queue- and object-backed paths the hyperscalers
+  designed for continuous export instead — `aws_cloudtrail_s3` (an
+  organisation trail on S3 announced over SQS, carrying management events,
+  data events and VPC flow logs for every member account), `gcp_pubsub` (a
+  pull subscription on a Cloud Logging sink) and `azure_event_hubs` (Entra
+  sign-in logs, Entra audit logs and the Activity log through an Event Hub's
+  Capture output). The older three stay: a single account with no trail, no
+  sink and no Event Hubs namespace should not have to build one.
+
+  A queue is not a time window, so two properties are declared rather than
+  implied. Each connector resumes from a cursor, because a queue collector
+  that restarts and reads from "now" loses everything delivered while it was
+  down and one that reads from the beginning replays the bucket, and both
+  are silent. And each declares a bounded `collection_budget` carrying the
+  sentence that says where the overflow goes — a bound that *drops* the
+  remainder looks identical in code to one that leaves it on the queue, and
+  only one of them is backpressure. Acknowledgement always follows the read:
+  an SQS message is deleted after its object's events are out, a Pub/Sub
+  batch is acknowledged after its entries are in hand, and a test proves the
+  ordering by failing the build step rather than by describing it.
+  `scripts/check_cloud_native_collection.py` holds all of it, with a
+  self-test that injects one violation per rule.
+
+  Stated plainly: no vendor account is reachable from CI, so every payload
+  under test is recorded or synthesised. The Azure capture fixture in
+  particular was built from the Avro specification rather than taken from a
+  running Event Hub, and the Data Lake Gen2 listing path has never been
+  exercised against a real storage account. The claim row says so.
+
+- **The 74 detection rules that needed a sliding window now have one, or a
+  recorded reason why they cannot.** Each named a counter no source emits —
+  `fail_count`, `events_per_minute`, `distinct_secrets_per_minute` — so the
+  stateless matcher read `None` on its first clause and the rule could never
+  fire, while being loaded by the engine and counted toward the published
+  executable total. Fixture replay could not catch it: the fixtures are
+  synthesized from the rule they test. 50 are now `wd-*` rules whose
+  threshold, window and selector are **derived from the original's own
+  clauses** rather than re-chosen, so a translation cannot quietly become a
+  different detection under the old rule's name and severity; 24 could not be
+  expressed as a count over a window and are refused, each with a reason that
+  travels into its `quarantine_reason` and onto its marketplace entry.
+  Refusals group into five kinds — `aggregate` (a sum, mean or variance the
+  engine does not compute), `not-windowed` (a per-event property the family
+  pattern misreads), `operand-not-emitted`, `multi-distinct` and `rarity`.
+  `scripts/windowed_translation.py` holds the decisions,
+  `scripts/check_windowed_translation.py` enforces that nothing is simply
+  dropped and re-derives every translation against its spec, and
+  `services/fusion/tests/test_windowed_translation_replay.py` drives each rule
+  through the real engine: it fires at its threshold, does not at one short,
+  never counts an event its selector rejects, and counts per entity.
+  Measured: unreachable native rules 119 → 45, windowed corpus 18 → 68.
+  The published executable figure falls 2,603 → 2,529 because 74 rules that
+  could not fire stopped being counted as executable; the windowed corpus is
+  now published as its own figure beside it rather than going uncounted.
+- **Per-tenant identity privilege and a first-seen store, so the rules that
+  read them can fire.** 18 rules matched on a `*_priv` or `*_is_admin`
+  boolean and nothing computed any of them, so each read `None` on that
+  clause and could never fire. They now resolve from
+  `identity_nodes.privilege_tier`, per tenant and hot-reloaded alongside the
+  existing tuning overlay — one tenant's administrators are not another's,
+  and an unknown subject contributes **no key** rather than `False`, because
+  `False` asserts the account is ordinary and would be wrong on every
+  deployment that has imported no directory. A per-tenant first-seen store
+  (`services/fusion/app/services/first_seen.py`) answers
+  `<attr>_seen_before` and `session_age_hours` from Redis and closes two
+  more. 18 rules that still cannot fire are retired with an individual
+  reason in `scripts/enrichment_decisions.py`, and
+  `scripts/check_enrichment_decisions.py` refuses to let a rule whose fields
+  *are* resolvable be retired — deleting a rule and fixing one move the
+  ratchet by the same amount, and that gate is what makes them different.
+  `MAX_UNREACHABLE` falls 119 → 2; the two that remain need the behavioural
+  baseline of a later item.
+- **Two matcher operators three shipped rules were already using.**
+  `not_startswith_any` and `not_endswith` had never existed, so
+  `path_not_startswith_any` was read as a field name and the three rules
+  using it could not fire — while the reachability gate, whose operator list
+  had drifted from the matcher's in *both* directions, stripped a suffix
+  nothing implemented and reported them reachable. The same drift in the
+  other direction had five rules counted as unreachable for a `neq` the
+  matcher gained and the gate did not. Both lists are now compared in both
+  directions by a test.
+- **Ordered and unordered sequences in the windowed engine, and a Sigma
+  correlation importer that feeds it.** A threshold cannot express an
+  ordering, and the ordering is usually the detection: "fifty failed logons"
+  is an attempt, "a failed logon then a success for the same account" is a
+  compromise. `SequenceRule` stages two or more selectors for one entity
+  inside one window, ordered by **event time** rather than arrival — almost
+  every connector here polls, so a batch arrives in the vendor's order and
+  the event that starts a sequence routinely lands after the one that
+  finishes it. One event advances at most one stage, which a per-event token
+  enforces rather than a timestamp comparison, because two distinct events
+  routinely share a second. `ordered: false` gives Sigma's unordered
+  `temporal` semantics from the same rule type.
+  `scripts/sigma_correlation.py` compiles `event_count`, `value_count`,
+  `temporal` and `temporal_ordered` documents into those forms and **refuses
+  rather than approximates** the rest: a `lt`/`lte` condition is a rarity
+  signal needing a baseline, a multi-field `group-by` has no single entity,
+  `aliases` need field mapping the engine does not have. The importer had
+  never been written and the imported corpus contains no correlation
+  document, so the two gaps hid each other; the rules under
+  `detections/sigma-correlations/` are hand-authored in the upstream format
+  to give it a corpus and are labelled first-party content rather than
+  imported coverage. `scripts/check_sigma_correlations.py` fails a
+  correlation whose selector or `group-by` names a field nothing emits, with
+  no ceiling.
+- **Attribute conditions, time-boxed elevation and workload identities, all
+  inside the one permission path.** The placement is the item, not a detail:
+  conditions are applied by `CurrentUser.require_permission` after whichever
+  branch allowed, never beside it. Two authorities that can disagree is the
+  shape that produced GHSA-pm3f-h6gc-rvgp, and
+  `scripts/check_one_permission_model.py` now fails if the call moves inside a
+  branch — where it would bind console sessions and silently not API keys —
+  or if elevation stops being consulted at use. Its self-test runs ten probes,
+  four of them new, each removing one half of this wiring.
+  - Conditions narrow and can never grant. The operator set the write surface
+    accepts is narrower than `app/security/abac.py` implements: `mfa_satisfied` is
+    refused at write time with its reason, because the principal does not yet
+    carry that fact and a stored condition naming it could only ever be
+    indeterminate — which denies, leaving an operator with a permanent 403 and
+    nothing explaining it.
+  - Elevation expiry is evaluated at **use**, not by a sweep. A background job
+    is a job that can be down, and a grant outliving its window because a
+    worker crashed is the failure mode JIT elevation exists to remove. An
+    approver must already hold every permission the grant confers
+    (`authorize_permission_grant`, the same function that guards role
+    assignment and key scopes) and cannot approve their own request.
+  - Workload identities replace the three things one shared token cannot do:
+    attribute an action to a named service, scope the ingest pipeline
+    differently from the agents worker, and rotate without restarting
+    everything at once. A superseded secret works inside its grace window and
+    is refused outside it — and a row with no window is treated as expired,
+    because "not set" must not be the most permissive state of a credential.
+  - Routes: `/elevation/*`, `/access-conditions/*`, `/workload-identities/*`,
+    nine of them state-changing and all nine authorizing
+    (`check_route_authz.py` 243 → 252 authorizing, identity-only unchanged at
+    21). Seven permissions seeded by migration `096`; operator documentation
+    at `docs/security/access-governance.md`. (#PR)
+
+
+- **A labelled verdict corpus a constant answer cannot win on**
+  (`services/agents/tests/eval_data/verdict/`). Every labelled set this tree
+  had was malicious by construction — `synthetic_incidents.json` and
+  `adversary_incidents.json` are 200 attacks each and carry no
+  `expected_disposition` at all, so `scripts/score_replay_set.py` refuses
+  both, correctly, and nothing could measure whether the agent got the
+  *verdict* right. The new corpus is 72 items in 36 twin pairs that the
+  scorer accepts: largest class 50.0%, so the best constant answer scores
+  **0.500** — measured through `score_replay`, not asserted — against the
+  plan's 60% ceiling, and 36 malicious items clears the 30 the report
+  requires before it will print a headline accuracy. 52 of 72 items (72.2%)
+  come from cloud, identity and SaaS, covering all ten named sources
+  (CloudTrail, GuardDuty, GCP audit, Azure activity, Entra, Okta, Workspace,
+  M365, GitHub, Slack, Kubernetes audit) where the repository's labelled
+  coverage was thinnest. Each non-malicious item has a malicious twin that
+  fired the same rule at the same severity with the same title, so the
+  evidence is the only thing that can separate them — and because twins share
+  their severity, the two halves carry an identical severity distribution and
+  severity alone separates nothing. The benign half is what real queues hold:
+  admin bulk changes, scanners, CI service accounts, travel sign-ins,
+  break-glass use with a ticket, backup jobs.
+  **All 72 items are hand-authored and every one carries `is_synthetic: true`.**
+  Nothing is drawn from a recorded dataset and nothing implies otherwise; the
+  README records five public corpora considered and the reason each was
+  refused, two of which pass on licence and fail on fit, because no public
+  attack-telemetry set carries analyst dispositions, cloud control-plane
+  events and a paired benign case at once.
+  `scripts/check_verdict_corpus.py` keeps all of that true — balance, source
+  mix, pairing, provenance-with-a-licence, documentation-only addresses and
+  header counts that match the body — and its `--self-test` injects one
+  violation of each rule into a copy of the shipped corpus and requires every
+  one to be caught. The two all-malicious corpora must keep being refused,
+  pinned in the same file that requires the new one to pass, so loosening the
+  guard to admit a corpus breaks the test that says the old ones stay out.
+  (Depth plan 1.1)
+
+- **A buyer security pack a reviewer can actually use.** `docs/security/` held
+  three threat models and an advisory draft — good documents, and not the set
+  a procurement review asks for. It now also carries architecture and
+  data-flow diagrams, data handling per deployment mode, a completed security
+  questionnaire, and a sub-processor page, indexed at
+  `docs/security/README.md` and linked from `SECURITY.md`.
+
+  The pack's rule is that every statement names the file or the CI job that
+  makes it true, and that where a control is narrower than its heading sounds,
+  the limit is in the same paragraph. So it states plainly that
+  service-to-service traffic is plaintext inside the container network on the
+  default stack, that `/metrics` covers 5 of 19 services, and that the
+  prompt-injection guard scores 7.1% on held-out payloads against 98.1% on the
+  corpus it was hardened against — the unflattering number is the one that
+  matters. Ten gaps are collected in one table rather than left for a reviewer
+  to assemble from the prose.
+
+  `scripts/check_security_pack_links.py` keeps it from rotting: every relative
+  link, every anchor, and every gate the pack names *in prose rather than in a
+  link* must resolve, with a bidirectional exemption table so a gate recorded
+  as absent that later appears also fails. Eight self-test cases, four of them
+  injected regressions. Wired in `security-pack.yml` with no path filter,
+  because a pack statement is most often falsified by a change nowhere near
+  `docs/security/`. (#PR)
+
+
+- **An event classification catalogue, read by ingest at boot.**
+  `schemas/event_catalog/<source>.yaml` maps each vendor's own event type
+  onto a normalized action, a sensitivity on the five-tier ladder, and an
+  optional ATT&CK hint. Ten sources, 44 event types: AWS CloudTrail, GCP
+  Cloud Audit, Azure Activity, Entra, Okta, Google Workspace, M365, GitHub,
+  Slack and Kubernetes audit. Every classified event carries the answer, so
+  the lake, the detection matcher and triage read one classification rather
+  than each re-deriving a meaning from an event name.
+
+  **A sensitivity deliberately does not change a severity or whether fusion
+  promotes.** Sensitivity is a property of the event *class*; the vendor's
+  own severity on the record and the OCSF class still decide promotion.
+  Letting `critical` force an alert would make a one-line edit to a data
+  file able to flood a queue, and the promotion contract belongs where it
+  already is. Pinned by a test that a critical-sensitivity and an
+  info-sensitivity event from the same source agree on `severity_id`,
+  `severity`, `class_uid` and `category_uid`.
+
+  An event type a catalogued source has never seen is the one case worth an
+  operator's attention, and it arrives as a `normalization_warnings` entry
+  on the event naming the file to edit. A source with no catalogue, and a
+  record carrying nothing at the declared path, are both silent — warning on
+  either would drown the actionable case.
+
+  The catalogue is embedded into the ingest binary from a byte-identical
+  vendored copy, because `go:embed` cannot reach above its own package and
+  reading a directory from disk at run time is a failure this service has
+  already shipped: the webhook templates were read from `/app/templates`, a
+  path the Dockerfile never populated, so every deployment answered 503
+  behind a startup warning nothing was watching.
+
+- **Recorded Okta and Slack vendor payloads.** Two of the ten sources the
+  catalogue covers had no vendor-payload fixture anywhere in the connectors
+  suite — only schema and conformance checks, which never see a record. A
+  gate grown from fixtures would have passed over both forever while
+  reporting OK. `tests/fixtures/okta/sample_event.json` (7 records, 6 event
+  types) and `tests/fixtures/slack_audit/sample_event.json` (6 records, 6
+  event types) follow each vendor's published log schema and are driven
+  through the real connectors' `normalize()`.
+
+- `scripts/check_event_catalog.py`, wired into `ci.yml` with its self-test
+  ahead of it. Every event type appearing in a catalogue's declared fixtures
+  must be classified or listed as deliberately unclassified with a reason,
+  so adding a fixture that carries a new event type fails CI until somebody
+  decides what it means. It also fails a source whose declared fixtures
+  yield **no** event type, a sensitivity outside the five tiers, a missing
+  normalized action, a malformed ATT&CK id, a thin excuse, an event type
+  both classified and excused, and any drift between `schemas/` and the
+  vendored copy the binary carries.
+
+
+- `scripts/check_ocsf_class_coverage.py`, wired into `ci.yml` with its
+  self-test ahead of it. A declared connector with neither a class nor a
+  recorded reason fails, as does an entry carrying both, a class uid whose
+  declared category disagrees with `uid/1000`, a non-finding class whose
+  severity map cannot reach the promote floor of 4, and a profile whose class
+  name contradicts its uid. It reports the number of connector types on the
+  generic mapping and holds it at a ceiling that may shrink but not grow. The
+  self-test injects each of those eleven defects and requires the gate to
+  catch each one, and requires an empty tree to be refused rather than
+  reported clean.
+
+### Fixed
+
+- **A permission the module declared but no migration seeded could not be
+  granted from the console.** `test_rbac_catalog_seed.py` pinned the
+  vocabulary against `092_rbac_catalog_seed.sql` alone, which has already run
+  on every deployment — so the only correct way to add a permission, a new
+  migration, failed the test, and the tempting fix (editing an applied
+  migration) seeds the row on fresh installs and on nobody else. The pin now
+  reads every migration that seeds the catalog, derived from the tree. Doing
+  so immediately surfaced `playbooks:delete`, seeded by `003_rbac.sql` before
+  `rbac_catalog.py` existed and enforced by no route in the tree: recorded in
+  the test with its reason rather than adopted, because absorbing it would
+  make the catalog claim a permission the product does not enforce. (#PR)
+
+- **`docs/trust/data-flows.md` told a reader the opposite of the truth, twice
+  in one paragraph.** It said hosted egress is "**not** pseudonymized before
+  egress today ... a planned control rather than a shipped one" and then, in
+  the same paragraph, "Restored by parity 2.4" — a correction appended without
+  removing what it corrected. Parity 2.4 did wire the pseudonymizer at the
+  contract layer (`services/agents/app/llm/contract.py` calls
+  `egress_privacy.open_session`), so the page understated a shipped control on
+  the single question a buyer cares most about. Two further statements were
+  stale in the same direction: the Helm default-deny `NetworkPolicy` is
+  described as pending when `infra/helm/aisoc/templates/networkpolicy.yaml`
+  ships it, and the air-gapped CI proof is described as planned when
+  `container-egress.yml` runs it with a canary and a red run. All three
+  corrected, each now naming its gate, and each carrying the limit that goes
+  with it — the NetworkPolicy is opt-in because a CNI that does not enforce it
+  ignores it silently, and the sinkhole cannot observe a dial straight to an IP
+  literal. The matching "still outstanding" note in
+  `docs/audit/REALITY_REPORT.md` is closed with the same evidence. (#PR)
+
+- **ADR-0002 asserts a CI gate that has never existed**, and the security pack
+  repeated it before the new link gate caught it on its first run.
+  `scripts/audit_compliance_claims.py` is cited twice in
+  `docs/decisions/0002-compliance-claims.md` as already shipped and guarding
+  the "controls aligned to" framing; no such script is in the tree and no
+  workflow references it, a finding `docs/audit/REALITY_REPORT.md` already
+  recorded. The pack now states that the framing is a convention rather than a
+  gate, lists it as a gap, and the script is recorded in the link gate's
+  `KNOWN_ABSENT` table so that building it will fail the gate until the prose
+  is corrected. (#PR)
+
+
+- **Routine telemetry was promoted to an alert as though a vendor had judged
+  it.** Ingest mapped 78 of the 84 declared connector types onto OCSF class
+  2001 Security Finding, because `canonicalProfile()` used it as the default
+  and only five connectors had an override. 2001 is category 2, and
+  `should_promote()` promotes category 2 unconditionally — so every permitted
+  DNS lookup from Cisco Umbrella, every `Allow` from Zscaler, every accepted
+  VPC flow record, every routine Windows event and every Workspace or M365
+  audit entry became an alert carrying severity `info`. Measured on the tree
+  before the fix: **14 of 14** telemetry sources promoted an info-severity
+  event.
+
+  `services/ingest/internal/normalizer/ocsf_classes.go` now carries a decision
+  for every connector type the registry declares: the OCSF class its stream
+  actually is, or the reason it stays on the Security Finding default. Which
+  one each source gets was read from the endpoint its connector calls rather
+  than from the vendor's product category, and the two disagree often enough
+  that guessing would have silenced four sources — Netskope reads
+  `/api/v2/events/data/alert`, Proofpoint reads `/v2/siem/messages/blocked`,
+  Abnormal reads `/v1/threats`, and Falco drops anything below its configured
+  priority, so all four return judgements and keep category 2.
+
+  Ten classes are added, each uid, caption and category read from
+  `schema.ocsf.io` for both the 1.9.0 the tree targets and the 1.1.0 the
+  normalizer's `metadata.version` declares, because emitting a newer class
+  under the older version string would be a false claim about a public
+  standard: Process Activity, File System Activity, DNS Activity, HTTP
+  Activity, Email Activity, Account Change, User Access Management, Group
+  Management, Web Resources Activity and Datastore Activity, plus Email URL
+  Activity and File Hosting Activity where the schema's own description named
+  the product. Connector types on the generic mapping: **78 → 42**, all 42
+  with a recorded reason and none without a decision. (depth plan 2.1)
+
+- **A Sentinel incident was labelled a vulnerability finding.** The
+  `microsoft_sentinel` profile declared `class_uid: 2002` beside
+  `class_name: "Security Finding"`; 2002 is Vulnerability Finding in every
+  OCSF version this service targets. Both are category 2, so promotion hid it,
+  but every Sentinel event in the lake disagreed with itself and a query
+  filtering on 2002 returned incidents alongside Qualys and Tenable findings.
+  Found by the new gate, which fails on a profile whose class name contradicts
+  its own uid.
+
+## [17.1.0] - 2026-10-07
+
+### Security
+
+- **GHSA-w4r8-969c-67p2 (High, CWE-347): the audit trail could be forged by
+  an unauthenticated caller.** `AuditMiddleware` decoded the request's Bearer
+  token with signature verification disabled and wrote its claims into the
+  per-tenant tamper-evident audit chain on every mutating request — before
+  authentication ran, and regardless of whether it failed. A self-crafted JWT
+  got 401 from the route and still planted `actor_email` / `tenant_id` of the
+  attacker's choosing into any known tenant's chain, reproduced against a
+  production-mode stack with every migration applied: the forged entry landed
+  at `chain_index` 0 while a no-credential control wrote nothing. The
+  middleware now audits only the verified principal authentication records on
+  `request.state`; a request that fails authentication writes no audit row. A
+  sibling sweep confirmed this was the only live instance of trusting an
+  unverified token. Reported by [@cqliuke](https://github.com/cqliuke) through
+  private vulnerability reporting; affects every release up to and including
+  17.0.0. See the published advisory:
+  [GHSA-w4r8-969c-67p2](https://github.com/beenuar/AiSOC/security/advisories/GHSA-w4r8-969c-67p2).
+  (#1182)
+- **Dependency floors for a fresh batch of npm advisories, plus multidict.**
+  `compression` ≥ 1.8.2, `shell-quote` ≥ 1.11, `source-map-js` ≥ 1.2.2,
+  `tinypool` ≥ 2.1.2 and `proxy-addr` ≥ 2.0.8 across all four npm install
+  roots (root workspace, `apps/mobile`, `services/mcp/cursor-extension`,
+  `services/realtime`), and `multidict` 6.9.1 in the three Python lockfiles
+  that pin it. These advisories published after v17.0.0 and were failing
+  Trivy and security-audit on every open pull request. (#1180)
+
 ### Added
 - Admin Users administration: a console-only **Settings → Users** screen
   (admin nav, hidden entirely for viewer/infosec) with server-side
@@ -33,6 +1421,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`tests/test_sso_enterprise_policy.py`) locking the least-privilege
   vocabulary, the fail-closed gates, and the off-by-default flag.
 
+Both blocks land the reviewed scope of #1179 by
+[@alexmateescu](https://github.com/alexmateescu), merged via #1183 with the
+author's commits preserved.
 
 ### Fixed
 
@@ -55,6 +1446,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and a case-workspace mock missing the `getTimeline`/`reopen` stubs
   upstream components now call. Type-check is clean and the full console
   suite (838 tests) passes on the branch.
+- **Fresh installs no longer risk a zero-permission administrator.**
+  Migration `091` stops bulk-seeding an `infosec` row into every tenant's
+  `roles` table: a tenant's first `roles` row flips permission resolution
+  from the static map to the database, and a seeded row with no grants
+  resolved every user of that tenant — including break-glass admin — to zero
+  permissions. `093` repairs already-seeded deployments and backfills role
+  labels; the canonical `infosec` definition lives in `ROLE_PERMISSIONS` /
+  `GRANTABLE_ROLES`, which assignment validates against, so nothing in
+  `roles` is needed for it to be assignable. (#1183)
+- **`optional_user` forwarded the wrong argument slot**, turning every
+  anonymous dashboard poll into a 500. (#1183)
+- **Enrichment merges kept only the top-scoring source's WHOIS and dropped
+  DNS records entirely.** `mergeResults` copied `Whois` only inside the
+  max-risk branch, so a source that answered with WHOIS but not the highest
+  risk score lost it whenever two or more sources returned; `DNSRecords`
+  were never merged at all. WHOIS now falls back to the first source that
+  has one (the highest-risk source still wins when it does), and DNS records
+  are union-merged and deduplicated in order. Community contribution. (#1178)
+- **The grading-integrity gate locked itself out after a merge burst.** Its
+  staleness check queried *successful* push runs only and read "none of the
+  newest five is for a recent commit" as a stale API snapshot — but a
+  workflow genuinely failing on 30+ consecutive commits produces the same
+  signature, and for `grading-integrity.yml` itself the condition was
+  self-locking: each push run failing the check was the reason no recent
+  successful run existed. `main` was red on it for two days with no commit
+  able to fix it. Freshness is now proven by push runs of any conclusion
+  (a failed run for a recent commit proves the read is fresh; on a push
+  event the run executing the gate is itself the proof) while only
+  successes are graded; the genuine stale-snapshot refusal is preserved,
+  and four of the five new tests fail on the previous code. (#1181)
+- **Six repairs to what the v17 follow-on landed with**, two of them runtime
+  bugs: the `SSO_LOCAL_ADMIN_ONLY` gate tested membership against a
+  *function object* (`user.role not in wildcard_roles`), so password
+  sign-in answered 500 instead of applying the policy; two `logger.warning`
+  calls in `cases.py` passed a keyword stdlib logging rejects, raising
+  inside their own `except` blocks; plus a dead `StepKind.WARNING` branch,
+  a shadowed duplicate `period` field, a `str` assigned into a `CaseStatus`
+  field, and seven mypy `union-attr` findings. (#1160)
+- **The release step that moves the `stable` Helm chart channel had never
+  once worked.** It read the channel with `helm show chart --version stable`,
+  but `--version` takes a semver *constraint*, so helm rejected the channel
+  name client-side before any network call — in 457 ms, with `2>/dev/null`
+  hiding the message and `pipefail` carrying the failure out. (#1129, #1130)
+
+### Changed
+
+- The four OpenTelemetry modules move to 1.47.0 together. (#1175)
+- Storybook group to 10.6.1 (test-runner 0.26.0); the bump pulls esbuild
+  0.28.2 alongside the override-pinned 0.28.1, now recorded in the toolchain
+  gate's expected set with the gate's own self-test fixtures updated to
+  match. (#1146)
+- GitHub Actions pins move to their v7 majors, including the last floating
+  tags. (#1149, #1176)
+- Two consolidated Dependabot waves — 19 bumps with the recorded reason
+  fastapi cannot move, then seven more — plus `@types/node` 26.6.4.
+  (#1161, #1174, #1148)
+- The SCIM contract gate now sees derived-role declarations
+  (`ROLE_PERMISSIONS["infosec"] = …` assigned by subscript), so it no longer
+  reports a role that resolves to 18 permissions as granting nothing; the
+  committed OpenAPI spec was regenerated alongside. (6fc5719a)
 
 ## [17.0.0] - 2026-10-05
 
@@ -11736,7 +13187,10 @@ edge mutations within ~1s of the upstream event reaching ingest.
 ### Public weekly benchmark scoreboard at /docs/benchmark-scoreboard
 
 Public, append-only weekly scoreboard now lives at
-[`/docs/benchmark-scoreboard`](https://docs.tryaisoc.com/docs/benchmark-scoreboard).
+[`/docs/benchmark-scoreboard`](https://beenuar.github.io/AiSOC/docs/benchmark-scoreboard).
+(This entry originally linked the same page on a `docs.` subdomain of the
+hosted service. That host has never resolved, so the link is repointed at the
+OSS docs site rather than left dead — the page itself is the one described.)
 One row per published eval run — date, agent version, commit SHA, MITRE
 accuracy, MTC p50/p95, total USD, total tokens — sourced from a
 checked-in JSON file at `apps/docs/static/data/scoreboard.json` and

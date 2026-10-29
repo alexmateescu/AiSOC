@@ -14,6 +14,11 @@ Tier mapping:
 * `detection_specs_part3_*.py` — 600 additional native specs generated through
   the compact `S()` builder (see `detection_specs_part3_helpers.py`). These
   follow the same fixture + MITRE quality gate as the originals.
+* `detection_specs_part4_threat_anomaly.py` — depth plan 3.5. Threat
+  conditions paired with depth plan 3.4 baseline scores. Fixtures are
+  hand-authored rather than synthesised, because the content of these
+  rules is a relationship and a fixture copied from the clause cannot
+  test it.
 """
 
 from __future__ import annotations
@@ -33,6 +38,7 @@ from detection_specs_part3_cloud import CLOUD_EXTRA  # type: ignore[import-not-f
 from detection_specs_part3_endpoint import ENDPOINT_EXTRA  # type: ignore[import-not-found]
 from detection_specs_part3_identity import IDENTITY_EXTRA  # type: ignore[import-not-found]
 from detection_specs_part3_network import NETWORK_EXTRA  # type: ignore[import-not-found]
+from detection_specs_part4_threat_anomaly import THREAT_ANOMALY  # type: ignore[import-not-found]
 
 CATEGORIES: dict[str, list[dict]] = {
     "cloud": [*CLOUD, *CLOUD_EXTRA],
@@ -41,6 +47,11 @@ CATEGORIES: dict[str, list[dict]] = {
     "network": [*NETWORK, *NETWORK_EXTRA],
     "application": [*APPLICATION, *APPLICATION_EXTRA],
     "data-exfil": DATA_EXFIL,
+    # Depth plan 3.5. Its own category because the claim is different:
+    # these pair a threat condition with a depth plan 3.4 baseline score,
+    # so a fresh install has the rule before it has the signal. Counted
+    # separately in scripts/project_stats.py for the same reason.
+    "threat-anomaly": THREAT_ANOMALY,
 }
 
 

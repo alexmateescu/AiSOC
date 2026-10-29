@@ -66,7 +66,7 @@ def test_register_builtin_executors_returns_full_count() -> None:
     # sign-ins, Google Workspace login audit) and two verbs whose subject is
     # neither a host nor a principal (AWS CloudTrail lookup, Defender
     # endpoint-telemetry search).
-    assert count == 73
+    assert count == 89
 
 
 def test_builtin_executors_cover_canonical_vendor_capability_pairs() -> None:
@@ -152,6 +152,16 @@ def test_builtin_executors_cover_canonical_vendor_capability_pairs() -> None:
         ("servicenow", "create_ticket"),
         ("slack", "chatops_verify"),
         ("slack", "notify"),
+        # Depth 5.1 — `notify` had one arm while the playbook packs address
+        # four channels, and `osquery_live_query` was a step type whose only
+        # implementation imported these clients from a service that does not
+        # contain them.
+        ("teams", "notify"),
+        ("email", "notify"),
+        ("pagerduty", "notify"),
+        ("osctrl", "osquery_live_query"),
+        ("fleetdm", "osquery_live_query"),
+        ("aisoc_direct", "osquery_live_query"),
         ("splunk", "ack_alert"),
         ("splunk", "create_notable_event"),
         ("splunk", "suppress_alert"),
@@ -159,6 +169,20 @@ def test_builtin_executors_cover_canonical_vendor_capability_pairs() -> None:
         ("splunk", "sync_detection_rule"),
         ("splunk", "update_alert_disposition"),
         ("teams", "chatops_verify"),
+        # Depth 7.1 — mailbox remediation. Ten pairs: five verbs against
+        # Microsoft 365 and Google Workspace. Before these the registry had
+        # no way to touch a mailbox at all, so the phishing response could
+        # block the sender's domain and not remove the message.
+        ("m365", "search_mailboxes"),
+        ("m365", "purge_email"),
+        ("m365", "restore_email"),
+        ("m365", "block_sender"),
+        ("m365", "unblock_sender"),
+        ("google_workspace", "search_mailboxes"),
+        ("google_workspace", "purge_email"),
+        ("google_workspace", "restore_email"),
+        ("google_workspace", "block_sender"),
+        ("google_workspace", "unblock_sender"),
     }
     assert pairs == expected
 
@@ -189,7 +213,7 @@ def test_register_builtin_executors_is_idempotent_with_overwrite() -> None:
     register_builtin_executors()
     # Second call without overwrite would raise — confirm overwrite works.
     count = register_builtin_executors(overwrite=True)
-    assert count == 73
+    assert count == 89
 
 
 def test_register_builtin_twice_without_overwrite_raises() -> None:

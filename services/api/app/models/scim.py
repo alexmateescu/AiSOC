@@ -62,6 +62,12 @@ class ScimUser(Base):
     external_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     given_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     family_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: ``manager.value`` from the SCIM enterprise user extension, stored as
+    #: the provider's own reference rather than resolved to a local user id
+    #: — the manager is frequently not an AiSOC user at all. Read by the
+    #: playbook verification escalation (depth 5.4), which is the only thing
+    #: in the platform that needs to know who somebody reports to.
+    manager_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
     token_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("aisoc_scim_tokens.id", ondelete="SET NULL"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC))
     updated_at: Mapped[datetime] = mapped_column(

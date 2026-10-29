@@ -61,6 +61,7 @@ __all__ = [
     "ReplayRun",
     "ReplayRunner",
     "TimeSplit",
+    "WindowReplay",
     "split_by_time",
 ]
 
@@ -179,6 +180,17 @@ class ReplayDecision:
 
     tool_calls: int = 0
     resolved_models: list[str] = field(default_factory=list)
+
+    #: Model calls this decision actually placed, priced or not.
+    #:
+    #: The one number that separates "the model answered" from "the
+    #: deterministic fallback answered". Triage catches a provider error and
+    #: falls through to its offline scorer, so a run against an unreachable
+    #: gateway produces a full set of confident-looking verdicts and a
+    #: perfectly ordinary-looking report. `resolved_models` goes empty in that
+    #: case and is the signal a reader would have to notice; this is the same
+    #: fact as a count, so a harness can refuse the run instead.
+    llm_calls: int = 0
     tokens: int = 0
     measured_usd: float | None = None
     estimated_usd: float | None = None
@@ -207,6 +219,7 @@ class ReplayDecision:
             "evidence": self.evidence,
             "tool_calls": self.tool_calls,
             "resolved_models": list(self.resolved_models),
+            "llm_calls": self.llm_calls,
             "tokens": self.tokens,
             "measured_usd": self.measured_usd,
             "estimated_usd": self.estimated_usd,
@@ -214,6 +227,24 @@ class ReplayDecision:
             "latency_ms": self.latency_ms,
             "error": self.error,
         }
+
+
+@dataclass(frozen=True)
+class WindowReplay:
+    """What replaying one set of findings produced, before anything scores it.
+
+    Separate from :class:`ReplayRun` because a window has no split. The
+    time split is a property of *history* — it exists so an operator asking
+    "would this have worked last quarter" gets an answer about a contiguous
+    period. A hand-authored corpus has no close times to cut on, and
+    manufacturing some so the shape fits would put an invented timestamp
+    into the method note of every report that used it.
+    """
+
+    decisions: list[ReplayDecision]
+    writes_attempted: dict[str, int]
+    total_writes: int
+    cutoff_context: dict[str, Any]
 
 
 @dataclass
@@ -280,8 +311,33 @@ class ReplayRunner:
                 f"{split.split_at.isoformat()}; a snapshot taken at a different instant is not a freeze"
             )
 
+        window = await self.replay_window(split.test, snapshot=frozen)
+        return ReplayRun(
+            decisions=window.decisions,
+            split=split,
+            snapshot=frozen,
+            writes_attempted=window.writes_attempted,
+            tenant_id=self._tenant_id,
+            connector_id=self._connector_id,
+            cutoff_context=window.cutoff_context,
+        )
+
+    async def replay_window(
+        self,
+        findings: Sequence[HistoricalFinding],
+        *,
+        snapshot: ContextSnapshot,
+    ) -> WindowReplay:
+        """Replay a set of findings through production triage, writing nothing.
+
+        The working half of :meth:`run`, reachable without a time split so a
+        corpus that has no history can be graded through the same path. There
+        is deliberately no second decision-building loop anywhere: a harness
+        that built its own would measure itself rather than the product, and
+        would stop measuring the product the first time a prompt changed.
+        """
         writer = ShadowTriageWriter()
-        reader = FrozenTriageContextReader(frozen)
+        reader = FrozenTriageContextReader(snapshot)
         # The production worker, constructed exactly as the Kafka consumer
         # constructs it apart from the two sinks. `bootstrap_servers` is
         # required by the signature and unused: `triage()` never touches the
@@ -294,7 +350,7 @@ class ReplayRunner:
         )
 
         decisions: list[ReplayDecision] = []
-        for finding in split.test:
+        for finding in findings:
             decisions.append(await self._replay_one(worker, finding))
 
         logger.info(
@@ -304,13 +360,10 @@ class ReplayRunner:
             decisions=len(decisions),
             writes_attempted=writer.total_writes,
         )
-        return ReplayRun(
+        return WindowReplay(
             decisions=decisions,
-            split=split,
-            snapshot=frozen,
             writes_attempted=dict(writer.calls),
-            tenant_id=self._tenant_id,
-            connector_id=self._connector_id,
+            total_writes=writer.total_writes,
             # Read after the window, not before: these totals are what the
             # cutoff sources did over the run.
             cutoff_context=reader.as_method_note(),
@@ -372,6 +425,14 @@ class ReplayRunner:
         decision.estimated_usd = cost.get("estimated_usd")
         decision.unpriced_calls = int(cost.get("unpriced_calls") or 0)
         decision.resolved_models = [str(m) for m in (cost.get("resolved_models") or [])]
+        # Every call the tracker saw, however it was priced. Summed from the
+        # three priced/unpriced buckets rather than read off one of them: a
+        # local model is unpriced, a hosted one is measured, and a harness
+        # that counted only the priced calls would conclude an air-gapped run
+        # placed none.
+        decision.llm_calls = (
+            int(cost.get("measured_calls") or 0) + int(cost.get("estimated_calls") or 0) + int(cost.get("unpriced_calls") or 0)
+        )
         # Derived, not asserted. The literal `0` that stood here was the
         # correct answer -- shadow mode declines escalation, and escalation is
         # the only stage of this path that calls tools -- under a comment

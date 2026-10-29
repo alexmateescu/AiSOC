@@ -7,7 +7,7 @@ import structlog
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app._health import install_health_routes, register_subscription
+from app._health import install_health_routes, register_dependency, register_subscription
 from app.api.contextual import router as contextual_router
 from app.api.copilot import router as copilot_router
 from app.api.explain import router as explain_router
@@ -16,6 +16,8 @@ from app.api.hunts import router as hunts_router
 from app.api.investigate import router as investigate_router
 from app.api.metrics import router as metrics_router
 from app.api.playbooks import router as playbook_router
+from app.api.playbooks import verifications_router as playbook_verifications_router
+from app.api.playbooks import waits_router as playbook_waits_router
 from app.api.replay_router import router as replay_router
 from app.api.router import router
 from app.api.triage import router as triage_router
@@ -33,8 +35,10 @@ __all__ = ["score_agent_quality"]
 from app.hunt import scheduler as hunt_scheduler
 from app.hunt import store as hunt_store
 from app.investigator import ledger as investigation_ledger
+from app.investigator import run_reaper as investigation_run_reaper
 from app.llm.factory import preflight_llm
 from app.playbook import PlaybookStore
+from app.playbook import sweeper as playbook_sweeper
 from app.tools.mitre_full import embed_techniques_into_qdrant, load_attck_corpus
 from app.workers.business_context import BusinessContextApplier
 from app.workers.business_context import is_enabled as business_context_enabled
@@ -136,6 +140,26 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         except Exception as exc:  # noqa: BLE001 — never block API startup
             logger.warning("auto_triage_worker.start_failed", error=str(exc))
 
+    # Depth 5.3 — wake timer waits and expire pauses nobody decided.
+    # `pause.expire_due` had been written and never called from production,
+    # so an undecided approval sat `waiting` forever; a `wait` step inherits
+    # that and turns it into a run that stops and never continues.
+    app.state.playbook_sweeper_task = None
+    try:
+        playbook_sweeper.start(app)
+    except Exception as exc:  # noqa: BLE001 — never block API startup
+        logger.warning("playbook_sweeper.start_failed", error=str(exc))
+
+    # Issue #1242 — close investigation runs orphaned by a process that died.
+    # The wall-clock deadline on the manual path only ends a run whose process
+    # is still alive; the run store is a module dict, so a restart leaves the
+    # `investigation_runs` row at 'running' with nothing left to finish it.
+    app.state.investigation_reaper_task = None
+    try:
+        investigation_run_reaper.start(app)
+    except Exception as exc:  # noqa: BLE001 — never block API startup
+        logger.warning("investigation_run_reaper.start_failed", error=str(exc))
+
     # Phase 2.6 — flip /readyz to 200 once startup work is done.
     app.state.mark_ready()
 
@@ -152,6 +176,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 app.state.triage_worker_task.cancel()
         except Exception as exc:  # noqa: BLE001
             logger.warning("auto_triage_worker.stop_failed", error=str(exc))
+
+    if getattr(app.state, "playbook_sweeper_task", None) is not None:
+        app.state.playbook_sweeper_task.cancel()
+
+    if getattr(app.state, "investigation_reaper_task", None) is not None:
+        app.state.investigation_reaper_task.cancel()
 
     # Stop the hunt scheduler before draining DB pools so in-flight runs
     # can flush their writes.
@@ -186,6 +216,24 @@ _mark_ready, _mark_not_ready = install_health_routes(app, service_name="aisoc-ag
 app.state.mark_ready = _mark_ready
 app.state.mark_not_ready = _mark_not_ready
 
+
+async def _database_ready() -> bool:
+    import asyncpg
+
+    dsn = os.getenv("DATABASE_URL", "").strip()
+    if not dsn:
+        return False
+    for prefix in ("postgresql+asyncpg://", "postgres+asyncpg://"):
+        if dsn.startswith(prefix):
+            dsn = "postgresql://" + dsn[len(prefix) :]
+            break
+    conn = await asyncpg.connect(dsn, timeout=1.4)
+    await conn.close()
+    return True
+
+
+register_dependency(app, "database", _database_ready)
+
 # CORS — the web console talks to this service directly (it does not go through
 # the Next.js rewrite layer for agent endpoints because we want to stream
 # NDJSON without buffering through the proxy). Origins are resolved via the
@@ -209,7 +257,9 @@ app.include_router(metrics_router)
 app.include_router(router, prefix="/api/v1")
 app.include_router(investigate_router)  # prefix already set in investigate.py
 app.include_router(triage_router)  # prefix: /api/v1  (POST /cases/{id}/triage — router topology, T2.2)
-app.include_router(playbook_router)  # prefix: /api/v1/playbooks
+app.include_router(playbook_router)
+app.include_router(playbook_waits_router)  # prefix: /api/v1/playbook-waits
+app.include_router(playbook_verifications_router)  # prefix: /api/v1/playbook-verifications
 app.include_router(contextual_router)  # prefix: /api/v1/contextual
 app.include_router(hunts_router)  # prefix: /api/v1/hunts
 app.include_router(hunt_search_router)  # prefix: /api/v1/hunt  (search + saved)

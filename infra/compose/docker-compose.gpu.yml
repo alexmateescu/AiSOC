@@ -41,6 +41,21 @@
 # visible device; set `AISOC_GPU_COUNT=all` to expose every device, or pin
 # specific ones with `device_ids` instead of `count` if you share the host.
 
+# Model
+# -----
+# This overlay moves the default off the 3B the CPU profile ships. That is a
+# measurement, not a preference: graded on the 72-item balanced verdict
+# corpus, `llama3.1:8b-instruct-q4_K_M` scores 0.357 balanced accuracy
+# against the 3B's 0.285 and a 0.250 constant-answer floor, and is the only
+# model measured whose calibration error falls below 0.40. The table and the
+# four rows it beat are published on the benchmark page under "Verdict
+# quality"; `scripts/run_verdict_eval.py` reproduces it.
+#
+# It needs roughly 6 GB of VRAM rather than the 3B's 3 GB. Override with
+# AISOC_LLM_LOCAL_MODEL plus the two routing variables if your card is
+# smaller -- all three have to move together, or the gateway routes to a
+# model nothing pulled.
+
 services:
   ollama:
     environment:
@@ -48,6 +63,11 @@ services:
       # unset rather than forced, because a hardcoded layer count is wrong
       # on every card except the one it was measured on.
       OLLAMA_NUM_PARALLEL: "${OLLAMA_NUM_PARALLEL:-1}"
+    # The reservation belongs to the service that runs the model. Ollama is
+    # the only one here that does any inference: litellm proxies and
+    # ollama-pull downloads, so a device reserved on either of those is a
+    # GPU held by something that cannot use it while generation runs on the
+    # CPU -- the overlay reporting success having done nothing.
     deploy:
       resources:
         reservations:
@@ -55,3 +75,11 @@ services:
             - driver: nvidia
               count: ${AISOC_GPU_COUNT:-1}
               capabilities: [gpu]
+
+  ollama-pull:
+    entrypoint: ["ollama", "pull", "${AISOC_LLM_LOCAL_MODEL:-llama3.1:8b-instruct-q4_K_M}"]
+
+  litellm:
+    environment:
+      AISOC_LLM_MODEL_FAST: ${AISOC_LLM_MODEL_FAST:-ollama_chat/llama3.1:8b-instruct-q4_K_M}
+      AISOC_LLM_MODEL_DEEP: ${AISOC_LLM_MODEL_DEEP:-ollama_chat/llama3.1:8b-instruct-q4_K_M}

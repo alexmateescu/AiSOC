@@ -3,9 +3,11 @@
 from fastapi import APIRouter
 
 from app.api.v1.endpoints import (
+    access_conditions,
     admin_users,
     agent_tools,
     agents,
+    ai_assets,
     airgap,
     alert_explain,
     alert_writeback,
@@ -19,6 +21,7 @@ from app.api.v1.endpoints import (
     autonomy_policy,
     branding,
     business_context,
+    case_depth,
     cases,
     community,
     compliance,
@@ -32,6 +35,7 @@ from app.api.v1.endpoints import (
     detection_rules,
     easm,
     effective_permissions,
+    elevation,
     email_approval,
     evaluations,
     federated,
@@ -40,6 +44,7 @@ from app.api.v1.endpoints import (
     graph,
     graph_ws,
     health,
+    hunt_reports,
     hunts,
     identity_graph,
     identity_timeline,
@@ -55,14 +60,17 @@ from app.api.v1.endpoints import (
     llm_credentials,
     llm_status,
     marketplace,
+    mcp_access,
     mcp_servers,
     metrics,
+    mfa,
     mssp,
     nl_detection,
     nl_query,
     oauth,
     onboarding,
     oncall,
+    outbound_webhooks,
     passkeys,
     phishing,
     playbook_steps,
@@ -82,21 +90,31 @@ from app.api.v1.endpoints import (
     saved_hunts,
     saved_views,
     scim_tokens,
+    semantic_memory,
     sla,
     sso_connections,
     stix_taxii,
+    taxii,
     tenant_provision,
     tenant_skills,
     tenants,
     threat_intel,
     translation,
     usage,
+    verification_policies,
     waitlist,
+    war_rooms,
+    workload_identities,
 )
 
 api_router = APIRouter(prefix="/api/v1")
 
 api_router.include_router(auth.router)
+# The second factor. `auth.login` answers 202 with a challenge when a
+# factor is outstanding, and every route that resolves one lives here —
+# so without this include a correct password reaches a challenge that
+# nothing can answer.
+api_router.include_router(mfa.router)
 api_router.include_router(api_keys.router)
 api_router.include_router(alerts.router)
 # Structured AI explainer (POST /alerts/{id}/explain) — single-shot
@@ -107,6 +125,12 @@ api_router.include_router(alert_explain.router)
 # Dry-run by default; AISOC_SIEM_WRITEBACK_EXECUTE opts in to the vendor call.
 api_router.include_router(alert_writeback.router)
 api_router.include_router(cases.router)
+# Depth 9.3 (parity 5.6 remainder): alert and case merge, bulk triage,
+# tenant custom fields and per-analyst workload. Its own prefix rather
+# than hanging off /alerts and /cases, because a path parameter compiles
+# to `[^/]+` and `/alerts/merge` beside `/alerts/{alert_id}` is the exact
+# shape that had `GET /{hunt_id}` swallowing its sibling `/runs`.
+api_router.include_router(case_depth.router)
 # Attack-chain timeline (T3.3 — v8.0 parallel team plan).
 # Backs the attack-chain view in apps/web/src/components/cases/CaseWorkspace.tsx with a
 # ranked timeline (graph-distance + temporal proximity + risk overlap)
@@ -152,6 +176,18 @@ api_router.include_router(plugins.router)
 api_router.include_router(community.router)
 api_router.include_router(marketplace.router)
 api_router.include_router(mcp_servers.router)
+# Depth 9.1 (parity 6.6): the *inbound* MCP surface. `mcp_servers` above is
+# the outbound registry -- third-party servers the agent may call. These
+# routes are the authority behind AiSOC's own MCP server once it is on the
+# network: per-tenant tool grants, an approval queue for anything that is
+# not a read, and the audit row for every call including the reads.
+api_router.include_router(mcp_access.router)
+# Depth 9.2 (parity 6.5): vector recall over past cases, runbooks and
+# institutional memory, every hit carrying an author, a source, a scope,
+# an expiry and a state. `knowledge_base` above is the full-text half and
+# stays: the two answer differently-shaped questions and the recall score
+# in `scripts/score_memory_recall.py` measures exactly that difference.
+api_router.include_router(semantic_memory.router)
 # Gap-closure Phase 6.1 and 6.2: tenant-authored investigation skills:
 # authored in YAML, validated against the tools this tenant's agent can
 # actually call, backtested through the Phase 1 replay with and without the
@@ -159,6 +195,13 @@ api_router.include_router(mcp_servers.router)
 # on the path of an investigation.
 api_router.include_router(tenant_skills.router)
 api_router.include_router(rbac.router)
+# Depth 8.2 — the three tables migration 087 created and nothing read.
+# Enforcement is not here: elevation and conditions are applied inside
+# `CurrentUser.require_permission`, which is the single permission path.
+# These routers administer the rows that path reads.
+api_router.include_router(elevation.router)
+api_router.include_router(access_conditions.router)
+api_router.include_router(workload_identities.router)
 api_router.include_router(admin_users.router)
 api_router.include_router(audit.router)
 api_router.include_router(branding.router)
@@ -213,6 +256,7 @@ api_router.include_router(costs.router)
 api_router.include_router(push.router)
 api_router.include_router(oncall.router)
 api_router.include_router(approvals.router)
+api_router.include_router(outbound_webhooks.router)
 api_router.include_router(passkeys.router)
 
 # The live-action registry, proxied for the browser. Upstream it sits behind
@@ -230,6 +274,7 @@ api_router.include_router(saved_views.router)
 # Administering SCIM credentials, which is a console action. The SCIM
 # surface those credentials authenticate is mounted at /scim/v2 in main.py.
 api_router.include_router(scim_tokens.router)
+api_router.include_router(verification_policies.router)
 api_router.include_router(sso_connections.router)
 
 # Wave 3 — operational maturity
@@ -294,11 +339,17 @@ api_router.include_router(evaluations.router)
 api_router.include_router(knowledge_base.router)
 
 # Wave 4 — advanced capabilities
+api_router.include_router(taxii.router)
+api_router.include_router(taxii.admin_router)
 api_router.include_router(threat_intel.router)
 api_router.include_router(posture.router)
 api_router.include_router(easm.router)
 api_router.include_router(identity_graph.router)
 api_router.include_router(reports.router)
+# Depth 9.5: a natural-language hunt or a retro-hunt that found something
+# becomes a readable, cited report, exportable through the same WeasyPrint
+# path the weekly digest already uses.
+api_router.include_router(hunt_reports.router)
 api_router.include_router(retro_hunts.router)
 
 # Wave 7 — customizable dashboard / report builder
@@ -387,3 +438,17 @@ api_router.include_router(graph_ws.router)
 # upgrade and SSE request, deriving the tenant from the verified claim so the
 # fan-out edge is no longer unauthenticated.
 api_router.include_router(realtime.router)
+
+# Observed AI estate — depth 6.1. /ai-assets reads the inventory the fusion
+# recorder writes from the raw-events branch (routes behind ai_estate:read /
+# ai_estate:write; deliberately no create route — an inventory a human can
+# type into stops answering "what is running that nobody told us about").
+# The module shipped in #1303 with no include site, so its three routes were
+# unreachable on that branch; mounted here by the merge train.
+api_router.include_router(ai_assets.router)
+
+# Case war rooms — depth 9.4. One action opens a Slack channel for a case,
+# invites the assignees and mirrors the timeline; the sweep worker is started
+# in main.py. Same story as ai_assets: #1315 shipped the module with no
+# include site, so POST /war-rooms/cases/{id} was unreachable until here.
+api_router.include_router(war_rooms.router)

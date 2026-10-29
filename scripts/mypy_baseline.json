@@ -3,7 +3,7 @@
     "flags": "--no-color-output --no-error-summary --no-site-packages --no-incremental",
     "mypy": "2.3.1",
     "mypy_major": "2",
-    "python": "3.12"
+    "python": "3.14"
   },
   "(unmanaged)": {
     "plugins/mttr-widget/plugin.py": {
@@ -313,15 +313,14 @@
       "misc": 1,
       "var-annotated": 1
     },
-    "tests/test_osquery_live_query_step.py": {
-      "func-returns-value": 2,
-      "misc": 2
-    },
     "tests/test_playbook_completion_rate.py": {
       "attr-defined": 15
     }
   },
   "services/api": {
+    "app/_vendor/action_contracts/capability_contracts.py": {
+      "attr-defined": 7
+    },
     "app/_vendor/ssrf_guard.py": {
       "attr-defined": 6,
       "union-attr": 1
@@ -468,21 +467,19 @@
     "app/connectors/ai_gateway.py": {
       "attr-defined": 1
     },
-    "app/connectors/aws_security_hub.py": {
-      "override": 1
-    },
     "app/connectors/email_inbox.py": {
       "union-attr": 4
-    },
-    "app/connectors/github.py": {
-      "override": 1
     },
     "app/connectors/oci.py": {
       "operator": 1,
       "union-attr": 7
     },
-    "app/connectors/okta.py": {
-      "override": 1
+    "app/connectors/posture/aws.py": {
+      "no-redef": 1
+    },
+    "app/security/ssrf_guard.py": {
+      "attr-defined": 6,
+      "union-attr": 1
     },
     "tests/test_pipeline_filter_rules.py": {
       "arg-type": 1

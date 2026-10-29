@@ -47,11 +47,11 @@ Events are normalised with `source: pagerduty`, `category: saas`.
 
 ## Severity mapping
 
-Vendor signals collapse to the AiSOC 4-tier ladder per the wave-1 PagerDuty rule:
+Vendor signals map into AiSOC's five-tier severity ladder:
 
 | Source | Vendor value | AiSOC severity |
 |---|---|---|
-| incident | priority name `P1` or `critical` | `high` |
+| incident | priority name `P1` or `critical` | `critical` |
 | incident | priority name `P2` or `error` | `medium` |
 | incident | priority name `P3` or `warning` / `warn` | `low` |
 | incident | priority name `P4` / `P5` / `info` | `low` / `info` |

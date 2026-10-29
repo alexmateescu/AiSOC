@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"strings"
 	"time"
 
 	"github.com/beenuar/aisoc/services/ingest/internal/config"
@@ -182,6 +183,99 @@ func (p *Publisher) Publish(ctx context.Context, event *normalizer.NormalizedEve
 }
 
 // PublishBatch sends multiple events in a single batch
+// partitionKey decides which partition an event lands on, and therefore
+// what fusion sees in order.
+//
+// Parity plan 6.9 / depth plan 4.4. The key used to be
+// `tenant:event_id`, which is unique per event — so every event hashed to
+// an arbitrary partition and nothing about one entity's events was
+// ordered relative to another's. Fusion correlates on
+// `{tenant}:{entity}:{tactic}` and the windowed engine stitches sequences
+// by event time, so two events about one host arriving on two partitions
+// and being consumed by two replicas is the case where a sequence is
+// stitched out of order or split across two incidents.
+//
+// The key is `tenant:entity`, where entity is resolved in the same
+// precedence the alert's own `correlation_key()` uses — source IP, then
+// hostname, then username, then domain. Partitions are ordered, so all of
+// one entity's events are ordered relative to each other; different
+// entities still spread across the cluster, so this is ordering without
+// serialising the topic.
+//
+// An event with no resolvable entity falls back to the event id. That
+// keeps the spread even for telemetry that names nobody, and such an
+// event has no sequence to be part of, so there is no ordering to lose.
+// Falling back to the tenant id instead would put every anonymous event
+// in one tenant onto one partition — a hot partition that is also the
+// least useful one.
+func partitionKey(event *normalizer.NormalizedEvent) []byte {
+	entity := primaryEntity(event)
+	if entity == "" {
+		return []byte(event.TenantID + ":" + event.ID)
+	}
+	return []byte(event.TenantID + ":" + entity)
+}
+
+// entityFieldOrder is the precedence fusion's own correlation key uses
+// (services/fusion/app/models/alert.py, `RawAlert.correlation_key`). Held
+// in the same order deliberately: a partition key that disagrees with the
+// correlation key routes an entity's events to a partition and then
+// correlates them under a different name, which spreads one incident
+// across replicas while looking correct from either end.
+var entityFieldOrder = []struct {
+	section string
+	field   string
+}{
+	{"src_endpoint", "ip"},
+	{"device", "hostname"},
+	{"device", "name"},
+	{"actor.user", "name"},
+	{"", "src_ip"},
+	{"", "hostname"},
+	{"", "host"},
+	{"", "user"},
+	{"", "username"},
+	{"", "domain"},
+}
+
+// primaryEntity pulls the entity out of the OCSF event, checking the
+// structured locations first and the flat connector fields after.
+func primaryEntity(event *normalizer.NormalizedEvent) string {
+	ocsf := event.OcsfEvent
+	if ocsf == nil {
+		return ""
+	}
+	for _, candidate := range entityFieldOrder {
+		var value string
+		if candidate.section == "" {
+			value = stringAt(ocsf, candidate.field)
+		} else {
+			value = stringAt(ocsf, strings.Split(candidate.section+"."+candidate.field, ".")...)
+		}
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+// stringAt walks a dotted path through nested maps and returns a non-empty
+// string leaf, or "".
+func stringAt(root map[string]interface{}, path ...string) string {
+	var cur interface{} = root
+	for _, key := range path {
+		m, ok := cur.(map[string]interface{})
+		if !ok {
+			return ""
+		}
+		cur = m[key]
+	}
+	if s, ok := cur.(string); ok {
+		return strings.TrimSpace(s)
+	}
+	return ""
+}
+
 func (p *Publisher) PublishBatch(ctx context.Context, events []*normalizer.NormalizedEvent) error {
 	if len(events) == 0 {
 		return nil
@@ -195,7 +289,7 @@ func (p *Publisher) PublishBatch(ctx context.Context, events []*normalizer.Norma
 			continue
 		}
 		msgs = append(msgs, kafka.Message{
-			Key:   []byte(event.TenantID + ":" + event.ID),
+			Key:   partitionKey(event),
 			Value: data,
 			Headers: []kafka.Header{
 				{Key: "tenant_id", Value: []byte(event.TenantID)},

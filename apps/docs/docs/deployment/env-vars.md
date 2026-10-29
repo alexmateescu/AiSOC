@@ -44,6 +44,9 @@ The API uses bare environment variable names (no prefix). Booleans accept `true`
 | `AISOC_APP_DB_PASSWORD` | _empty_ | Postgres **runtime** role (`aisoc_app`), DML only so the row-level-security policies apply to it. `make env` generates one. |
 | `REDIS_PASSWORD` | _empty_ | Redis AUTH password. `REDIS_URL` references it rather than repeating it, so rotating one rotates both. `make env` generates one. |
 | `CLICKHOUSE_PASSWORD` | _empty_ | ClickHouse event-lake password, referenced the same way by `CLICKHOUSE_URL`. `make env` generates one. |
+| `AISOC_SSRF_ALLOW_PRIVATE` | `false` | The API validates connector `base_url`s at create/update and webhook destinations at create, update and delivery through the SSRF guard. `true` re-admits RFC1918 / link-local destinations (never loopback, never cloud metadata) for on-prem systems. One `.env` value reaches `api`, `connectors` and `agents` in compose. |
+| `AISOC_SSRF_ALLOW_HOSTS` | — | Comma-separated **exact** hostnames the guard admits (no wildcards, no CIDR). Use it to permit one named internal SIEM or webhook without opening every private range. The cloud-metadata block list cannot be overridden by it. |
+| `AISOC_SSRF_EXTRA_BLOCKED_HOSTS` | — | Comma-separated extra hosts or IPs to deny on top of the built-in cloud-metadata block list. |
 
 :::info A published default cannot satisfy a production guard
 
@@ -274,6 +277,11 @@ Source: [`services/agents/app/`](https://github.com/beenuar/AiSOC/tree/main/serv
 | `OPENAI_API_KEY` | — | Provider key. With the bundled gateway running, the *gateway* uses this to reach the upstream model; AiSOC itself authenticates with `LITELLM_MASTER_KEY`. |
 | `LLM_GATEWAY_URL` | `http://litellm:4000/v1` (set by compose) | In-network URL of the bundled LiteLLM gateway. Both resolvers read it for any `aisoc-<role>` alias — an alias resolves nowhere else. A concrete `AISOC_MODEL_PIN_<ROLE>` is left pointing at its provider. |
 | `LITELLM_MASTER_KEY` | `sk-aisoc-local` in compose | Bearer AiSOC sends when it routes to the gateway itself. Resolved *with* the URL, so a provider key is never sent to the gateway (it rejects one). |
+| `AISOC_LITELLM_REQUEST_TIMEOUT` | `60` (seconds, set by compose) | How long the gateway waits on one generation before giving up. Raise it when the bundled local model is doing CPU-only inference and long generations are timing out; the Settings → Deployment & AI panel reports **Degraded** when recent calls are failing, which is the signal to turn this up. Compose must always pass a value — an unset variable resolves to `None` inside the gateway, which then serves `/health/liveliness` 200 while failing every completion. |
+| `AISOC_INVESTIGATION_MAX_SECONDS` | `120` | Wall-clock budget for one investigation, on **both** the auto-triage path and the console's manual "Investigate with agent". A run that exceeds it is closed as `failed` with the reason, in the run store and in the `investigation_runs` row. |
+| `AISOC_INVESTIGATION_STALE_AFTER_SECONDS` | `3 × AISOC_INVESTIGATION_MAX_SECONDS`, floor 300 | When a background sweep closes an `investigation_runs` row abandoned by a process that exited mid-run. Derived from the budget above so the two cannot disagree; set it only if you need a different margin. |
+| `AISOC_INVESTIGATION_REAP_INTERVAL_SECONDS` | `60` | How often that sweep runs. |
+| `AISOC_INVESTIGATION_REAPER_DISABLE` | unset (sweep on) | Set to `1` to turn the sweep off. Leaving it off means a run orphaned by a restart stays `running` in the ledger forever. |
 | `OPENAI_BASE_URL` / `LLM_BASE_URL` | — | Explicit override. Outranks `LLM_GATEWAY_URL` for every role; you own the key pairing when you set it. |
 | `AISOC_MODEL_PIN_<ROLE>` | `aisoc-<role>` | Per-role model. Set a concrete provider model to call a provider directly with no gateway. Roles: `triage`, `recon`, `investigation`, `copilot`, `summary`, `report`, `nl`. |
 | `OPENAI_MODEL` | `aisoc-summary` | BYOK / "explain this alert" path **only** — never a task role's model. Ships as an alias because the default deployment routes through the gateway, which 400s anything `infra/litellm/config.yaml` does not define. |
@@ -294,11 +302,36 @@ Source: [`services/agents/app/`](https://github.com/beenuar/AiSOC/tree/main/serv
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | — | OTLP collector endpoint |
 | `OTEL_EXPORTER` | `otlp` | One of `otlp`, `jaeger`, `console` |
 | `AISOC_SSRF_ALLOWED_SCHEMES` | `http,https` | Comma-separated list of URL schemes allowed for outbound `http_request` and `notify` playbook steps. Anything else is rejected. |
-| `AISOC_SSRF_ALLOW_PRIVATE` | `false` | When `true`, lets playbook steps reach loopback / RFC1918 / link-local destinations. Leave off in production; enable only for self-hosted webhooks on a private network. |
+| `AISOC_SSRF_ALLOW_PRIVATE` | `false` | When `true`, lets playbook steps reach RFC1918 / link-local destinations (never loopback, never cloud metadata). Leave off in production; enable only for self-hosted webhooks on a private network. Compose passes one `.env` value to every service that runs the guard — this one, `api` and `connectors` — so the three processes cannot disagree. |
+| `AISOC_SSRF_ALLOW_HOSTS` | — | Comma-separated **exact** hostnames to admit (no wildcards, no CIDR ranges). A named host skips the IP-range checks, so a single internal webhook or SIEM can be admitted without opening every private range. The cloud-metadata block list still applies — nothing can admit `169.254.169.254` or its siblings. |
 | `AISOC_SSRF_EXTRA_BLOCKED_HOSTS` | — | Comma-separated extra hosts or IPs to deny in addition to the built-in cloud-metadata block list (`169.254.169.254`, `metadata.google.internal`, …). |
 | `AISOC_SIEM_WRITEBACK_ENABLED` | `1` | Whether the triage worker asks the API to project a verdict onto the finding that raised the alert. Off means nothing is attempted. |
 | `AISOC_AGENTS_SERVICE_TOKEN` | — | Shared secret for the API's writeback route. **Unset disables the service path**, so the worker logs a warning and posts nothing rather than failing silently. |
 | `AISOC_SIEM_WRITEBACK_TIMEOUT_S` | `20` | Timeout for the writeback call. A timeout is a skipped writeback, never a failed triage. |
+
+---
+
+## Connectors service (`services/connectors`)
+
+Source: [`services/connectors/app/`](https://github.com/beenuar/AiSOC/tree/main/services/connectors/app)
+
+Every connector egress path — the stateless "Test connection" route, resource
+reads and scheduled polls — goes through the SSRF guard in this process
+(GHSA-cq4g-g6wp-4m2w), so a tenant-controlled `base_url` cannot reach cloud
+metadata, loopback or internal services. The guard reads the same variables
+in every service that runs it, and compose delivers them to `api`,
+`connectors` and `agents` from one `.env` value:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AISOC_SSRF_ALLOW_PRIVATE` | `false` | `true` re-admits connectors on RFC1918 / link-local ranges — the on-prem SIEM case. Never admits loopback or cloud metadata. |
+| `AISOC_SSRF_ALLOW_HOSTS` | — | Comma-separated **exact** hostnames to admit (no wildcards, no CIDR). A named host skips the IP-range checks; the cloud-metadata block list still applies and cannot be overridden. |
+| `AISOC_SSRF_EXTRA_BLOCKED_HOSTS` | — | Comma-separated extra hosts or IPs to deny on top of the built-in block list. |
+
+The service's port, auth and Kafka variables are set by compose and documented
+inline in `docker-compose.yml`; the connector-specific credentials (Splunk,
+CrowdStrike, …) are entered per connector instance in the console and stored
+vault-encrypted, not read from the environment.
 
 ---
 
