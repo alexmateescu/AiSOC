@@ -326,6 +326,39 @@ def _hold_severe_for_review_after_llm_failure(state: InvestigationState) -> Inve
     return state
 
 
+def _is_terminal_request_error(exc: BaseException) -> bool:
+    """True for deterministic 400-class provider rejections.
+
+    A request rejected as *invalid* (bad schema, oversized/context-exceeded
+    prompt, prefill-memory guard, content policy) is rejected because of the
+    request bytes themselves. Replaying identical bytes cannot change the
+    outcome, so retrying only spends queue slots and keeps the inference
+    machine pinned for every *other* alert. The right answer is to
+    dead-letter immediately and keep the stream moving.
+    """
+    err: BaseException | None = exc
+    seen = 0
+    while err is not None and seen < 10:
+        status = getattr(err, "status_code", None) or getattr(
+            getattr(err, "response", None), "status_code", None
+        )
+        if status == 400:
+            return True
+        if type(err).__name__ in {
+            "BadRequestError",
+            "InvalidRequestError",
+            "ContentPolicyViolationError",
+            "ContextOverflowError",
+        }:
+            return True
+        text = str(err).lower()
+        if "prefill memory guard" in text or "context_length_exceeded" in text:
+            return True
+        err = err.__cause__ or err.__context__
+        seen += 1
+    return False
+
+
 class FusedAlertTriageWorker:
     """Consumes ``aisoc.alerts.fused`` and auto-triages each alert (copilot)."""
 
@@ -505,6 +538,18 @@ class FusedAlertTriageWorker:
             except Exception as exc:  # noqa: BLE001 — retry, then dead-letter
                 stage = "triage"
                 last_error = str(exc)
+                if _is_terminal_request_error(exc):
+                    logger.error(
+                        "auto_triage_worker.triage_terminal_reject",
+                        attempt=attempt,
+                        error_type=type(exc).__name__,
+                        error=last_error[:500],
+                    )
+                    _METRICS["errors"] += 1
+                    await self._send_to_dlq(
+                        message, attempts=attempt, stage="triage-terminal", error=last_error
+                    )
+                    return False
                 logger.warning("auto_triage_worker.triage_retry", attempt=attempt, error=last_error)
             if attempt < self._max_attempts:
                 await asyncio.sleep(self._retry_backoff(attempt))
