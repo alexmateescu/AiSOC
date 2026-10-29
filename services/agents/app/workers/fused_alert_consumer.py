@@ -339,9 +339,7 @@ def _is_terminal_request_error(exc: BaseException) -> bool:
     err: BaseException | None = exc
     seen = 0
     while err is not None and seen < 10:
-        status = getattr(err, "status_code", None) or getattr(
-            getattr(err, "response", None), "status_code", None
-        )
+        status = getattr(err, "status_code", None) or getattr(getattr(err, "response", None), "status_code", None)
         if status == 400:
             return True
         if type(err).__name__ in {
@@ -546,9 +544,7 @@ class FusedAlertTriageWorker:
                         error=last_error[:500],
                     )
                     _METRICS["errors"] += 1
-                    await self._send_to_dlq(
-                        message, attempts=attempt, stage="triage-terminal", error=last_error
-                    )
+                    await self._send_to_dlq(message, attempts=attempt, stage="triage-terminal", error=last_error)
                     return False
                 logger.warning("auto_triage_worker.triage_retry", attempt=attempt, error=last_error)
             if attempt < self._max_attempts:

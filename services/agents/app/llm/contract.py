@@ -115,9 +115,7 @@ def _msg_bytes(msg: Any) -> int:
     if isinstance(content, str):
         return len(content.encode("utf-8"))
     if isinstance(content, list):
-        return sum(
-            len(str(p.get("text", "")).encode("utf-8")) for p in content if isinstance(p, dict)
-        )
+        return sum(len(str(p.get("text", "")).encode("utf-8")) for p in content if isinstance(p, dict))
     return 0
 
 
@@ -162,6 +160,7 @@ def _cap_prompt_bytes(messages: list[Any]) -> list[Any]:
             out[i] = out[i].model_copy(update={"content": clipped})
         except Exception:  # noqa: BLE001 — non-pydantic stand-in
             import copy as _copy
+
             clone = _copy.copy(out[i])
             clone.content = clipped
             out[i] = clone
