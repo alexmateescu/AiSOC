@@ -477,7 +477,19 @@ async def create_bundle(
 
 @router.get("/taxii/collections", response_model=TAXIICollectionListResponse)
 async def list_taxii_collections(user: AuthUser) -> TAXIICollectionListResponse:
-    """List TAXII 2.1 collections for server compatibility."""
+    """Demo-only sample of TAXII collection metadata.
+
+    This is **not** the TAXII server. It returns a fixed sample list and is
+    gated behind demo mode, and it predates the real implementation added
+    for depth item 4.2, which lives at ``/api/v1/taxii2/`` and serves
+    discovery, API root, collections, objects, manifest and ``added_after``
+    pagination over this tenant's own indicator store.
+
+    Kept rather than deleted because removing a published operation is a
+    breaking change to the committed OpenAPI document; said plainly here
+    because two surfaces both called "TAXII collections" is how a reader
+    concludes the product has two TAXII implementations.
+    """
     _demo_only()
     return TAXIICollectionListResponse(
         items=DEMO_TAXII_COLLECTIONS,

@@ -139,10 +139,35 @@ network round trips.
 The weekly job pushes its results into the same `eval-results` branch as the
 substrate run, so historical trend lines stay in one place.
 
-Cross-link: [`wet-eval.yml`](https://github.com/beenuar/AiSOC/blob/main/.github/workflows/wet-eval.yml)
-is added by **T5.5** in the v8.0 plan. Until that lands, the per-template
-latency / token / USD cells on the benchmark page are placeholders rather
-than imputed numbers.
+Two semantics of the live dispatch are load-bearing for reading any report it
+produces:
+
+- **One event loop per run.** Every incident is dispatched on the same asyncio
+  loop. The harness previously ran `asyncio.run` per incident, which left
+  langchain-openai's cached async HTTP client bound to a dead loop — so the
+  model call failed on every incident after the first and the agent silently
+  ran its deterministic heuristics while the run still reported itself live.
+  A report's `llm_calls_placed` is the check: it is published beside every
+  mean, and a run that placed no call at all is refused.
+- **Failures score 0, with reasons.** An incident whose investigation fails
+  outright (raises, or returns `status=failed`) participates in the mean as
+  **0**, with the reason recorded in the report's `groundedness.zero_scored`
+  block — so the sample size always equals the dispatched prefix. Dropping
+  failures is survivor bias: it inflates the mean and shrinks the sample
+  below the gate's own size requirement, which is exactly how the pre-fix
+  harness overstated itself.
+
+The groundedness floor asserted by
+[`live-agent-eval.yml`](https://github.com/beenuar/AiSOC/blob/main/.github/workflows/live-agent-eval.yml)
+is **0.40** over a deterministic 10-incident slice, enforced by
+`scripts/check_live_agent_floor.py` against the runs recorded in
+[`live_agent_floor.json`](https://github.com/beenuar/AiSOC/blob/main/services/agents/tests/eval_data/live_agent_floor.json)
+— derivation history included, pre-fix runs kept and labelled. The floor sits
+below the lowest fixed-harness run observed (0.44), and the margin is
+deliberately thin: one failed investigation costs the mean about 0.05 under
+zero-fill, so a model failing three or more of ten investigations reds the
+job, which is the signal that outcome should produce. The loader refuses a
+floor above its own recorded evidence.
 
 ## 4. Suites and what each one actually measures
 

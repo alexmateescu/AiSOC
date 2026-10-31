@@ -47,6 +47,16 @@ vi.mock('swr', () => ({
         mutate: vi.fn(async () => undefined),
       };
     }
+    if (Array.isArray(key) && key[0] === 'war-rooms') {
+      // Depth 9.4's panel reads a list; an empty one renders its empty state
+      // without the panel swallowing the case fetch below.
+      return {
+        data: [],
+        error: undefined,
+        isLoading: false,
+        mutate: vi.fn(async () => undefined),
+      };
+    }
     // Default: case workspace fetch.
     return {
       data: swrState.caseData,

@@ -75,17 +75,24 @@ def _shape(path: str) -> tuple[str, ...]:
     return tuple("{}" if s.startswith("{") and s.endswith("}") else s for s in path.split("/") if s)
 
 
-def _probe_url(path: str) -> str:
+def _probe_url(path: str, *, uuid_filler: bool = False) -> str:
     """A concrete URL for a published path, with parameters filled in.
 
-    The filler is alphanumeric, which satisfies every path convertor in this
-    tree including the one guarding ``{action}``.
+    Two fillers, because the published path cannot say which convertor guards
+    a parameter — OpenAPI strips the ``:uuid`` off ``{submission_id:uuid}``.
+    The alphanumeric filler satisfies the literal-excluding convertors such as
+    the one guarding ``{action}``; the UUID filler satisfies ``uuid``-typed
+    parameters (depth 7.1 introduced the tree's first). The caller probes with
+    the first and retries with the second before calling a route unreachable,
+    so a route no filler can reach is still reported.
     """
     counter = 0
 
     def fill(_: re.Match[str]) -> str:
         nonlocal counter
         counter += 1
+        if uuid_filler:
+            return f"00000000-0000-4000-8000-{counter:012d}"
         return f"aisocprobe{counter}"
 
     return _PARAM.sub(fill, path)
@@ -141,6 +148,11 @@ def unreachable_routes(app: FastAPI, *, minimum: int = MINIMUM_PUBLISHED_OPERATI
     for method, path in operations:
         response = client.request(method.upper(), _probe_url(path))
         matched = recorder.route
+        if matched is None and "{" in path:
+            # A uuid-convertor parameter rejects the alphanumeric filler
+            # before any route can match; retry with a well-formed UUID.
+            response = client.request(method.upper(), _probe_url(path, uuid_filler=True))
+            matched = recorder.route
         if matched is None:
             problems.append(f"{method.upper()} {path} is published but no route matched it (status {response.status_code})")
             continue

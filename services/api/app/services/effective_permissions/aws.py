@@ -10,7 +10,9 @@ The resolver consumes a *snapshot* JSON document of shape::
       "principals": [
         {"id": "...", "arn": "...", "type": "user|role",
          "groups": ["...", ...], "attached_policies": ["..."],
-         "inline_policies": ["..."]},
+         "inline_policies": ["..."],
+         # policy id, resolved in "policies" below like any other
+         "permissions_boundary": "p4"},
         ...
       ],
       "groups": [
@@ -30,7 +32,7 @@ The resolver consumes a *snapshot* JSON document of shape::
       "action_catalogue": {"s3": ["s3:GetObject", "s3:PutObject", ...], ...}
     }
 
-The model captures the four sources of allow/deny that govern an IAM call:
+The model captures the five sources of allow/deny that govern an IAM call:
 
 1. **Identity-based policies** attached to the user, the user's groups, or
    the role's inline policies. Any explicit ``Allow`` here is necessary
@@ -42,26 +44,50 @@ The model captures the four sources of allow/deny that govern an IAM call:
 3. **Service Control Policies (SCPs)** at the organisation level. They
    *cannot* grant — they only narrow. The resolver intersects the candidate
    action set with the union of SCP-allowed actions.
-4. **Explicit deny** anywhere — always wins.
+4. **Permissions boundaries** attached to the principal. A boundary is a
+   managed policy that *caps* what identity-based policies may grant: the
+   effective identity permission is the intersection of the two, and a
+   boundary never grants anything by itself.
+
+   The part that changes the answer on real estates, and is easy to get
+   wrong: a boundary does **not** cap a resource-based policy that names the
+   principal directly. A bucket policy granting this role ``s3:GetObject``
+   works whether or not the boundary mentions S3. Intersecting the whole
+   candidate set with the boundary would therefore *under*-report a real,
+   reachable permission — and under-reporting on a containment decision
+   reads as "this identity cannot touch the data" when it can.
+
+   A ``Deny`` written inside a boundary document is an ordinary explicit
+   deny and wins over everything, resource policies included.
+
+5. **Explicit deny** anywhere — always wins.
 
 For each ``(principal, resource)`` pair the algorithm is:
 
 * Collect all statements that match the principal + resource ARN (with
   wildcard expansion against the resource's ``service_actions`` catalogue).
 * Partition by effect into ``allow_actions`` and ``deny_actions``.
+* Cap the identity-derived allows by the permissions boundary, if any.
 * Compute the SCP-allowed action set (union over SCP allow statements that
   match the resource ARN).
-* The final ``actions`` = ``allow_actions − deny_actions ∩ scp_allowed``.
-* The ``deny_actions`` list returned to the UI is the intersection of
-  ``allow_actions`` and the deny set — i.e. the actions some upstream policy
-  *tried* to grant but a higher-priority policy blocked.
+* The final ``actions`` =
+  ``((identity_allow ∩ boundary) ∪ resource_allow) − deny_actions ∩ scp_allowed``.
+* The ``deny_actions`` list returned to the UI is every action some policy
+  *tried* to grant that something higher-priority removed — an explicit
+  deny, an SCP that excluded it, or a boundary that capped it away. A
+  boundary-capped action is reported even though it never entered the
+  candidate set, because the whole value of a boundary to a reviewer is
+  seeing what it stopped, and an action that silently never appears is
+  indistinguishable from one nobody ever granted.
 
-The full set of IAM features (NotAction, NotResource, condition operators
-beyond StringEquals/StringLike, session policies, permissions boundaries) is
-not modelled — those are flagged as ``notes`` on :class:`ResolverResult` so
-the UI can surface "this resolver doesn't yet model X" instead of silently
-returning a wrong answer. The synthesised simulator fixture exercises every
-feature the resolver does model so the test gate is meaningful.
+Still not modelled: ``NotAction``, ``NotResource``, condition operators
+beyond StringEquals/StringLike, and session policies. Those are flagged as
+``notes`` on :class:`ResolverResult` so the UI can surface "this resolver
+doesn't yet model X" instead of silently returning a wrong answer — as is a
+boundary that is attached to the principal but absent from the snapshot,
+which cannot be applied and would otherwise over-permit in exactly the case
+the boundary exists to prevent. The synthesised simulator fixture exercises
+every feature the resolver does model so the test gate is meaningful.
 """
 
 from __future__ import annotations
@@ -220,6 +246,17 @@ class AwsIamResolver(Resolver):
         identity_policy_refs = self._collect_identity_policies(principal, groups_by_id)
 
         notes: list[str] = []
+        boundary_id = principal.get("permissions_boundary")
+        if boundary_id and boundary_id not in policies_by_id:
+            # The principal is capped by a policy the snapshot does not
+            # contain, so the cap cannot be applied. Reporting the
+            # uncapped answer silently would over-permit in exactly the
+            # case the boundary exists to prevent.
+            notes.append(
+                f"permissions boundary {boundary_id!r} is attached to the principal but absent from "
+                f"the snapshot — the cap could not be applied and these actions may over-permit"
+            )
+
         decisions: list[ResolvedPermission] = []
         for resource in snap.get("resources", []):
             decision = self._resolve_resource(
@@ -232,9 +269,6 @@ class AwsIamResolver(Resolver):
             )
             if decision is not None:
                 decisions.append(decision)
-
-        if any(p.get("permissions_boundary") for p in [principal]):
-            notes.append("permissions-boundary present on principal — not modelled; deny-side may over-permit")
 
         return ResolverResult(
             provider=self.provider,
@@ -346,8 +380,69 @@ class AwsIamResolver(Resolver):
                         )
                     )
 
-        candidate_allow = identity_allow | resource_allow
-        candidate_deny = identity_deny | resource_deny
+        # Permissions boundary. A boundary is a managed policy attached to a
+        # principal that caps what its *identity* policies can grant: the
+        # effective identity permission is the intersection of the two, and a
+        # boundary never grants anything on its own.
+        #
+        # The exception is the part that is easy to get wrong and changes the
+        # answer on real estates: AWS does **not** apply the boundary to a
+        # resource-based policy that names the principal directly. A bucket
+        # policy granting this role `s3:GetObject` works whether or not the
+        # boundary mentions S3, so intersecting the whole candidate set with
+        # the boundary would under-report a real, reachable permission -- and
+        # under-reporting on a containment decision reads as "this identity
+        # cannot touch the data" when it can.
+        boundary_allowed: set[str] | None = None
+        # Kept separate from identity_deny and resource_deny rather than
+        # folded into either. Both of those flow into one `candidate_deny`
+        # union below, so adding a boundary deny to either would have the
+        # same effect and adding it to both is dead code that reads as
+        # though it covers two arms.
+        boundary_deny: set[str] = set()
+        boundary_allow: set[str] = set()
+        boundary_id = principal.get("permissions_boundary")
+        boundary = policies_by_id.get(boundary_id) if boundary_id else None
+        if boundary is not None:
+            boundary_allow, boundary_deny = self._evaluate_policy(
+                policy=boundary,
+                principal_arn=principal["arn"],
+                resource_arn=resource_arn,
+                context=context,
+                catalogue=service_catalogue,
+                principal_match_required=False,
+            )
+            boundary_allowed = boundary_allow
+
+        identity_capped = identity_allow
+        boundary_blocked: set[str] = set()
+        # Both, not just `boundary_allowed`. The two are equivalent by
+        # construction -- `boundary_allowed` is assigned only inside the
+        # `boundary is not None` branch above -- but that invariant lives
+        # fifteen lines away and nothing enforces it, so a later edit that
+        # assigns `boundary_allowed` anywhere else turns the `boundary.get`
+        # below into an AttributeError on a path an analyst reaches.
+        if boundary_allowed is not None and boundary is not None and boundary_id:
+            identity_capped = identity_allow & boundary_allowed
+            boundary_blocked = identity_allow - boundary_allowed
+            if boundary_allow or boundary_blocked:
+                chain.append(
+                    PolicyChainStep(
+                        kind="permissions-boundary",
+                        id=boundary_id,
+                        name=boundary.get("name", boundary_id),
+                        # A cap reads as a deny in the provenance pane,
+                        # because what an analyst needs to see is the hop
+                        # that removed an action somebody granted.
+                        effect="deny" if boundary_blocked else "allow",
+                    )
+                )
+
+        candidate_allow = identity_capped | resource_allow
+        # A Deny written inside a boundary document is an ordinary explicit
+        # deny, not a cap, so it joins the deny set and outranks the
+        # resource-policy arm as well as the identity arm.
+        candidate_deny = identity_deny | resource_deny | boundary_deny
 
         # Track the *pre-SCP* allow set so shadowed-denies surfaces actions
         # that some upstream policy tried to grant but were blocked at the
@@ -399,9 +494,15 @@ class AwsIamResolver(Resolver):
 
         final_actions = candidate_allow - candidate_deny
         # shadowed = (1) actions both sides tried to allow + an explicit deny
-        # blocked, OR (2) actions an identity/resource policy granted that
-        # the SCP excluded from the org allow-set.
-        shadowed_denies = (pre_scp_allow & candidate_deny) | scp_blocked
+        # blocked, (2) actions an identity/resource policy granted that
+        # the SCP excluded from the org allow-set, or (3) actions an identity
+        # policy granted that the permissions boundary caps away.
+        #
+        # (3) is reported even though the action never entered candidate_allow:
+        # the whole value of a boundary to a reviewer is seeing *what it
+        # stopped*, and an action that silently never appears is
+        # indistinguishable from one nobody ever granted.
+        shadowed_denies = (pre_scp_allow & candidate_deny) | scp_blocked | boundary_blocked
 
         if not final_actions and not shadowed_denies:
             return None

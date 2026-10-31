@@ -136,6 +136,9 @@ _PIP_INSTALL = re.compile(r"\b(?:pip3?|python3?(?:\.\d+)?\s+-m\s+pip)\s+install\
 #: test *name*, which this gate does not model — it is a filter a developer
 #: types, not a standing property of a workflow, and no workflow here uses it.
 #: ``-m`` is different and is captured below.
+#: A shell redirection: `>f`, `>>f`, `2>f`, `<f`, or the bare operator.
+_REDIRECT = re.compile(r"^(?:[0-9]*>>?|<|&>)")
+
 _OPTS_WITH_VALUE = frozenset({"-k", "-p", "-n", "--rootdir", "--cov", "--cov-config", "--cov-report", "--junitxml", "--tb", "-W"})
 
 
@@ -296,6 +299,16 @@ def _split_args(args: list[str]) -> tuple[list[str], list[str], str]:
             index += 1
         elif token.startswith("-"):
             pass
+        elif _REDIRECT.match(token):
+            # A redirection, not a path. `shlex` does not know shell syntax,
+            # so `-q \<newline>--junitxml=… >/dev/null` tokenised the target
+            # as a positional argument and the gate reported the step as
+            # naming `services/api/>/dev/null`, a path that is not in the
+            # tree — a real invocation failing a gate that had mis-read it.
+            # `>file` is one token, `> file` is two, so a bare operator also
+            # consumes the token after it.
+            if token in {">", ">>", "<", "2>", "2>>", "&>"} and index + 1 < len(args):
+                index += 1
         else:
             paths.append(token)
         index += 1
@@ -841,6 +854,27 @@ def self_test() -> int:
         ("-m is captured, not discarded", _split_args(["tests/", "-m", "not integration"]), (["tests/"], [], "not integration")),
         ("--cov=app is not a path", _split_args(["tests/", "--cov=app"]), (["tests/"], [], "")),
         ("a node id resolves to its file", _split_args(["tests/test_a.py::test_one"]), (["tests/test_a.py::test_one"], [], "")),
+        # Every redirection syntax, not just the one that prompted the fix.
+        # `shlex` tokenises shell syntax as ordinary words, so each of these
+        # was read as a positional argument and reported as an invocation
+        # naming a path that is not in the tree — the gate failing a real
+        # step it had mis-read. A reader that handled only `>/dev/null`
+        # would still mis-read the other six.
+        ("an attached redirection is not a path", _split_args(["tests/", ">/dev/null"]), (["tests/"], [], "")),
+        ("a detached redirection consumes its target", _split_args(["tests/", ">", "/dev/null"]), (["tests/"], [], "")),
+        ("an append redirection is not a path", _split_args(["tests/", ">>log.txt"]), (["tests/"], [], "")),
+        ("a numbered redirection is not a path", _split_args(["tests/", "2>/dev/null"]), (["tests/"], [], "")),
+        ("a descriptor dup is not a path", _split_args(["tests/", "2>&1"]), (["tests/"], [], "")),
+        ("an all-streams redirection is not a path", _split_args(["tests/", "&>/dev/null"]), (["tests/"], [], "")),
+        ("an input redirection consumes its source", _split_args(["tests/", "<", "in.txt"]), (["tests/"], [], "")),
+        # The other direction, which is what stops the clause above from
+        # being a hole: a path is still a path, and a second one after a
+        # redirection is still read.
+        (
+            "a real path after a redirection is still read",
+            _split_args(["tests/a", ">/dev/null", "tests/b"]),
+            (["tests/a", "tests/b"], [], ""),
+        ),
     ]
     for label, got, want in reader:
         correct = got == want

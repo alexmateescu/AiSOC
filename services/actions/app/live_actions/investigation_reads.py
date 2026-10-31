@@ -35,7 +35,9 @@ from app.clients.factories import (
     _cloudtrail_client,
     _cs_client,
     _entra_client,
+    _gmail_client,
     _gws_client,
+    _m365_mail_client,
     _mde_client,
     _okta_client,
     _s1_client,
@@ -844,3 +846,142 @@ class DefenderUnisolateHost(LiveActionExecutor):
                 "Defender release failed",
                 error=f"Defender release failed: {exc}",
             )
+
+
+# ─── Depth 7.1: find a reported message across mailboxes ────────────────────
+#
+# `search_mailboxes` is the read every mailbox-remediation verb depends on: a
+# purge takes a per-mailbox message id, and only a search maps one internet
+# message id onto the mailboxes holding a copy. It lives here rather than
+# beside the state-changing arms in `builtins.py` because it is a read, and
+# because reads are what this module is.
+#
+# It is gated by the same feature flag as the purge. A read of somebody's
+# mailbox is not a neutral act, and a deployment that has not enabled mailbox
+# remediation has not consented to AiSOC enumerating its mail either.
+
+
+def _mailbox_feature_enabled() -> bool:
+    # Imported at call time rather than at module scope: `get_settings` is
+    # `lru_cache`d and reading it at import would freeze the value before a
+    # test or an entrypoint has had a chance to set the environment.
+    from app.core.config import get_settings
+
+    return bool(get_settings().AISOC_FEATURE_MAILBOX_REMEDIATION)
+
+
+def _mailbox_disabled(executor: LiveActionExecutor, request: LiveActionRequest) -> LiveActionResult:
+    from app.executors.mailbox import DISABLED_REASON
+
+    return _result(
+        executor,
+        request,
+        LiveActionStatus.FAILED,
+        "mailbox search not attempted",
+        details={"executed": False},
+        error=DISABLED_REASON,
+    )
+
+
+@apply_contract
+class M365SearchMailboxes(LiveActionExecutor):
+    vendor_id = "m365"
+    capability = "search_mailboxes"
+    description = "Find copies of a reported message in a Microsoft 365 mailbox."
+    requires_credentials = True
+
+    async def execute(self, request: LiveActionRequest) -> LiveActionResult:
+        params: dict[str, Any] = request.params or {}
+        target = str(request.target or "")
+        if not _mailbox_feature_enabled():
+            return _mailbox_disabled(self, request)
+        if request.dry_run:
+            return _preview(self, request, target, "Microsoft 365")
+
+        client = _m365_mail_client(params)
+        if client is None:
+            return _missing_credentials(self, request, "Microsoft 365")
+        try:
+            matches = await client.search_messages(
+                target,
+                internet_message_id=str(params.get("internet_message_id") or ""),
+                sender=str(params.get("sender") or ""),
+                subject=str(params.get("subject") or ""),
+                received_after=str(params.get("received_after") or ""),
+                limit=int(params.get("limit") or 25),
+            )
+        except ValueError as exc:
+            return _result(self, request, LiveActionStatus.FAILED, "Microsoft 365 search refused", error=str(exc))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("search_mailboxes.failed", vendor="m365", error=str(exc))
+            return _result(
+                self,
+                request,
+                LiveActionStatus.FAILED,
+                "Microsoft 365 mailbox search failed",
+                error=f"Microsoft 365 mailbox search failed: {exc}",
+            )
+        return _result(
+            self,
+            request,
+            LiveActionStatus.SUCCEEDED,
+            f"{len(matches)} matching message(s) in {target}",
+            details={"executed": True, "mailbox": target, "matches": matches, "match_count": len(matches)},
+        )
+
+
+@apply_contract
+class GmailSearchMailboxes(LiveActionExecutor):
+    vendor_id = "google_workspace"
+    capability = "search_mailboxes"
+    description = "Find copies of a reported message in a Gmail mailbox."
+    requires_credentials = True
+
+    async def execute(self, request: LiveActionRequest) -> LiveActionResult:
+        params: dict[str, Any] = request.params or {}
+        target = str(request.target or "")
+        if not _mailbox_feature_enabled():
+            return _mailbox_disabled(self, request)
+        if request.dry_run:
+            return _preview(self, request, target, "Google Workspace")
+
+        client = _gmail_client(params)
+        if client is None:
+            return _missing_credentials(self, request, "Google Workspace")
+        try:
+            matches = await client.search_messages(
+                target,
+                internet_message_id=str(params.get("internet_message_id") or ""),
+                sender=str(params.get("sender") or ""),
+                limit=int(params.get("limit") or 25),
+            )
+            if params.get("hydrate", True):
+                # Gmail's list endpoint answers `{id, threadId}` and nothing
+                # else, while Graph's answers a full message resource. A
+                # verb that returns an opaque id on one vendor and a
+                # readable message on the other is one capability with two
+                # meanings, and the caller ends up writing the vendor check
+                # the registry exists to remove. Headers only, never bodies.
+                matches = [await client.get_message(target, str(m.get("id") or "")) for m in matches if m.get("id")]
+        except ValueError as exc:
+            # The Gmail query sanitiser refuses rather than escapes, and a
+            # refusal is a failure rather than an empty result: an escaped
+            # value that reaches the API and matches nothing reports a clean
+            # mailbox from a search that never ran.
+            return _result(self, request, LiveActionStatus.FAILED, "Gmail search refused the query", error=str(exc))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("search_mailboxes.failed", vendor="google_workspace", error=str(exc))
+            return _result(
+                self,
+                request,
+                LiveActionStatus.FAILED,
+                "Gmail mailbox search failed",
+                error=f"Gmail mailbox search failed: {exc}",
+            )
+        return _result(
+            self,
+            request,
+            LiveActionStatus.SUCCEEDED,
+            f"{len(matches)} matching message(s) in {target}",
+            details={"executed": True, "mailbox": target, "matches": matches, "match_count": len(matches)},
+        )

@@ -35,6 +35,7 @@ KNOWN_CAPABILITIES: frozenset[str] = frozenset(
         "pull_file",
         "pull_logs",
         "pull_pcap",
+        "pull_vulnerabilities",
         # QUERY
         "query_logs",
         "query_processes",
@@ -89,6 +90,13 @@ KNOWN_CAPABILITIES: frozenset[str] = frozenset(
         # or a principal, so neither fits the three verbs above.
         "lookup_cloud_audit",
         "lookup_endpoint_telemetry",
+        # Depth 5.1. A distributed osquery query across a fleet. Distinct
+        # from `query_processes`, which names one table; this runs one of a
+        # closed set of allowlisted templates and the caller never supplies
+        # SQL. It was a playbook step type that could not run anywhere: the
+        # engine imported the three clients from this service, which that
+        # image does not contain.
+        "osquery_live_query",
         "suspend_session",
         "sync_detection_rule",
         # The return leg of a two-way SIEM integration: AiSOC's verdict
@@ -109,6 +117,16 @@ KNOWN_CAPABILITIES: frozenset[str] = frozenset(
         # its honest result ("prompt delivered, nobody has answered") had no
         # LiveActionStatus to land in.
         "chatops_verify",
+        # MAILBOX. Reported-phish remediation across the recipients of one
+        # message. `purge_email` is a soft delete on both vendors and
+        # `restore_email` is its declared reverse, because the rollback for
+        # the most disruptive verb in the product must resolve to a real
+        # executor rather than to nothing.
+        "block_sender",
+        "purge_email",
+        "restore_email",
+        "search_mailboxes",
+        "unblock_sender",
         # TICKET
         "push_case",
         "push_status",

@@ -60,6 +60,26 @@ class ActionsSettings(BaseSettings):
         description="Master toggle for the Slack/Teams interactive user-verification action.",
     )
 
+    # Depth 7.1 — mailbox remediation (search / purge / restore / sender
+    # block) across the recipients of a reported phishing message.
+    #
+    # **Off by default, unlike every flag above it.** A capability that
+    # reaches out of the platform and removes somebody's mail is not one an
+    # upgrade should silently acquire: an operator who upgrades AiSOC has
+    # consented to a new version, not to the platform being able to delete
+    # from every mailbox in their tenant. Turning it on is a deliberate act,
+    # and the arms say exactly that when it is off rather than simulating a
+    # purge — a dry run reporting a send or a purge that never happened is
+    # the defect that shipped in NotifySlackExecutor.
+    AISOC_FEATURE_MAILBOX_REMEDIATION: bool = Field(
+        default=False,
+        description=(
+            "Master toggle for mailbox remediation (search_mailboxes, purge_email, "
+            "restore_email, block_sender, unblock_sender). Off by default: enabling it "
+            "grants AiSOC the ability to remove mail from the tenant's mailboxes."
+        ),
+    )
+
     AISOC_CHATOPS_RESPONSE_SECRET: str = Field(
         default="",
         description=("HMAC secret used to sign ChatOps response tokens so we can verify a callback genuinely came from a message we sent."),

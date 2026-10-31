@@ -21,6 +21,7 @@ import process from "node:process";
 
 import { type ParsedArgs, parseArgs, packageVersion, resolveConfig, makeLogger } from "./config.js";
 import { runDoctor, printDoctorReport } from "./doctor.js";
+import { runHttpServer } from "./http.js";
 import { runServer } from "./server.js";
 import {
   install,
@@ -70,6 +71,16 @@ async function main(): Promise<void> {
 async function cmdServe(args: ParsedArgs): Promise<void> {
   const cfg = resolveConfig(args);
   const log = makeLogger(cfg);
+  // Depth 9.1. `--http` (or AISOC_MCP_HTTP=1) serves streamable HTTP instead
+  // of stdio. Opt-in rather than inferred from the environment: an MCP host
+  // launching this binary as a child process must keep getting stdio, and a
+  // transport that switched itself based on a variable being set somewhere
+  // would be a very hard failure to read from inside Claude Desktop.
+  const wantHttp = args.flags.http === true || args.flags.http === "1" || process.env.AISOC_MCP_HTTP === "1";
+  if (wantHttp) {
+    await runHttpServer(cfg, log);
+    return;
+  }
   // No banner on stdout — that channel is reserved for JSON-RPC frames.
   // `runServer` logs its lifecycle to stderr.
   await runServer(cfg, log);
@@ -110,7 +121,7 @@ async function cmdInstall(args: ParsedArgs): Promise<void> {
         "  --host continue  Continue.dev",
         "  --host cody      Sourcegraph Cody (prints snippet)",
         "",
-        "  --aisoc-url <url>          AiSOC API base URL (default http://localhost:8081)",
+        "  --aisoc-url <url>          AiSOC API base URL (default http://localhost:8000)",
         "  --api-key <token>          API key to embed (or set AISOC_API_KEY)",
         "  --launcher <auto|node|npx> How the host should start the server. Default auto:",
         "                             `node <abs path>` from a monorepo build, `npx` from",
@@ -200,10 +211,17 @@ function printHelp(): void {
       "",
       "Common options:",
       "  --aisoc-url <url>      Base URL of the AiSOC API. Env: AISOC_URL.",
-      "                         Default: http://localhost:8081",
+      "                         Default: http://localhost:8000",
       "  --api-key <token>      API key (aisoc_… or JWT). Env: AISOC_API_KEY.",
       "  --timeout <ms>         Per-request timeout. Env: AISOC_TIMEOUT_MS. Default 20000.",
       "  --verbose              Log lifecycle events to stderr.",
+      "",
+      "Serve options:",
+      "  --http                 Serve streamable HTTP instead of stdio. Env: AISOC_MCP_HTTP=1.",
+      "                         Each request authenticates with its own bearer credential;",
+      "                         --api-key is not consulted and the tenant comes from the",
+      "                         credential. Host/port: AISOC_MCP_HTTP_HOST (127.0.0.1),",
+      "                         AISOC_MCP_HTTP_PORT (8096). Endpoint: /mcp, liveness /healthz.",
       "",
       "Install options:",
       "  --host <h>             claude | cursor | continue | cody",

@@ -8,7 +8,7 @@ Validates all YAML detection rules under ``detections/`` for:
   - Required fields (``id``, ``name``, ``severity``, ``detection``)
   - Severity is one of: ``low | medium | high | critical``
   - Category is one of:
-    ``network | endpoint | cloud | identity | application | data-exfil``
+    ``network | endpoint | cloud | identity | application | data-exfil | threat-anomaly``
   - No duplicate ``id`` values across all tiers
   - ``id`` prefix matches the rule's tier (``det-`` for native,
     ``<source>-...`` for imported tiers)
@@ -21,7 +21,7 @@ Validates all YAML detection rules under ``detections/`` for:
 Tiering
 -------
 * **native** — ``detections/{network,endpoint,cloud,identity,application,
-  data-exfil}/*.yaml``. Strict: fixtures + provenance optional.
+  data-exfil,threat-anomaly}/*.yaml``. Strict: fixtures + provenance optional.
 * **imported** — ``detections/{sigma,car,splunk,chronicle}-imports/<category>
   /*.yaml`` (and ``.../_quarantine/<category>/*.yaml`` for rules that
   parsed but cannot run as-is). Provenance required, fixtures optional.
@@ -85,6 +85,11 @@ VALID_CATEGORIES = {
     "identity",
     "application",
     "data-exfil",
+    # Depth 3.4: rules whose clauses read the behavioural-baseline fields the
+    # fusion enrichment computes (rarity, peer deviation, volume). Built
+    # through the same generator as every other native rule, with the same
+    # det- ids and paired fixtures, so the native contract applies unchanged.
+    "threat-anomaly",
 }
 
 REQUIRED_FIELDS = ["id", "name", "severity", "detection"]

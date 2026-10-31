@@ -25,10 +25,12 @@ from typing import Any
 OPERATORS: list[tuple[str, str, str]] = sorted(
     [
         ("_pattern_match_any", "pattern_match_any", "PATTERN_MATCH_ANY"),
+        ("_not_startswith_any", "not_startswith_any", "NOT STARTSWITH_ANY"),
         ("_not_endswith_any", "not_endswith_any", "NOT ENDSWITH_ANY"),
         ("_not_contains_any", "not_contains_any", "NOT CONTAINS_ANY"),
         ("_pattern_match", "pattern_match", "PATTERN_MATCH"),
         ("_not_startswith", "not_startswith", "NOT STARTSWITH"),
+        ("_not_endswith", "not_endswith", "NOT ENDSWITH"),
         ("_startswith_any", "startswith_any", "STARTSWITH_ANY"),
         ("_endswith_any", "endswith_any", "ENDSWITH_ANY"),
         ("_contains_any", "contains_any", "CONTAINS_ANY"),
@@ -144,32 +146,43 @@ def _check(field: str, op: str, expected: Any, event: dict[str, Any]) -> bool:
                     return True
         return False
 
+    # Prefix/suffix/substring operators fold case. The namespaces they are
+    # used on — Windows paths and process names, DNS labels, registry keys —
+    # are themselves case-insensitive, so a case-sensitive comparison is a
+    # rename away from being evaded: `PROCDUMP.EXE` ran the same binary that
+    # `procdump.exe` did and must not read as a different one. `contains_any`,
+    # `contains_all`, `has_any`, `match` and `pattern_match` already folded,
+    # so these were also the odd half of a split the rule author could not see.
+    # Equality and set membership (`eq`, `in`, `not_in`) stay exact: they carry
+    # enum and identifier values where case is meaning, not spelling.
     if op == "endswith":
-        return isinstance(actual, str) and actual.endswith(str(expected))
+        return isinstance(actual, str) and actual.lower().endswith(str(expected).lower())
 
     if op == "endswith_any":
         if not isinstance(expected, list) or not isinstance(actual, str):
             return False
-        return any(actual.endswith(str(s)) for s in expected)
+        haystack = actual.lower()
+        return any(haystack.endswith(str(s).lower()) for s in expected)
 
     if op == "startswith":
-        return isinstance(actual, str) and actual.startswith(str(expected))
+        return isinstance(actual, str) and actual.lower().startswith(str(expected).lower())
 
     if op == "startswith_any":
         if not isinstance(expected, list) or not isinstance(actual, str):
             return False
-        return any(actual.startswith(str(s)) for s in expected)
+        haystack = actual.lower()
+        return any(haystack.startswith(str(s).lower()) for s in expected)
 
     if op == "not_startswith":
         if not isinstance(actual, str):
             return False
-        return not actual.startswith(str(expected))
+        return not actual.lower().startswith(str(expected).lower())
 
     if op == "contains":
         if isinstance(actual, list):
-            return expected in actual
+            return _to_lc_str(expected) in {_to_lc_str(x) for x in actual}
         if isinstance(actual, str):
-            return str(expected) in actual
+            return str(expected).lower() in actual.lower()
         return False
 
     if op == "has_any":
@@ -197,7 +210,28 @@ def _check(field: str, op: str, expected: Any, event: dict[str, Any]) -> bool:
     if op == "not_endswith_any":
         if not isinstance(expected, list) or not isinstance(actual, str):
             return False
-        return not any(actual.endswith(str(s)) for s in expected)
+        haystack = actual.lower()
+        return not any(haystack.endswith(str(s).lower()) for s in expected)
+
+    # Three shipped rules used `not_startswith_any` and it had never been an
+    # operator, so `path_not_startswith_any` was read as a field name. The
+    # reachability gate hid that by stripping a suffix the matcher did not
+    # know, so all three were reported reachable and could not fire.
+    #
+    # A missing field returns False, exactly as the negations beside it do: a
+    # negation that flips to True on an absent field fires on every event
+    # that happens not to carry it, which is the failure already recorded for
+    # the Sigma import.
+    if op == "not_startswith_any":
+        if not isinstance(expected, list) or not isinstance(actual, str):
+            return False
+        haystack = actual.lower()
+        return not any(haystack.startswith(str(s).lower()) for s in expected)
+
+    if op == "not_endswith":
+        if not isinstance(actual, str):
+            return False
+        return not actual.lower().endswith(str(expected).lower())
 
     if op == "not_contains_any":
         if not isinstance(expected, list):

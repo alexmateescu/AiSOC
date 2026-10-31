@@ -1,8 +1,10 @@
 # AiSOC maintenance docs — Oct 2026 live session
 
-Working documentation for the deployment on `10.200.0.69`
-(`/home/ubuntu/AiSOC`, compose project `aisoc`), covering the Oct 2026
-diagnose-and-fix session. Code fixes: branch
+Working documentation from the Oct 2026 diagnose-and-fix session, carried
+out against a self-hosted deployment (compose project `aisoc`, repo at
+`$AISOC_ROOT`). The host address and path are deliberately not recorded:
+they were one contributor's, and naming them made a general runbook read
+as if it only applied there. Code fixes: branch
 `fix/aisoc-live-session-2026-10` on https://github.com/alexmateescu/AiSOC.
 
 | File | Purpose |

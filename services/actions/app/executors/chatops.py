@@ -41,6 +41,7 @@ from app.core.config import get_settings
 from app.executors.base import BaseExecutor
 from app.models.action import ActionRequest, ActionResult, ActionStatus, BlastRadius
 from app.security.chatops_token import ChatOpsTokenError, mint_token
+from app.services.branding_lookup import product_name_for_tenant
 from app.services.chatops_prompt import (
     ChatOpsButton,
     ChatOpsPromptError,
@@ -90,6 +91,10 @@ class ChatOpsVerifyExecutor(BaseExecutor):
             )
 
         params: dict[str, Any] = request.parameters or {}
+        # Resolved once, before the question is built: the default question
+        # names the product too, so resolving it only at delivery would brand
+        # the card's title and leave the sentence inside it unbranded.
+        product_name = await product_name_for_tenant(request.tenant_id)
         transport = str(params.get("transport", "slack")).lower()
         webhook_url = params.get("webhook_url") or ""
         bot_token = params.get("bot_token") or None
@@ -97,7 +102,7 @@ class ChatOpsVerifyExecutor(BaseExecutor):
         question = str(
             params.get(
                 "question",
-                f"AiSOC needs to confirm activity on your account ({request.target}).",
+                f"{product_name} needs to confirm activity on your account ({request.target}).",
             )
         )
         context = str(
@@ -165,6 +170,7 @@ class ChatOpsVerifyExecutor(BaseExecutor):
                     buttons=buttons,
                     bot_token=bot_token,
                     channel=channel,
+                    product_name=product_name,
                 )
             else:
                 delivery = await send_teams_prompt(
@@ -172,6 +178,7 @@ class ChatOpsVerifyExecutor(BaseExecutor):
                     question=question,
                     context=context,
                     buttons=buttons,
+                    product_name=product_name,
                 )
         except ChatOpsPromptError as exc:
             logger.warning(

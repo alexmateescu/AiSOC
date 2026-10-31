@@ -113,6 +113,35 @@ def test_partial_rows_are_not_counted_as_gated(tree: Path) -> None:
     assert (gated, partial) == (2, 1)
 
 
+def test_a_status_word_in_the_notes_does_not_change_the_count(tree: Path) -> None:
+    """A GATED row may say the word PARTIAL in its Notes and still be GATED.
+
+    The count used to come from scanning the whole line for `NO GATE`, then
+    `PARTIAL`, then `GATED`, so the first row that recorded *why* it had been
+    PARTIAL -- which is exactly what a row is supposed to say when a gate is
+    built and the status earned -- was counted as PARTIAL. The summary its
+    author had correctly recomputed with `check_claim_gate_matrix.py` then
+    read as stale, and the cheap fix would have been to delete the history.
+    """
+    matrix = MATRIX.replace(
+        "| two | README | ci.yml | GATED | - |",
+        "| two | README | ci.yml | GATED | this row was PARTIAL until the containerised leg was observed to pass; NO GATE before that |",
+    )
+    (tree / "docs" / "audit" / "CLAIM_TO_GATE_MATRIX.md").write_text(matrix)
+    gates = _load_gates(tree)
+    assert gates._matrix_counts() == (2, 1)
+    assert gates._matrix_row_total() == 3
+
+
+def test_a_matrix_without_a_status_column_is_refused(tree: Path) -> None:
+    """Unreadable is not the same as clean, and must not count as either."""
+    (tree / "docs" / "audit" / "CLAIM_TO_GATE_MATRIX.md").write_text(
+        "# matrix\n\n| claim | source | gate | gap |\n|---|---|---|---|\n| one | README | ci.yml | - |\n"
+    )
+    with pytest.raises(ValueError, match="no Status column"):
+        _load_gates(tree)._matrix_counts()
+
+
 def test_missing_sources_do_not_crash_the_gate(tmp_path: Path) -> None:
     """A partial checkout should skip these checks, not raise."""
     (tmp_path / "README.md").write_text("833 executable. 2 GATED / 1 PARTIAL.\n")

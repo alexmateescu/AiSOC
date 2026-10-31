@@ -97,10 +97,12 @@ being true.
 |--------|--------------|
 | `enrich` | Calls the enrichment service for IOC reputation, geo, ASN, GreyNoise, VT, OTX. |
 | `investigate` | Triggers the AI investigator agent with focus areas (`forensics`, `lateral_movement`, etc.). |
-| `notify` | Sends a webhook notification. SSRF-guarded. |
-| `http` | Generic outbound HTTP request — `method`, `url`, `body`, `headers`. SSRF-guarded. |
+| `http` | Calls one path on an integration this tenant has configured — see [Integration references](#integration-references). SSRF-guarded, and **off by default**. |
 | `close_case` | Marks the AiSOC case as closed via the API service. |
 | `condition` | Pure branching node. Evaluates `condition` and routes to `next_true` / `next_false`. |
+| `wait` | Hold for a timer or a callback — see [Control flow](#control-flow). |
+| `parallel` | Run the child steps concurrently, then join. |
+| `loop` | Run the child steps once per item in a list from the run context, bounded. |
 | `osquery_live_query` | Distributed osquery via osctrl / FleetDM / aisoc-direct, against an allow-listed template. |
 
 **Governed** — the step is dispatched to the action registry in the actions
@@ -110,13 +112,70 @@ tenant's autonomy policy before anything reaches a vendor:
 `block_ip`, `block_ioc`, `isolate_host`, `kill_process`, `quarantine_file`,
 `run_av_scan`, `run_script`, `disable_user`, `reset_password`,
 `revoke_session`, `force_mfa`, `search_siem`, `create_notable_event`,
-`create_ticket`.
+`create_ticket`, `notify`, `osquery_live_query`.
+
+`notify` delivers to the tenant's configured Slack, Teams, email or PagerDuty
+destination; the channel comes from the destination, not from the step, so a
+credential and a transport cannot disagree. `osquery_live_query` runs an
+allow-listed template across an osctrl, FleetDM or aisoc-direct fleet — the
+caller passes a template id and parameters, never SQL.
 
 Each step is dispatched **individually**. Approving or running a playbook does
 not authorise whatever its steps happen to contain: the contract is applied
 per verb, per step, at the moment that step runs. See
 [Live actions](./live-actions.md) for what each verb declares about its impact,
 reversibility, approval requirement and verification probe.
+
+### Control flow
+
+A playbook could branch and it could not wait, fan out or repeat, so
+"contain, then re-check in five minutes" had to be hand-unrolled into a fixed
+chain of steps. `wait`, `parallel` and `loop` close that, and each carries a
+ceiling rather than trusting the author:
+
+| Step | Shape | Bound |
+|------|-------|-------|
+| `wait` | `{"until": "timer", "seconds": 300}` or `{"until": "callback"}` | Up to 60s runs in place; longer suspends the run to Postgres and a sweeper resumes it. A callback resumes through `POST /api/v1/playbook-waits/{token}/resume`. Maximum 7 days. |
+| `parallel` | `steps: [...]`, `{"join": "all"}` or `{"join": "any"}` | At most 20 branches. Each branch gets its own copy of the run context, so two branches cannot overwrite each other and leave whichever finished last to win. |
+| `loop` | `{"over": "sessions"}` with `steps: [...]` | At most 100 iterations, 25 by default. Each iteration binds `item` and `index`. |
+
+Three refusals worth knowing, because a control-flow step that quietly does
+less than it says is worse than one that is absent:
+
+- an empty `parallel` or `loop` **fails**, rather than reporting a success
+  for work it did not do;
+- a `loop` that hits its ceiling **says so**, rather than truncating —
+  stopping at 25 of 300 sessions leaves 275 live and a clean-looking record;
+- a `wait` whose pause cannot be written **fails**, because continuing past
+  it would run the steps the wait exists to delay.
+
+Every step execution carries an **idempotency key** derived from the run, the
+step and the position it was reached at, so the third loop iteration is
+distinguishable from the fourth and a resumed run reproduces the keys its
+first attempt used. It is a name, not a distributed deduplication store.
+### Integration references
+
+An `http` step addresses its target by **name**, never by host:
+
+```json
+{ "url": "${IDP_BASE_URL}/users/{{alert.user}}/sessions", "headers_env": "IDP_BEARER_HEADERS" }
+```
+
+`${NAME}` resolves against the tenant's playbook references — a base URL, a
+set of bearer headers, a Slack or Teams incoming webhook, a PagerDuty routing
+key or an SMTP relay. `{{dot.path}}` resolves against the run context.
+
+This is the security property rather than a formatting convention. A pack is
+shared content: a literal host in one is either somebody else's tenant or an
+invitation to point a playbook wherever its author likes. With a name, an
+author chooses which of *this* tenant's integrations to call and which path
+under it, and cannot choose the origin. The resolved URL still goes through
+the SSRF guard, because the stored value is tenant data and therefore as
+untrusted as the step that asked for it.
+
+Secrets live in the credential vault and the run record holds header *names*,
+never values. A reference is **disabled when created**, so importing a pack
+cannot start paging an on-call rota.
 
 What comes back is a report whose `executed` field is the single thing that
 means a vendor was actually touched:
@@ -144,8 +203,9 @@ allows, and can never allow one it refuses. `AISOC_AGENTS_SERVICE_TOKEN` must
 also be set, or the agents service cannot reach the API's service path and the
 step fails closed saying so.
 
-**No handler** — `approval` is the one step type the engine accepts and cannot
-run. It fails closed with a reason; see
+**Every declared step type has a handler.** `approval` was once the exception
+— the engine had no pause and no resume, so the step failed closed and twelve
+shipped playbooks aborted on it. It is a durable pause now; see
 [Approvals and dry-runs](#approvals-and-dry-runs) below.
 
 Common step fields:
@@ -223,29 +283,33 @@ step whose type has no handler is reported as
 `unimplemented: true, would_fail: true`, so a preview tells you which steps a
 real run would stop on.
 
-**An `approval` step is not implemented, and is no longer the mechanism.**
-The engine is a single pass with no pause or resume, so there is nothing to
-suspend and nothing to wake. It fails closed with a reason rather than
-pretending, which halts the run under the default `on_failure: abort`.
+**An `approval` step is a durable pause.** The run suspends to Postgres
+(`services/agents/app/playbook/pause.py`), survives a restart of the agents
+service, resumes from the step *after* the approval once it is decided, and
+expires with a recorded outcome rather than hanging. A `wait` step uses the
+same mechanism: a short timer sleeps in place, anything longer becomes a
+durable pause.
 
-You usually do not need one. Every response step is graded against its own
+You often do not need one. Every response step is graded against its own
 capability contract at dispatch and comes back `pending_approval` on its own
 when a human is required — `isolate_host`, for instance, declares
 `approval: analyst`, which no autonomy tier or confidence level lifts. An
-`approval` step in front of it would gate a decision that is already gated.
+`approval` step in front of it gates a decision that is already gated. That is
+a reason to leave it out of a playbook, not a reason the engine refuses it.
 
-Where you want an action to actually wait for a named approver, submit it to
-the actions service (`POST /actions`), which holds it at `awaiting_approval`
-and records the deciding principal. That path is real and audited.
+Where you want an action held for a *named* approver with the deciding
+principal recorded, submit it to the actions service (`POST /actions`), which
+holds it at `awaiting_approval`.
 
-This section previously described a second supported pattern: model the gate
-as a `condition` step backed by a field an operator sets via
-`POST /v1/playbook-runs/{id}/approve`, and "the engine pauses on the condition
-until the field flips, then resumes". No such endpoint exists, and the engine
-has no pause or resume — the loop evaluates each condition once against the
-run context and moves on. Worse, until recently an `approval` step reported
-`SUCCESS` without doing anything, so a playbook that modelled a gate ran
-straight through it into whatever it was gating.
+Two things this section said before, both now wrong, kept because knowing
+which way a doc was wrong is worth more than a clean page. It said the step
+"is not implemented … the engine is a single pass with no pause or resume" —
+true when written, false since the pause landed. Before *that* it described
+modelling the gate as a `condition` step flipped by
+`POST /v1/playbook-runs/{id}/approve`; no such endpoint has ever existed, and
+an `approval` step used to report `SUCCESS` without doing anything, so a
+playbook that modelled a gate ran straight through it into whatever it was
+gating.
 
 ## Realtime events
 

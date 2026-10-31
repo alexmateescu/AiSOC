@@ -96,7 +96,10 @@ CREATE TABLE IF NOT EXISTS aisoc_org_branding (
     -- inbox.
     support_url   TEXT        CHECK (support_url IS NULL OR support_url ~ '^https://'),
 
-    -- The display name on outbound mail and ChatOps messages.
+    -- The display name on outbound mail: email approvals and the covering
+    -- mail on a scheduled report. Not ChatOps -- the prompt is posted by
+    -- `services/actions` and the two bot services, none of which can reach
+    -- this table. See "What is not branded" in the white-label doc.
     sender_name   TEXT        CHECK (sender_name IS NULL OR length(sender_name) BETWEEN 1 AND 80),
     footer_text   TEXT        CHECK (footer_text IS NULL OR length(footer_text) <= 300),
 

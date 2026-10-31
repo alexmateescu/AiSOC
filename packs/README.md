@@ -57,6 +57,7 @@ Use `GET /api/v1/osquery/packs/{pack_id}/render?format=osctrl|fleetdm|osquery-js
 | `aisoc-attck-persistence` | Cron, systemd, launchd, Run key persistence | linux, darwin | T1547, T1543 |
 | `aisoc-attck-defense-evasion` | Disabled services, cleared logs | linux, darwin | T1562, T1070 |
 | `aisoc-inventory-baseline` | OS/kernel/package inventory (info) | linux, darwin, windows | — |
+| `aisoc-ai-estate` | Coding agents, MCP servers and their client configs, AI IDE extensions, provider key files | linux, darwin, windows | T1059, T1176, T1552.001 |
 
 ## Contributing
 

@@ -197,6 +197,19 @@ class FusedAlert(BaseModel):
     # lazily compute it on first read in that case.
     narrative: str | None = None
 
+    # Depth plan 2.4 — which session this alert came out of, and how strongly
+    # that grouping is known. `session_key_kind` travels beside the id rather
+    # than being looked up because it changes what the console is allowed to
+    # say: "17 other events in this session" means the vendor grouped them for
+    # three of the four kinds and means we did for `derived`.
+    #
+    # All three are None on a vendor-asserted finding, which arrives on the
+    # alerts topic rather than as a normalized event and genuinely has no
+    # session. None renders as no session context, never as a session of one.
+    session_id: UUID | None = None
+    session_key_kind: str | None = None
+    originating_human: str | None = None
+
     fused_at: datetime = Field(default_factory=datetime.utcnow)
 
 

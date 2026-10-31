@@ -29,7 +29,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v6
         with:
           node-version: '22'
           cache: pnpm
@@ -57,7 +57,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v6
         with:
           node-version: '22'
           cache: pnpm
@@ -72,7 +72,7 @@ jobs:
       - run: pnpm test:cov
       # Upload the coverage report so the marketing site's eval-page
       # widget (Phase 4.3) can grab a fresh value on every main push.
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
           name: web-vitest-coverage
@@ -92,7 +92,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v6
         with:
           node-version: '22'
           cache: pnpm
@@ -120,14 +120,14 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v6
         with:
           node-version: '22'
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
       - run: pnpm build-storybook
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: storybook-static
           path: apps/web/storybook-static
@@ -147,7 +147,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v6
         with:
           node-version: '22'
           cache: pnpm
@@ -183,7 +183,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v6
         with:
           node-version: '22'
           cache: pnpm
@@ -363,6 +363,17 @@ jobs:
         run: python scripts/check_one_permission_model.py --self-test
       - name: Verify the database is authoritative for permissions
         run: python scripts/check_one_permission_model.py
+      # `alerts.status` reaches 'resolved' from one statement, and for a while
+      # two callers reached it while only one asked permission: the
+      # outcome-memory suppression branch closed alerts having consulted no
+      # policy, no grant and no kill switch. The wiring test that was supposed
+      # to cover this asserted one substring against one function, so it could
+      # not see the path nobody remembered. This holds the property the
+      # chokepoint rests on — one closure statement, in one module, gated.
+      - name: Closure authorization chokepoint — self-test
+        run: python scripts/check_closure_authorization.py --self-test
+      - name: Verify every automatic closure passes the authorization chokepoint
+        run: python scripts/check_closure_authorization.py
       # Thirteen Kafka clients across Python, Go and TypeScript, and not one
       # passed a security protocol — so every one took the library default,
       # which is PLAINTEXT in all three. The spine carries raw event bodies,
@@ -537,6 +548,17 @@ jobs:
       # something executes that the other half would have refused.
       - name: Verify vendored autonomy evidence rules are in sync
         run: python scripts/sync_vendored_autonomy_evidence.py --check
+      # Issue #1243. The seventh mirror, and the one with a worked example of
+      # the failure attached. The console's autonomy page has to say whether a
+      # response verb runs unattended; it used to answer from a confidence
+      # threshold no dispatch path reads, and announced "Autopilot — 7
+      # high-blast actions auto-execute" on a stock install whose dispatcher
+      # queues every one of them. It now calls the same `evaluate_contract`
+      # the dispatcher calls. These three modules are what that function
+      # needs, and a settings page is the worse half to be wrong in: nothing
+      # executes there, so nothing contradicts it.
+      - name: Verify vendored action contracts are in sync
+        run: python scripts/sync_vendored_action_contracts.py --check
       # Phase 1.1 — the registry at
       # `services/connectors/app/connectors/__init__.py` is the single source
       # of truth for the "N connectors" claim. The check verifies that:
@@ -649,6 +671,210 @@ jobs:
         run: python3 scripts/check_connector_profiles.py --self-test
       - name: Connector profile drift gate
         run: python3 scripts/check_connector_profiles.py
+      # The lake's TTL is written into the table and ClickHouse enforces it
+      # during merges, with no reference to any per-tenant setting — so a
+      # tenant who chose 400 days lost every event at day 90, with nothing
+      # erroring and the console still showing 400. This holds the table
+      # TTL, the tiering DELETE and the per-tenant ceiling to one number,
+      # requires an existing deployment to be migrated onto it (001_init.sql
+      # runs only on a fresh volume), and requires the purge worker to read
+      # the holds in force and report what they withheld. Self-test first:
+      # one injected violation per rule, on the same tree.
+      - name: Retention window gate — self-test
+        run: python3 scripts/check_retention_window.py --self-test
+      - name: Retention window gate
+        run: python3 scripts/check_retention_window.py
+      # The syslog listener is the one input path an appliance can reach on
+      # its own: every other push route needs something in front of it that
+      # already speaks HTTP. This asserts it parses all four wire formats,
+      # is started by the service rather than merely compiled, is named by
+      # /readyz, takes its tenant from a minted token and from nothing a
+      # sender controls, and projects through templates that ship and can
+      # be minted. Self-test first, on the same tree: it injects one
+      # violation per rule — including each of the three Go syntaxes a
+      # tenant could leak through, because the first version of this gate
+      # knew only one of them and a runtime negative control walked past it.
+      - name: Syslog listener gate — self-test
+        run: python3 scripts/check_syslog_listener.py --self-test
+      - name: Syslog listener gate
+        run: python3 scripts/check_syslog_listener.py
+      # Asking a person whether they recognise their own activity is a
+      # workflow, not a message, and every property that makes it one can be
+      # removed without a test failing — the prompt would still arrive and
+      # the run would quietly stop branching. This asserts the answer is
+      # signed and bound to its stage, that an unanswered prompt escalates
+      # to a manager and then ends with a `timed_out` outcome, that a
+      # confirmed true positive is never asked and that the refusal is
+      # checked before the opt-in, and that the opt-in table has a writer —
+      # a control that fails closed with no way to switch it on is a feature
+      # that reads as broken. Self-test first, on the same tree: eleven
+      # injected violations, one per rule.
+      - name: Stateful verification gate — self-test
+        run: python3 scripts/check_stateful_verification.py --self-test
+      - name: Stateful verification gate
+        run: python3 scripts/check_stateful_verification.py
+      # Every connector above reads an API that answers a time window, so the
+      # window bounds what a poll can return. The three cloud-native
+      # collection paths do not: an SQS queue after an outage, a Pub/Sub
+      # subscription with seven days of retention and a capture container
+      # each hold as much as the estate produced in that time. This asserts
+      # all three exist, resume from a cursor, declare a bounded per-poll
+      # budget that says where the remainder goes, and ship vendor-shaped
+      # fixtures, a setup guide and a marketplace manifest. Parsed with ast,
+      # so it needs no service venv. Self-test first, on the same tree: it
+      # injects one violation per rule and requires each to be caught.
+      - name: Cloud-native collection gate — self-test
+        run: python3 scripts/check_cloud_native_collection.py --self-test
+      - name: Cloud-native collection gate
+        run: python3 scripts/check_cloud_native_collection.py
+      # Depth 9.1. Moving the MCP server off stdio and onto HTTP changes who
+      # is allowed to decide what: the credential arrives per request and
+      # several tenants share one process. This asserts the properties that
+      # makes safe — a transport exists, it never falls back to the
+      # process-wide API key, every call is authorized by the API before
+      # dispatch and reported after, a non-read-only tool cannot run on a
+      # bearer token alone, the API's tool catalogue matches the TypeScript
+      # registry name for name and flag for flag, and something deploys it.
+      # Self-test first, on the same tree: one injected violation per rule.
+      - name: MCP over HTTP gate — self-test
+        run: python3 scripts/check_mcp_over_http.py --self-test
+      - name: MCP over HTTP gate
+        run: python3 scripts/check_mcp_over_http.py
+      # Depth 9.6. Voice input transcribes on the device and sends text, and
+      # "no audio leaves the device" is a claim a comment cannot carry. This
+      # refuses any capture API or binary request body under
+      # apps/mobile/src. Also wired into mobile.yml, which only runs when
+      # that app changes — here it is unconditional, because a claim this
+      # strong should not be graded by a path filter.
+      - name: No audio egress gate — self-test
+        run: python3 scripts/check_no_audio_egress.py --self-test
+      - name: No audio egress gate
+        run: python3 scripts/check_no_audio_egress.py
+      # Depth 9.2. The probe set behind the recall measurement has to stay
+      # usable: every probe must name an item that is in the corpus, the
+      # probes must stay low-overlap with their answers (a probe written in
+      # the document's own words hands the lexical baseline a score it could
+      # not earn on a real question), and the baseline must still be a real
+      # retriever rather than a stub. The scorer itself runs too: with no
+      # embedding backend on a runner it prints "not measured" and exits 0,
+      # which is the honest row and also proves the refusal path works.
+      - name: Memory recall scorer — self-test
+        run: python3 scripts/score_memory_recall.py --self-test
+      - name: Memory recall scorer
+        run: python3 scripts/score_memory_recall.py
+
+      # Depth 6.1. The AI estate is a stored value a console page reads, and
+      # the failure that costs most here is not an absent feature but a
+      # present one nothing writes: the page renders "no AI estate" to a
+      # tenant that has one, which is the single most dangerous false
+      # statement it could make. The WRITER rule is therefore the
+      # load-bearing one — it requires the fusion consumer to call the
+      # recorder on the raw-events branch *and* the service to construct it
+      # at startup, because an unconstructed recorder is a None that every
+      # call site skips in silence.
+      - name: AI asset inventory gate — self-test
+        run: python3 scripts/check_ai_asset_inventory.py --self-test
+      - name: AI asset inventory gate
+        run: python3 scripts/check_ai_asset_inventory.py
+      # Depth 6.2. The endpoint half, and the rule that carries it is
+      # NAMESPACE: the four endpoint connectors put their process fields in
+      # the connector payload under `raw_data`, and the canonical OCSF
+      # profile maps none of them — so a classifier reading `process.name`
+      # finds None on every real source while its unit tests pass against
+      # events built in the shape it expects.
+      - name: AI endpoint discovery gate — self-test
+        run: python3 scripts/check_ai_endpoint_discovery.py --self-test
+      - name: AI endpoint discovery gate
+        run: python3 scripts/check_ai_endpoint_discovery.py
+      # The three standard inputs the syslog gate does not cover: OTLP
+      # logs, a customer Kafka topic and a TAXII 2.1 server. All three are
+      # things a third party points at, and all three fail the same three
+      # ways — unwired, tenant taken from the payload, and (for the Kafka
+      # consumer) a loop that cannot tell a permanent fault from a
+      # transient one. Self-test first, on the same tree: it injects
+      # nineteen violations, one per rule. Writing it found two real
+      # defects — the OTLP template was not in ALLOWED_TEMPLATE_IDS, so no
+      # operator could mint a token the receiver would accept, and the
+      # media-type rule matched the error message that names JSON rather
+      # than the case arm that accepts it.
+      - name: Standard inputs gate — self-test
+        run: python3 scripts/check_standard_inputs.py --self-test
+      - name: Standard inputs gate
+        run: python3 scripts/check_standard_inputs.py
+      # Three descriptions of one platform that can drift apart
+      # silently: the Helm chart against CORE in docker-compose.yml,
+      # restore.sh against backup.sh, and the connector scheduler
+      # against its own lease. Each was wrong in a way nothing could
+      # see — `helm install` brought up a deployment missing response
+      # execution and every connector poll and reported success, and
+      # two scheduler replicas each polled every vendor. Self-test
+      # first, on the same tree: nine injected violations, one per rule.
+      - name: Deployment completeness gate — self-test
+        # The gate parses the chart and the compose file, so it is the first
+        # step in this job that needs a YAML parser; the runner's Python does
+        # not ship one, and the install two steps down arrived too late for
+        # this gate — which only surfaced once the step before it stopped
+        # failing first.
+        run: |
+          python3 -m pip install --quiet pyyaml
+          python3 scripts/check_deployment_completeness.py --self-test
+      - name: Deployment completeness gate
+        run: python3 scripts/check_deployment_completeness.py
+      # Depth 9.2. The probe set behind the recall measurement has to stay
+      # usable: every probe must name an item that is in the corpus, the
+      # probes must stay low-overlap with their answers (a probe written in
+      # the document's own words hands the lexical baseline a score it could
+      # not earn on a real question), and the baseline must still be a real
+      # retriever rather than a stub. The scorer itself runs too: with no
+      # embedding backend on a runner it prints "not measured" and exits 0,
+      # which is the honest row and also proves the refusal path works.
+      - name: Memory recall scorer — self-test
+        run: python3 scripts/score_memory_recall.py --self-test
+      - name: Memory recall scorer
+        run: python3 scripts/score_memory_recall.py
+      # One layer in from the name: the profile gate asks whether a connector
+      # reaches a normalization path, this asks which OCSF class it reaches
+      # when it gets there. The class uid divided by a thousand is the
+      # category, and fusion promotes category 2 unconditionally — so 78 of
+      # the 84 connectors landing on the 2001 default meant every permitted
+      # DNS lookup and every routine Windows event became an alert.
+      - name: OCSF class coverage gate — self-test
+        run: python3 scripts/check_ocsf_class_coverage.py --self-test
+      - name: OCSF class coverage gate
+        run: python3 scripts/check_ocsf_class_coverage.py --check
+      # One layer in again: a connector's events reach a profile, and the
+      # catalogue says what each of its event types *means*. Grown from the
+      # fixtures, so adding a fixture that carries a new event type fails
+      # here until somebody decides what it is — a catalogue that only grows
+      # when someone remembers is a catalogue that stops growing. It also
+      # refuses a source whose fixtures yield nothing, because a gate over an
+      # empty corpus passes for the wrong reason.
+      - name: Event catalogue gate — self-test
+        run: |
+          python3 -m pip install --quiet pyyaml
+          python3 scripts/check_event_catalog.py --self-test
+      - name: Event catalogue gate
+        run: python3 scripts/check_event_catalog.py
+      # The activity projection lives in five hand-written lists: the Go, the
+      # lake's CREATE TABLE, the lake's migration, the fusion writer's column
+      # tuple and the graph schema. Three of the disagreements between them
+      # are silent, and the one nothing checked is the pair of lake files —
+      # 001_init.sql runs only in the container entrypoint on a fresh volume,
+      # so a column added there alone exists on new installs and on no
+      # upgrade.
+      - name: Activity projection drift gate — self-test
+        run: python3 scripts/check_activity_projection.py --self-test
+      - name: Activity projection drift gate
+        run: python3 scripts/check_activity_projection.py
+      # ADR-0010 accepted writing sessions to Postgres *and* to the graph on
+      # the stated condition that one producer derives the key and the other
+      # three only read it. A second deriver would agree today and disagree
+      # after the next vendor-schema change, and the symptom is a session
+      # count that drifts rather than anything failing.
+      - name: Session projection gate — self-test
+        run: python3 scripts/check_session_projection.py --self-test
+      - name: Session projection gate
+        run: python3 scripts/check_session_projection.py
       # The same shape one layer over: an inbox template that ships has to be
       # mintable, and a mintable id has to have a template to apply. Both
       # directions, because only one of them was ever checked informally and
@@ -817,6 +1043,18 @@ jobs:
         run: |
           python -m pip install --quiet pyyaml
           python scripts/check_fidelity_datasets.py
+      # Every other labelled set in services/agents/tests/eval_data/ is
+      # malicious by construction, so an agent answering "true positive" to
+      # everything without reading anything would score perfectly on them.
+      # The verdict corpus is the one the scorer accepts, and the property
+      # that makes it worth anything — no class above 60%, so no constant
+      # answer scores above 60% — is not visible in the file. Six malicious
+      # items added because malicious items are the interesting ones to write
+      # would take it past the line with nothing looking wrong.
+      - name: The verdict corpus stays balanced, paired and licensed
+        run: |
+          python3 scripts/check_verdict_corpus.py --self-test
+          python3 scripts/check_verdict_corpus.py
       - name: SLO alerts match the declared objectives
         run: |
           python -m pip install --quiet pyyaml
@@ -858,6 +1096,17 @@ jobs:
         run: |
           python3 scripts/sync_vendored_playbook_packs.py --self-test
           python3 scripts/sync_vendored_playbook_packs.py --check
+      # The same defect, one service over. The fusion engine loads 2,614
+      # detection rules from four artefacts and the console's rule-management
+      # surface could see none of them (#1273), because the API image is built
+      # from `services/api` and `services/fusion/app/data/` is outside that
+      # context. Packaged copies live inside it; this holds them identical to
+      # what the engine runs, in both directions, so the catalogue can never
+      # list a rule the engine does not load.
+      - name: The API image ships the compiled detection corpus
+        run: |
+          python3 scripts/sync_packaged_detection_rulesets.py --self-test
+          python3 scripts/sync_packaged_detection_rulesets.py --check
       - name: Every Stable capability has earned the label
         run: |
           python3 scripts/check_maturity_table.py --self-test
@@ -1710,7 +1959,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v6
         with:
           node-version: '22'
           cache: pnpm
@@ -1754,7 +2003,7 @@ jobs:
         working-directory: services/realtime
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v6
         with:
           node-version: '22'
           cache: npm
@@ -1984,6 +2233,18 @@ jobs:
             cat injection_eval.md
           } >> "${GITHUB_STEP_SUMMARY}"
 
+      # Depth 1.6. The published verdict-quality table is generated from the
+      # committed scorecard, so a number edited into the page by hand, or a
+      # scorecard refreshed without regenerating the page, reds this step.
+      #
+      # It also refuses a scorecard that could put a score-shaped cell where
+      # no measurement exists -- most importantly a row claiming a live
+      # measurement that placed zero model calls, which is exactly what a run
+      # against a dead endpoint produces once triage falls through to its
+      # deterministic scorer.
+      - name: Verdict quality (published table matches the committed scorecard)
+        run: python3 scripts/check_verdict_quality.py --check
+
       - name: Post job summary
         if: always()
         run: |
@@ -2007,7 +2268,7 @@ jobs:
           PY
       - name: Upload eval report
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: aisoc-eval-report
           path: eval_report.json

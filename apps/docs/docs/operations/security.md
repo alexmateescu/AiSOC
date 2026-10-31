@@ -15,7 +15,7 @@ The companion page [Credentials & secrets](./credentials) covers connector-crede
 | Control | Mechanism | Scope |
 |---|---|---|
 | **User auth** | Local password (bcrypt), OIDC, SAML 2.0, JWT access + refresh tokens | All web/API traffic |
-| **MFA** | WebAuthn / passkeys (Responder PWA), TOTP for analyst accounts | Per-user |
+| **MFA** | WebAuthn / passkeys (Responder PWA), TOTP with recovery codes (console) | Per-user; enforcement is per-tenant |
 | **API auth** | Scoped API keys (`aisoc_<48-hex>`, SHA-256 stored), JWT bearer tokens | Programmatic clients |
 | **Authorization** | Role-Based Access Control (8 built-in roles, fine-grained permissions) | Every endpoint |
 | **Tenant isolation** | Postgres Row-Level Security with `app.current_tenant_id` session variable | Every tenant-partitioned table |
@@ -80,12 +80,20 @@ RLS apply identically however a user signed in.
 Two MFA paths are available:
 
 - **WebAuthn / passkeys** — implemented in [`services/api/app/api/v1/endpoints/passkeys.py`](https://github.com/beenuar/AiSOC/blob/main/services/api/app/api/v1/endpoints/passkeys.py). Required for the [Responder PWA](../intro) (`/responder/*` route). Passkey-only login means there is no password fallback for on-call responders — you authenticate with the device, biometric, or hardware key the user registered.
-- **TOTP**, with backup codes and per-role enforcement, is **planned and not
-  implemented**. No TOTP enrolment, verification or backup-code path exists in
-  the tree. Restored by parity 4.2.
+- **TOTP with recovery codes** — implemented in
+  [`services/api/app/api/v1/endpoints/mfa.py`](https://github.com/beenuar/AiSOC/blob/main/services/api/app/api/v1/endpoints/mfa.py)
+  over RFC 6238, with the standard's own published vectors as the test
+  fixtures. Enrol at **Settings → Two-factor auth**; a correct password for an
+  enrolled account answers **202** with a short-lived `mfa_token` instead of a
+  session. The secret is vault-encrypted and recovery codes are stored as
+  SHA-256 hashes. See [Two-factor authentication](./console-mfa.md).
 
-Passkeys are enforced for the Responder PWA. **Per-role MFA enforcement for the
-console is not implemented**; it arrives with parity 4.2.
+Passkeys are enforced for the Responder PWA. Console TOTP is enforced
+**per tenant** — `PUT /api/v1/auth/mfa/policy` with `{"require_totp": true}`,
+which challenges unenrolled members to enrol at next sign-in rather than
+locking them out. **Per-role enforcement does not exist**: the policy is one
+boolean per tenant, so a tenant cannot require a second factor of its
+administrators alone.
 
 ### API keys
 
@@ -571,19 +579,35 @@ The important security properties:
 - **Per-service credential posture.** The `api`, `agents`, `connectors`, and `realtime` services run with credentials enabled because the browser console sends a session cookie. The `ueba`, `honeytokens`, and `purple-team` services run with `allow_credentials=false` and are safe with wildcard origins even in production. The Go services (`ingest`, `enrichment`) are token-authenticated per request and also run without credentials.
 - **No per-service drift.** Adding a new console subdomain means setting `AISOC_CORS_ORIGINS` once at the deployment layer — no code change in any service.
 
-## Playbook outbound traffic — SSRF guard
+## Outbound traffic — SSRF guard
 
-Playbook `http_request` and `notify` steps run inside the agents service and can reach arbitrary URLs supplied by playbook authors. To keep this from being abused as a metadata-service or internal-network pivot, every outbound URL is validated by the SSRF guard before any socket is opened:
+Three services open sockets to URLs that a tenant, a playbook author or a
+webhook configuration supplies, and all three validate every such URL through
+the same SSRF guard before any socket is opened:
+
+- **Agents** — playbook `http_request` and `notify` steps (`services/agents/app/playbook/ssrf_guard.py`; both `_handle_http` and `_handle_notify` call it first).
+- **Connectors** — every connector egress path: the stateless "Test connection" route, resource reads and scheduled polls (GHSA-cq4g-g6wp-4m2w). A tenant-controlled `base_url` cannot reach cloud metadata, loopback or internal services.
+- **API** — connector `base_url`s at create/update, before they are encrypted and stored, and outbound webhook destinations at create, update and delivery time (GHSA-898c-wxrw-hx6c).
+
+What the guard enforces:
 
 - Only `http://` and `https://` are allowed by default (override with `AISOC_SSRF_ALLOWED_SCHEMES` if you genuinely need `https` only or an additional scheme).
 - URLs that embed credentials (`https://user:pass@host`) are rejected outright.
 - The hostname is resolved through `socket.getaddrinfo`; every resolved IP must be a global-unicast address. Loopback (`127.0.0.0/8`, `::1`), RFC1918 ranges, link-local, multicast, and the IETF reserved blocks are blocked.
-- Cloud metadata endpoints — `169.254.169.254`, `fd00:ec2::254`, `metadata.google.internal`, `metadata.azure.com`, `metadata`, `metadata.aws` — are blocked even if `AISOC_SSRF_ALLOW_PRIVATE=true`.
+- Cloud metadata endpoints — `169.254.169.254`, `fd00:ec2::254`, `metadata.google.internal`, `metadata.azure.com`, `metadata`, `metadata.aws` — are blocked **unconditionally**: no relax knob admits them.
 - Operators can extend the deny list with `AISOC_SSRF_EXTRA_BLOCKED_HOSTS=internal-only.example.com,10.0.0.5`.
 
-If a playbook needs to reach a private webhook (Slack on a private network, an internal Jira, etc.), set `AISOC_SSRF_ALLOW_PRIVATE=true` **only** on the agents service and keep network-level egress controls in place. The metadata block list always applies.
+Two relax knobs exist for legitimate private infrastructure, and compose
+delivers both to all three guard-running services from one `.env` value so
+the processes cannot disagree about what an operator admitted:
 
-The guard is a single chokepoint at `services/agents/app/playbook/ssrf_guard.py`; both `_handle_http` and `_handle_notify` call it before the HTTP client makes any request. New action handlers that perform outbound HTTP should call `validate_outbound_url` first.
+- `AISOC_SSRF_ALLOW_PRIVATE=true` re-admits RFC1918 / link-local destinations — the on-prem SIEM or private-webhook case. It never admits loopback and never admits cloud metadata.
+- `AISOC_SSRF_ALLOW_HOSTS=splunk.corp.internal,jira.corp.internal` admits **exact** hostnames (no wildcards, no CIDR ranges). A named host skips the IP-range checks, so one internal system can be permitted without opening every private range. The metadata block list still applies.
+
+Keep network-level egress controls in place regardless; the guard is
+defence-in-depth, not a replacement for them. New action handlers or service
+code that performs outbound HTTP to configurable destinations should call
+`validate_outbound_url` first.
 
 ## Hardening checklist
 
@@ -660,9 +684,11 @@ GitHub CodeQL (`.github/workflows/codeql.yml`) analyses `javascript-typescript`,
 `scripts/check_codeql_alerts.py --self-test` injects an alert at each severity plus every shape of vacuous pass — no analysis, a dropped language, a frozen analysis, mixed `codeql-action` pins, a PR-only trigger — and requires the gate to catch each one. CI runs that self-test immediately before the gate itself, on the same tree.
 
 :::warning This invariant was stated for four months before anything enforced it
-This section used to read "the Python alert count on `main` is zero, and we treat that as a CI gate — a new alert breaks the security workflow". No mechanism existed. `codeql.yml` uploads SARIF, and `github/codeql-action/analyze` does not fail a build on findings; `main` has no branch protection, so "Code scanning results" was not a required check either; and `security.yml`'s only hard job is the claim-to-gate matrix. Nothing in the repository queried the code-scanning API.
+This section used to read "the Python alert count on `main` is zero, and we treat that as a CI gate — a new alert breaks the security workflow". No mechanism existed. `codeql.yml` uploads SARIF, and `github/codeql-action/analyze` does not fail a build on findings; `main` **was unprotected at the time**, so "Code scanning results" was not a required check either; and `security.yml`'s only hard job is the claim-to-gate matrix. Nothing in the repository queried the code-scanning API. (`main` is branch-protected now — a pull request plus a set of required status checks — so read that clause as the state then, not now. Count the contexts with `gh api repos/beenuar/AiSOC/branches/main/protection/required_status_checks/contexts` rather than quoting a number here, because the set moves.)
 
-It was found the way these things are always found: two alerts — [#893](https://github.com/beenuar/AiSOC/security/code-scanning/893) (`py/unused-global-variable`) and [#896](https://github.com/beenuar/AiSOC/security/code-scanning/896) (`py/print-during-import`), both `note` — sat open on `main` while this page said the count was zero. The scan itself was healthy and current; the enforcement was imaginary. The sentence above now describes a job that exists, and the gate's self-test is what keeps it that way.
+It was found the way these things are always found: two `note` alerts — **#893** (`py/unused-global-variable`) and **#896** (`py/print-during-import`) — sat open on `main` while this page said the count was zero. The scan itself was healthy and current; the enforcement was imaginary. The sentence above now describes a job that exists, and the gate's self-test is what keeps it that way.
+
+The alert numbers are given without links on purpose: a code-scanning alert page needs write access on the repository, so a link to one answers **404** for an ordinary reader of this page. With that access they are at `/security/code-scanning/893` and `/896`; both now read `fixed`.
 :::
 
 Two patterns are worth documenting because they came up repeatedly during the sweep that drove the alert count to zero:
@@ -671,6 +697,47 @@ Two patterns are worth documenting because they came up repeatedly during the sw
 - **`py/import-and-import-from` — pick one import style per module.** Tests that need to monkey-patch a module-level constant should use `pytest.MonkeyPatch.setattr(module, "_NAME", value)` (importing the module via the standard `from app.connectors.foo import _NAME` form), not `import app.connectors.foo as foo_module` _and_ a from-import for the same names. The dual style trips CodeQL's import-redundancy check.
 
 The remaining alert categories (`py/uninitialized-local-variable`, `py/side-effect-in-assert`, `py/incomplete-url-substring-sanitization`, `py/ineffectual-statement`, `py/unnecessary-lambda`, `py/mixed-returns`, `py/unused-global-variable`, `py/unused-import`) are all standard Python correctness items and the fixes were uncontroversial — see the `[Unreleased]` section of the [CHANGELOG](https://github.com/beenuar/AiSOC/blob/main/CHANGELOG.md) for the per-PR breakdown.
+
+## Static analysis (semgrep) — vendored rule packs
+
+Semgrep runs in `security.yml` as a **ratcheted, deliberately non-required**
+job: measured across identical trees it splits ±1 finding for reasons no
+author can act on, and a ratchet over a non-deterministic scanner fails open —
+a randomly lost finding sitting exactly at the ceiling is silent in the
+direction nobody checks. The measurements behind that decision, and the
+conditions under which requiring it would become reasonable, are recorded
+beside the ceilings in `.security/allowlist.yml`.
+
+What makes the measurement reproducible at all is that the scan does not fetch
+rules from the registry at run time. The five registry packs it uses —
+`p/security-audit`, `p/owasp-top-ten`, `p/python`, `p/typescript`, `p/react` —
+are **vendored** under `.security/semgrep/`, the scan reads the committed
+files, and the ratchet binds its ceiling to the combined digest of those packs
+(`rules_sha256` in the allowlist, printed by `vendor_semgrep_packs.py
+--digest`) — so a registry pack changing upstream cannot silently re-grade the
+tree. A ceiling whose digest cannot be established is a failure, not a skip.
+The pinned binary and the pinned rules together are the whole measurement; a
+pinned binary against unpinned rules is half a pin, and it was measured rather
+than suspected — two consecutive runs on one branch moved 103/39 → 104/40
+while the commits between them changed zero scanned files.
+
+To refresh the packs (an explicit re-measure, exactly like bumping the pinned
+scanner binary):
+
+1. `python3 scripts/vendor_semgrep_packs.py` — re-fetches the current registry
+   packs into `.security/semgrep/` and rewrites `MANIFEST.sha256`.
+2. Re-run the scan locally and re-measure the finding counts.
+3. Update the ceilings *and* the recorded `rules_sha256` in
+   `.security/allowlist.yml` in the same commit, with the measurement stated
+   in the commit message.
+
+`scripts/vendor_semgrep_packs.py --check` verifies the committed packs against
+the manifest without network access — deliberately, because a check that
+compared against the live registry would fail whenever upstream moves, which
+is exactly when the pin is doing its job. CI runs `--check` in `security.yml`,
+so a hand-edited pack fails before it can re-grade anything. Never raise a
+ceiling to make a scan pass — when a change adds findings, fix the findings or
+record why they are false positives.
 
 ## Reporting a vulnerability
 

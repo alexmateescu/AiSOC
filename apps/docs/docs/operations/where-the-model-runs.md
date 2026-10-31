@@ -136,6 +136,15 @@ and is safe to run from a health check. See the
 [REST reference](../api/rest#testing-a-credential) for the full response
 shape.
 
+**Choosing a model on a custom endpoint.** With the `custom` provider, *List
+models from endpoint* asks the endpoint's `/models` and offers the chat models
+it lists — image, audio, embedding and similar entries are filtered out. It
+works before you save, and the model field still takes any typed id: an
+endpoint without a model list, or one that lists something the filter misses,
+is never a dead end. See the
+[REST reference](../api/rest#listing-a-custom-endpoints-models) for how the
+filter decides.
+
 ## Checking what is actually running
 
 A GPU reservation is a *request*. A model can still land on the CPU for want of

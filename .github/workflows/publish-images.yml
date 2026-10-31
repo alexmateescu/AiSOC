@@ -114,6 +114,7 @@ jobs:
           - threatintel
           - ueba
           - slack-bot
+          - teams-bot
           - honeytokens
           - purple-team
           - osquery-tls
@@ -193,6 +194,13 @@ jobs:
             context: services/slack-bot
             dockerfile: Dockerfile
             image: ghcr.io/beenuar/aisoc-slack-bot
+          # Depth 5.2. The Teams bot held the card builder and the signed
+          # callback handler and shipped in no image and no compose file, so
+          # nothing could post a card and nothing could receive a decision.
+          - service: teams-bot
+            context: services/teams-bot
+            dockerfile: Dockerfile
+            image: ghcr.io/beenuar/aisoc-teams-bot
 
           # Named by docker-compose.yml and the Helm chart since they were
           # written, and published by nothing until now — so `docker compose
@@ -216,7 +224,7 @@ jobs:
 
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
 
-      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -281,7 +289,7 @@ jobs:
           mkdir -p /tmp/digests
           touch "/tmp/digests/${DIGEST#sha256:}"
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: digest.${{ matrix.service }}.${{ matrix.platform }}
           path: /tmp/digests/*
@@ -316,6 +324,7 @@ jobs:
           - threatintel
           - ueba
           - slack-bot
+          - teams-bot
           - honeytokens
           - purple-team
           - osquery-tls
@@ -347,6 +356,8 @@ jobs:
             image: ghcr.io/beenuar/aisoc-ueba
           - service: slack-bot
             image: ghcr.io/beenuar/aisoc-slack-bot
+          - service: teams-bot
+            image: ghcr.io/beenuar/aisoc-teams-bot
           - service: honeytokens
             image: ghcr.io/beenuar/aisoc-honeytokens
           - service: purple-team
@@ -354,7 +365,7 @@ jobs:
           - service: osquery-tls
             image: ghcr.io/beenuar/aisoc-osquery-tls
     steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           # Dot-separated, not hyphen-separated: `digest-web-*` also matches
           # `digest-web-demo-amd64`, so the console's manifest job downloaded
@@ -368,7 +379,7 @@ jobs:
 
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
 
-      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -439,7 +450,45 @@ jobs:
       - name: Sign image (cosign keyless)
         env:
           DIGEST: ${{ steps.manifest.outputs.digest }}
-        run: cosign sign --yes "${{ matrix.image }}@${DIGEST}"
+        # Hardened against the two ways one signing can observe itself and
+        # fail, the second of which reddened the 2026-10-21 main publish on
+        # `api` and `honeytokens`:
+        #
+        #  * A job rerun after a *later* step failed re-signs a digest that
+        #    already carries this repository's valid signature. Verify-first
+        #    makes that a skip instead of a second signature.
+        #  * Rekor can accept the entry while the client times out and
+        #    retries the identical payload, which answers 409
+        #    createLogEntryConflict against the step's own first POST and
+        #    aborts before the registry attachment is written — measured: the
+        #    conflicting entry's integratedTime (17:19:28Z) sat inside the
+        #    failing step's own 17:19:24–:56 window, and `cosign verify`
+        #    found no registry signature on the digest afterwards. A fresh
+        #    attempt uses a fresh ephemeral key and cannot conflict, so retry
+        #    once; the trailing verify turns "the artifact ended up signed
+        #    anyway" into a pass and anything else stays a hard failure.
+        run: |
+          set -euo pipefail
+          verify() {
+            cosign verify \
+              --certificate-identity-regexp "^https://github.com/${{ github.repository }}/" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              "${{ matrix.image }}@${DIGEST}" >/dev/null 2>&1
+          }
+          if verify; then
+            echo "already signed by this repository's workflows; skipping re-sign of ${DIGEST}"
+            exit 0
+          fi
+          if cosign sign --yes "${{ matrix.image }}@${DIGEST}"; then
+            exit 0
+          fi
+          echo "first sign attempt failed; retrying once with a fresh ephemeral key"
+          sleep 10
+          if cosign sign --yes "${{ matrix.image }}@${DIGEST}"; then
+            exit 0
+          fi
+          echo "second sign attempt failed; accepting only if a valid signature exists"
+          verify
 
       - name: Attach CycloneDX SBOM attestation
         env:

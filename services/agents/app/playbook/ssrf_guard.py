@@ -36,6 +36,14 @@ Operators can:
   cloud-metadata literals are likewise always rejected.
 * Set ``AISOC_SSRF_EXTRA_BLOCKED_HOSTS=foo.internal,bar.svc`` to extend
   the metadata host blocklist.
+* Set ``AISOC_SSRF_ALLOW_HOSTS=127.0.0.1,splunk.tunnel.local`` to admit
+  exact hostnames that would otherwise be refused by IP classification —
+  the escape for a vendor appliance reachable only through a local
+  tunnel (an SSH port-forward lands the "remote" SIEM on loopback, which
+  ``AISOC_SSRF_ALLOW_PRIVATE`` deliberately never admits). Exact,
+  case-insensitive hostname matches only, no wildcards — and the
+  **blocklist always wins**: listing a metadata literal here changes
+  nothing, because the blocklist is consulted first.
 
 Failures raise :class:`SSRFError`, which propagates up to the engine and
 marks the step as failed via the normal exception path.
@@ -92,6 +100,17 @@ def _allowed_schemes() -> frozenset[str]:
 
 def _blocked_hosts() -> frozenset[str]:
     return _DEFAULT_BLOCKED_HOSTS | _env_set("AISOC_SSRF_EXTRA_BLOCKED_HOSTS")
+
+
+def _allowed_hosts() -> frozenset[str]:
+    """Operator-named hosts admitted without IP classification.
+
+    Consulted *after* the blocklist, so a metadata literal placed here is
+    still refused. Exact hostname matches only: an allowlist that took
+    suffixes or wildcards would quietly admit ``evil-metadata.google.internal``
+    shapes, and an operator who means one tunneled appliance can name it.
+    """
+    return _env_set("AISOC_SSRF_ALLOW_HOSTS")
 
 
 def _allow_private_by_default() -> bool:
@@ -214,10 +233,18 @@ def validate_outbound_url(url: str, *, allow_private: bool | None = None) -> str
     if not host:
         raise SSRFError("URL has no hostname")
 
-    # Explicit blocklist takes precedence over IP / DNS checks.
+    # Explicit blocklist takes precedence over IP / DNS checks — and over the
+    # operator allowlist below, so a metadata literal cannot be re-admitted.
     blocked = _blocked_hosts()
     if host in blocked:
         raise SSRFError(f"hostname {host!r} is on the SSRF blocklist (cloud metadata or operator-blocked)")
+
+    # An operator-named exact host (AISOC_SSRF_ALLOW_HOSTS) skips IP
+    # classification: the escape for a vendor appliance that is only
+    # reachable through a local tunnel, where the destination genuinely is
+    # loopback and AISOC_SSRF_ALLOW_PRIVATE deliberately does not help.
+    if host in _allowed_hosts():
+        return url
 
     if allow_private is None:
         allow_private = _allow_private_by_default()

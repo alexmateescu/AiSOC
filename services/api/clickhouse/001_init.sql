@@ -4,8 +4,23 @@
 CREATE DATABASE IF NOT EXISTS aisoc;
 
 -- ──────────────────────────────────────────────────────────────────────────────
--- Raw OCSF events (hot tier, 90 days: see the TTL below, which is what
--- actually governs. This comment said 30 days over a 90 DAY TTL.)
+-- Raw OCSF events.
+--
+-- The TTL below is a CEILING, not a retention policy. It used to be 90 days,
+-- which meant a tenant who chose 400 days in the console — and whose policy
+-- row said 400 — lost every event at day 90, with nothing erroring and the
+-- console still showing their setting. ClickHouse enforces a table TTL during
+-- merges and knows nothing about per-tenant policy.
+--
+-- So the table keeps rows for as long as the longest window anyone may choose
+-- (`MAX_LAKE_DAYS` in services/api/app/services/retention.py), and the
+-- per-tenant window is enforced above it by app/workers/retention_purge.py.
+-- The two numbers are held equal by scripts/check_retention_window.py.
+--
+-- What that means operationally, said plainly: on a deployment where the
+-- purge worker is not armed (it is off and in dry-run by default) the lake
+-- now grows for 400 days rather than 90. Arm the worker, or lower both
+-- numbers together.
 -- ──────────────────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS aisoc.raw_events (
     event_id        UUID DEFAULT generateUUIDv4(),
@@ -34,6 +49,51 @@ CREATE TABLE IF NOT EXISTS aisoc.raw_events (
     mitre_techniques Array(String),
     mitre_tactics   Array(String),
     iocs            Array(String),
+    -- The activity projection (depth plan 2.2). Ingest answers five
+    -- questions on every event and the lake carries the answers as columns
+    -- rather than only inside ocsf_json, so a hunt for "every action by a
+    -- non-human actor from a new ASN" is not a full scan of a ZSTD blob.
+    --
+    -- Kept in lockstep with lake_migrations.py's 002_activity_projection,
+    -- which is what an *existing* deployment applies: this file only runs in
+    -- the container entrypoint on a fresh volume, so a column added here
+    -- alone would land on new deployments and silently not on old ones.
+    actor_kind      LowCardinality(String) DEFAULT '',
+    actor_kind_source String DEFAULT '',
+    actor_id        String DEFAULT '',
+    actor_on_behalf_of String DEFAULT '',
+    action          String DEFAULT '',
+    resource_type   String DEFAULT '',
+    resource_id     String DEFAULT '',
+    resource_owner  String DEFAULT '',
+    src_country_code LowCardinality(String) DEFAULT '',
+    src_asn         UInt32 DEFAULT 0,
+    src_as_org      String DEFAULT '',
+    src_reputation  Float32 DEFAULT 0,
+    -- Zero and "nobody answered" are different facts: without this flag a
+    -- clean verdict and an unreachable enrichment service are the same row.
+    src_reputation_known UInt8 DEFAULT 0,
+    client_family   LowCardinality(String) DEFAULT '',
+    client_version  String DEFAULT '',
+    client_category LowCardinality(String) DEFAULT '',
+    -- The raw user agent beside the parse: it is attacker-controlled, every
+    -- parser is a lossy summary, and a tool renamed to "Mozilla/5.0" is
+    -- itself the finding.
+    client_raw      String DEFAULT '',
+    outcome         LowCardinality(String) DEFAULT '',
+
+    -- Sessions per principal (depth plan 2.4). `session_id` is the same
+    -- deterministic uuid the Postgres `sessions` row and the Neo4j Session
+    -- node carry, so a hunt joins the three without any of them having
+    -- coordinated at write time. `session_key_kind` is a column rather than a
+    -- derivable detail: a query counting events per session means something
+    -- different for a vendor session than for a grouping this product
+    -- derived, and a hunter who cannot see which they have will mix them.
+    session_id      String DEFAULT '',
+    session_key     String DEFAULT '',
+    session_key_kind LowCardinality(String) DEFAULT '',
+    session_originating_human String DEFAULT '',
+
     -- Data-skipping (bloom-filter) indexes so hunts over high-cardinality
     -- needles (file hash, user, host, IOCs) skip granules instead of scanning
     -- the whole ZSTD blob. GRANULARITY 4 = one index block per 4 * 8192 rows.
@@ -41,7 +101,12 @@ CREATE TABLE IF NOT EXISTS aisoc.raw_events (
     INDEX idx_user user_name TYPE bloom_filter(0.01) GRANULARITY 4,
     INDEX idx_src_host src_hostname TYPE bloom_filter(0.01) GRANULARITY 4,
     INDEX idx_iocs iocs TYPE bloom_filter(0.01) GRANULARITY 4,
-    INDEX idx_techniques mitre_techniques TYPE bloom_filter(0.01) GRANULARITY 4
+    INDEX idx_techniques mitre_techniques TYPE bloom_filter(0.01) GRANULARITY 4,
+    INDEX idx_action action TYPE bloom_filter(0.01) GRANULARITY 4,
+    INDEX idx_resource_id resource_id TYPE bloom_filter(0.01) GRANULARITY 4,
+    -- The id is what a join uses; the key is high-cardinality free text
+    -- read only after the id has already narrowed the scan.
+    INDEX idx_session_id session_id TYPE bloom_filter(0.01) GRANULARITY 4
 )
 -- ReplacingMergeTree collapses rows sharing the ORDER BY key, keeping the row
 -- with the greatest ingest_time. Ingest now stamps a replay-stable event_id
@@ -52,7 +117,7 @@ CREATE TABLE IF NOT EXISTS aisoc.raw_events (
 ENGINE = ReplacingMergeTree(ingest_time)
 PARTITION BY (toYYYYMM(event_time), tenant_id)
 ORDER BY (tenant_id, event_time, class_uid, event_id)
-TTL toDateTime(event_time) + INTERVAL 90 DAY
+TTL toDateTime(event_time) + INTERVAL 400 DAY
 SETTINGS index_granularity = 8192;
 
 -- ──────────────────────────────────────────────────────────────────────────────

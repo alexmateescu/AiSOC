@@ -15,15 +15,20 @@ import uuid
 from datetime import UTC, date, datetime, timedelta
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from pydantic import BaseModel, Field
+from sqlalchemy import bindparam, select, text
+from sqlalchemy.types import Uuid as SAUuid
 
 from app.api.v1.deps import AuthUser, DBSession, require_permission
+from app.db.rls import set_rls_context
 from app.models.organization import Organization
 from app.models.tenant import Tenant
 from app.services import usage_metering
+from app.services.audit import emit_audit
 from app.services.branding.resolver import owning_org_id
-from app.services.entitlements import headroom_for_tenant
+from app.services.entitlements import LIMIT_KEYS_BY_NAME, enforced_keys, headroom_for_tenant
+from app.services.org_scope import resolve_portfolio_scope
 
 router = APIRouter(prefix="/usage", tags=["usage"])
 
@@ -63,6 +68,7 @@ async def get_usage(
         )
 
     days = await usage_metering.measure_range(db, current_user.tenant_id, start_day, end_day)
+    await _attach_lake_events(days, current_user.tenant_id, start_day, end_day)
     point_in_time = await usage_metering.measure_point_in_time(db, current_user.tenant_id)
 
     # The per-tenant override, not the plan default. `limit_for` reads this
@@ -76,17 +82,23 @@ async def get_usage(
         "end": end_day.isoformat(),
         "meters": [
             {"key": m.key, "label": m.label, "description": m.description, "source": m.source}
-            for m in (*usage_metering.METERS, *usage_metering.POINT_IN_TIME_METERS)
+            for m in (*usage_metering.METERS, usage_metering.EVENTS_INGESTED, *usage_metering.POINT_IN_TIME_METERS)
         ],
         "daily": [day.as_dict() for day in days],
         "totals": usage_metering.totals(days),
         "point_in_time": point_in_time,
         # Named with the reason rather than omitted. A missing key reads as
-        # zero to anyone charting it, and zero is a measurement.
-        "not_measured": usage_metering.UNMEASURED,
+        # zero to anyone charting it, and zero is a measurement. Empty on a
+        # deployment that can take every meter.
+        "not_measured": usage_metering.unmeasured(),
         # The limits these counts run against, so a usage screen and a quota
         # screen cannot disagree about the same rows.
         "entitlements": [h.as_dict() for h in await headroom_for_tenant(db, current_user.tenant_id, tenant_limits)],
+        # Which of those ceilings actually refuse work. Reported beside the
+        # headroom rather than on a route of its own, because "you are at
+        # 47 of 45" means two different things depending on this and a
+        # console that shows one without the other cannot say which.
+        "enforced": sorted(await enforced_keys(db, current_user.tenant_id)),
     }
 
 
@@ -121,21 +133,11 @@ async def export_month(
     month: Annotated[str | None, Query(description="YYYY-MM; defaults to the current month")] = None,
 ) -> Response:
     """A month of usage as CSV, labelled with the organisation it belongs to."""
-    today = datetime.now(UTC).date()
-    if month is None:
-        year, month_number = today.year, today.month
-    else:
-        try:
-            year, month_number = (int(part) for part in month.split("-", 1))
-        except (ValueError, TypeError) as exc:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="month must be YYYY-MM") from exc
-
-    try:
-        first, last = usage_metering.month_bounds(year, month_number)
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    year, month_number = _month_or_422(month)
+    first, last = _bounds_or_422(year, month_number)
 
     days = await usage_metering.measure_range(db, current_user.tenant_id, first, last)
+    await _attach_lake_events(days, current_user.tenant_id, first, last)
     point_in_time = await usage_metering.measure_point_in_time(db, current_user.tenant_id)
     body = usage_metering.to_csv(
         tenant_id=current_user.tenant_id,
@@ -151,8 +153,165 @@ async def export_month(
     )
 
 
+@router.get("/organization/export.csv")
+async def export_organization_month(
+    db: DBSession,
+    current_user: Annotated[AuthUser, Depends(require_permission("reports:read"))],
+    month: Annotated[str | None, Query(description="YYYY-MM; defaults to the current month")] = None,
+) -> Response:
+    """A month of usage for every tenant the caller's organisation manages.
+
+    The per-tenant export names an organisation in its header and covers
+    one tenant, which left a provider with forty customers making forty
+    requests and adding up the columns by hand.
+
+    The tenant list is whatever `resolve_portfolio_scope` returns for this
+    principal, and nothing here widens it. A member scoped to three of a
+    forty-tenant portfolio exports three, and a principal who belongs to no
+    organisation is refused rather than silently handed their own tenant —
+    an export that quietly changes scope is worse than one that fails.
+    """
+    year, month_number = _month_or_422(month)
+    first, last = _bounds_or_422(year, month_number)
+
+    scope = await resolve_portfolio_scope(db, current_user.user_id)
+    if not scope.is_member:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="this principal does not belong to an operator organisation; use /usage/export.csv",
+        )
+    if scope.is_empty:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="no tenants are in scope for this principal",
+        )
+
+    tenant_ids = scope.ordered_ids()
+    rows = await db.execute(select(Tenant.id, Tenant.name).where(Tenant.id.in_(tenant_ids)))
+    names = {uuid.UUID(str(row.id)): str(row.name) for row in rows}
+    sections = await usage_metering.measure_organization(db, tenant_ids=tenant_ids, start=first, end=last, names=names)
+    body = usage_metering.organization_to_csv(org_name=scope.org_name, sections=sections)
+
+    slug = scope.org_slug or "organisation"
+    return Response(
+        content=body,
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="aisoc-usage-{slug}-{year:04d}-{month_number:02d}.csv"'},
+    )
+
+
+def _month_or_422(month: str | None) -> tuple[int, int]:
+    if month is None:
+        today = datetime.now(UTC).date()
+        return today.year, today.month
+    try:
+        year, month_number = (int(part) for part in month.split("-", 1))
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="month must be YYYY-MM") from exc
+    return year, month_number
+
+
+def _bounds_or_422(year: int, month_number: int) -> tuple[date, date]:
+    try:
+        return usage_metering.month_bounds(year, month_number)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+
+
+async def _attach_lake_events(days: list[Any], tenant_id: uuid.UUID, start: date, end: date) -> None:
+    """Fold the lake's per-day counts onto the Postgres series.
+
+    Left absent rather than zeroed when the lake is not deployed, so
+    `unmeasured()` and the daily series agree about what was not taken.
+    """
+    series = await usage_metering.measure_events_ingested(tenant_id, start, end)
+    if series is None:
+        return
+    for day in days:
+        day.values[usage_metering.EVENTS_INGESTED.key] = series.get(day.day, 0)
+
+
 async def _org_name(db: Any, tenant_id: uuid.UUID) -> str | None:
     org_id = await owning_org_id(db, tenant_id)
     if org_id is None:
         return None
     return (await db.execute(select(Organization.name).where(Organization.id == org_id))).scalar_one_or_none()
+
+
+class EnforcementPolicy(BaseModel):
+    """Which limit keys this tenant refuses work on, rather than only reporting.
+
+    The whole set is sent, not a delta, so clearing a key from the console
+    actually clears it. A merge would leave the page able to add a
+    restriction and unable to remove one.
+    """
+
+    enforce: list[str] = Field(default_factory=list)
+
+
+@router.get("/enforcement", response_model=EnforcementPolicy)
+async def get_enforcement(db: DBSession, current_user: AuthUser) -> EnforcementPolicy:
+    """The limit keys this tenant enforces. Absence of a row means none."""
+    return EnforcementPolicy(enforce=sorted(await enforced_keys(db, current_user.tenant_id)))
+
+
+@router.put("/enforcement", response_model=EnforcementPolicy)
+async def put_enforcement(
+    body: EnforcementPolicy,
+    db: DBSession,
+    request: Request,
+    current_user: Annotated[AuthUser, Depends(require_permission("settings:write"))],
+) -> EnforcementPolicy:
+    """Turn enforcement on or off, per limit key, for the caller's tenant.
+
+    The tenant is the caller's and never a parameter: a route that let one
+    authenticated user switch enforcement on for somebody else's tenant
+    would be a denial of service against them, delivered as a setting.
+
+    Every name is checked against `LIMIT_KEYS` before it is stored. A typo
+    would otherwise be accepted, match no key, enforce nothing, and leave
+    an operator reading a page that says a limit is enforced while it is
+    not — which is the quiet direction and the one worth refusing loudly.
+    """
+    unknown = sorted(set(body.enforce) - set(LIMIT_KEYS_BY_NAME))
+    if unknown:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"No such limit: {', '.join(unknown)}. A policy naming a limit that does not exist enforces nothing.",
+        )
+
+    await set_rls_context(db, current_user.tenant_id)
+
+    requested = sorted(set(body.enforce))
+    tenant_param = bindparam("tenant_id", type_=SAUuid(as_uuid=True))
+
+    # Replaced rather than merged, for the reason on the model.
+    await db.execute(
+        text("DELETE FROM aisoc_tenant_entitlement_enforcement WHERE tenant_id = :tenant_id").bindparams(tenant_param),
+        {"tenant_id": current_user.tenant_id},
+    )
+    for key in requested:
+        await db.execute(
+            text(
+                "INSERT INTO aisoc_tenant_entitlement_enforcement "
+                "       (tenant_id, limit_key, enforce, updated_by, updated_at) "
+                "VALUES (:tenant_id, :limit_key, TRUE, :updated_by, now())"
+            ).bindparams(tenant_param, bindparam("updated_by", type_=SAUuid(as_uuid=True))),
+            {"tenant_id": current_user.tenant_id, "limit_key": key, "updated_by": current_user.user_id},
+        )
+    # Audited. Turning enforcement on is the moment a reported ceiling
+    # starts refusing work, and turning it off is the moment a tenant stops
+    # being capped -- both are things an auditor asks who did and when.
+    await emit_audit(
+        db=db,
+        tenant_id=current_user.tenant_id,
+        actor_id=current_user.user_id,
+        action="entitlements.enforcement_changed",
+        resource="tenant",
+        resource_id=str(current_user.tenant_id),
+        changes={"enforce": requested},
+        request=request,
+        api_key_prefix=getattr(current_user, "api_key_prefix", None),
+    )
+    await db.commit()
+    return EnforcementPolicy(enforce=requested)

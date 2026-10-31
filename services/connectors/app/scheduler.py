@@ -49,6 +49,7 @@ Design rationale
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -71,12 +72,14 @@ from app.db.connector_repo import (
 )
 from app.db.engine import get_engine
 from app.ingest_client import IngestClient, IngestClientError
+from app.leader_lease import LeaderLease, election_enabled
 from app.pipeline import (
     apply_filter_rules,
     compute_fingerprint,
     diff_fingerprints,
 )
 from app.security.credential_vault import CredentialVault, CredentialVaultError, get_vault
+from app.security.egress import EgressRefused, refuse_internal_destinations
 from app.vuln_promotion_sql import (
     MARK_OVERDUE_SQL,
     MARK_PROMOTED_SQL,
@@ -171,6 +174,9 @@ class ConnectorScheduler:
         self._vault = vault
         self._reload_interval_s = reload_interval_seconds
         self._scheduler: AsyncIOScheduler | None = None
+        # None when leader election is off, which is the default and
+        # means this replica always schedules.
+        self._lease: LeaderLease | None = None
         # Cache of {connector_id_str: last_seen_config_signature} so reloads
         # can detect when an instance's poll interval / config changed and
         # need its job rescheduled, vs leaving an unchanged job alone.
@@ -202,8 +208,40 @@ class ConnectorScheduler:
                 logger.error("connector.scheduler.vault_unavailable: %s", exc)
                 raise
 
+        # Parity 6.8. Without an election, two replicas each add one job
+        # per connector instance and every vendor is polled twice on every
+        # cycle — which on a rate-limited API is worse than duplication,
+        # because the second replica's poll is what gets throttled and a
+        # throttled connector looks identical to one whose credentials
+        # expired. Off by default: a single-replica deployment gains
+        # nothing from an election and gains a new way to fail to start.
+        if election_enabled():
+            self._lease = LeaderLease(self._engine)
+            if not await self._lease.acquire():
+                state = await self._lease.state()
+                logger.info(
+                    "connector.scheduler.follower holder=%s term=%s — not scheduling any poll jobs",
+                    state.holder,
+                    state.term,
+                )
+
         self._scheduler = AsyncIOScheduler(timezone="UTC")
         self._scheduler.start()
+
+        if self._lease is not None:
+            # Renewal runs whether or not this replica is the leader: a
+            # follower has to keep trying to acquire, or a dead leader is
+            # never replaced. The same job does both, because "renew if I
+            # hold it, otherwise try to take it" is one decision.
+            self._scheduler.add_job(
+                self._maintain_lease,
+                "interval",
+                seconds=self._lease.renew_after,
+                id="_leader_lease",
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+            )
 
         # Fire one reload immediately so we don't wait
         # ``reload_interval`` seconds for the first poll cycle.
@@ -238,6 +276,56 @@ class ConnectorScheduler:
             self._reload_interval_s,
         )
 
+    def _remove_all_poll_jobs(self) -> None:
+        """Drop every connector poll job, keeping the control jobs.
+
+        Called when leadership is lost. The reload and lease jobs stay,
+        because a follower still has to notice when the leader dies.
+        """
+        if self._scheduler is None:
+            return
+        keep = {"_reload_loop", "_leader_lease", "_vuln_promotion_loop"}
+        removed = 0
+        for job in list(self._scheduler.get_jobs()):
+            if job.id in keep:
+                continue
+            with contextlib.suppress(Exception):
+                self._scheduler.remove_job(job.id)
+                removed += 1
+        self._known_signatures.clear()
+        if removed:
+            logger.info("connector.scheduler.follower_dropped_jobs count=%s", removed)
+
+    def _is_leader(self) -> bool:
+        """Whether this replica should be scheduling polls.
+
+        True when election is off, which is the default: a deployment
+        that has not asked for an election must not stop polling because
+        a lease table it never populated says nobody leads.
+        """
+        return self._lease is None or self._lease.held
+
+    async def _maintain_lease(self) -> None:
+        """Renew the lease, or try to take one.
+
+        A leadership change in either direction reshapes the job set, and
+        it does so by calling the same reload the periodic job calls — a
+        second code path for "schedule everything" is a second place for
+        the two to disagree about what everything is.
+        """
+        lease = self._lease
+        if lease is None:
+            return
+        was_leader = lease.held
+        still_leader = await lease.renew() if was_leader else await lease.acquire()
+        if still_leader == was_leader:
+            return
+        if still_leader:
+            logger.info("connector.scheduler.became_leader term=%s", lease.term)
+        else:
+            logger.warning("connector.scheduler.lost_leadership term=%s", lease.term)
+        await self.reload_jobs()
+
     async def stop(self) -> None:
         """Stop the scheduler and release resources."""
         if self._scheduler is not None:
@@ -268,6 +356,16 @@ class ConnectorScheduler:
         if self._scheduler is None or self._engine is None:
             # ``stop()`` was called between ticks, or ``start()`` was never
             # called. Either way: nothing to do.
+            return
+
+        if not self._is_leader():
+            # A follower removes whatever it was running rather than just
+            # declining to add more. A replica that loses leadership while
+            # holding jobs keeps polling every vendor from the jobs it
+            # already had, which is the double-poll the election exists to
+            # prevent — only now it is invisible, because the follower is
+            # reporting itself as a follower.
+            self._remove_all_poll_jobs()
             return
 
         try:
@@ -456,6 +554,27 @@ class ConnectorScheduler:
         runtime_config = {k: v for k, v in (target.connector_config or {}).items() if k not in {"poll_interval_seconds", "checkpoint"}}
         kwargs = {**auth, **runtime_config}
 
+        # A stored destination inside the deployment must not be polled —
+        # rows saved before registration-time validation existed were never
+        # checked, and a hostname can rebind between saves and polls
+        # (GHSA-cq4g-g6wp-4m2w). The failure is recorded so the instance
+        # shows unhealthy in the UI rather than silently doing nothing; an
+        # on-prem SIEM on RFC 1918 space is re-admitted by setting
+        # AISOC_SSRF_ALLOW_PRIVATE=1.
+        try:
+            refuse_internal_destinations(kwargs)
+        except EgressRefused as exc:
+            logger.error(
+                "connector.scheduler.destination_refused id=%s type=%s field=%s err=%s "
+                "(set AISOC_SSRF_ALLOW_PRIVATE=1 if this deployment's SIEM lives on a private range)",
+                connector_id,
+                target.connector_type,
+                exc.field_name,
+                exc.reason,
+            )
+            await self._record_failure(target.id)
+            return
+
         started = datetime.now(UTC)
         try:
             connector = connector_class(**kwargs)
@@ -512,6 +631,10 @@ class ConnectorScheduler:
                 connector_id,
                 target.connector_type,
             )
+            # A fetch that raised part-way may already have staged handles for
+            # the batches it did read. None of it reached ingest, so none of
+            # it may be acknowledged.
+            self._discard_acknowledgements(connector, connector_id, reason="fetch_failed", staged=0)
             await self._record_failure(target.id)
             return
 
@@ -609,21 +732,64 @@ class ConnectorScheduler:
                 connector_id,
                 len(kept),
             )
+            # Nothing reached Kafka, so nothing may be acknowledged. Dropping
+            # the staged handles leaves the messages on the source to be
+            # redelivered; discarding explicitly rather than letting the
+            # connector fall out of scope so the intent is legible here, at
+            # the one place that knows ingest refused.
+            self._discard_acknowledgements(connector, connector_id, reason="ingest_failed", staged=len(kept))
             await self._record_failure(target.id)
             return
 
         accepted = int(result.get("accepted", 0) or 0)
+        rejected = int(result.get("rejected", 0) or 0)
         elapsed_ms = int((datetime.now(UTC) - started).total_seconds() * 1000)
 
-        # Advance the persisted checkpoint only now that ingest has accepted the
-        # batch (#529). A failed push returned earlier, so reaching here means
-        # the page was accepted — this is the "advance only after accept" rule.
+        # Persist the staged cursor only after *every submitted event* was
+        # accepted. Ingest deliberately reports per-event normalization
+        # failures as HTTP 200 with accepted/rejected counts, so HTTP success
+        # alone does not prove that advancing is safe. Replaying an accepted
+        # event on the next overlapping poll is preferable to moving past a
+        # rejected event and losing it permanently.
+        counts_present = "accepted" in result and "rejected" in result
+        batch_fully_accepted = counts_present and rejected == 0 and accepted == len(kept)
         try:
             new_checkpoint = connector.get_checkpoint()
         except Exception:  # never let checkpoint bookkeeping break a poll
             new_checkpoint = None
         if isinstance(new_checkpoint, dict) and new_checkpoint:
-            await self._record_checkpoint(target.id, new_checkpoint)
+            if batch_fully_accepted:
+                await self._record_checkpoint(target.id, new_checkpoint)
+            else:
+                logger.warning(
+                    "connector.scheduler.checkpoint_withheld id=%s type=%s submitted=%d accepted=%d rejected=%d counts_present=%s",
+                    connector_id,
+                    target.connector_type,
+                    len(kept),
+                    accepted,
+                    rejected,
+                    counts_present,
+                )
+
+        # Only now may the source be told to forget the messages. Withholding
+        # a cursor is not enough on a queue: a cursor over data that has
+        # already been deleted from the queue protects nothing, which is why
+        # the connectors stage their receipt handles and ack ids instead of
+        # answering the source inside their own fetch.
+        #
+        # After the checkpoint write, deliberately. A crash between the two
+        # leaves messages that will be redelivered and a cursor that
+        # recognises them; the other order leaves a source that has forgotten
+        # them and a cursor that has not recorded them.
+        if batch_fully_accepted:
+            await self._commit_acknowledgements(connector, connector_id, target.connector_type)
+        else:
+            self._discard_acknowledgements(
+                connector,
+                connector_id,
+                reason="batch_not_fully_accepted",
+                staged=len(kept),
+            )
 
         # If drift was detected, persist that fact *before* marking the
         # poll successful so the UI reflects "drifted" status alongside
@@ -696,7 +862,7 @@ class ConnectorScheduler:
             connector_id,
             target.connector_type,
             accepted,
-            int(result.get("rejected", 0) or 0),
+            rejected,
             dropped_count,
             "yes" if drift_detected else "no",
             elapsed_ms,
@@ -818,6 +984,74 @@ class ConnectorScheduler:
                 connector_id,
             )
 
+    async def _commit_acknowledgements(self, connector: Any, connector_id: uuid.UUID, connector_type: str) -> None:
+        """Answer the source for a batch ingest confirmed is durable.
+
+        Never raises into the poll. A failed acknowledgement costs a
+        redelivery, which the connector's identity cursor de-duplicates, so
+        the poll was still a success — but the count is logged because a
+        connector whose acknowledgements never land is a queue that never
+        drains, and that is otherwise indistinguishable from a quiet source.
+        """
+        try:
+            result = await connector.commit_acknowledgements()
+        except NotImplementedError:
+            # A connector that stages handles without implementing the commit.
+            # Loud: the queue will not drain, and nothing else would say so.
+            logger.error(
+                "connector.scheduler.acknowledge_unimplemented id=%s type=%s",
+                connector_id,
+                connector_type,
+            )
+            return
+        except Exception:
+            logger.exception(
+                "connector.scheduler.acknowledge_failed id=%s type=%s",
+                connector_id,
+                connector_type,
+            )
+            return
+
+        requested = int(getattr(result, "requested", 0) or 0)
+        failed = int(getattr(result, "failed", 0) or 0)
+        if failed:
+            logger.warning(
+                "connector.scheduler.acknowledge_partial id=%s type=%s requested=%d confirmed=%d failed=%d",
+                connector_id,
+                connector_type,
+                requested,
+                int(getattr(result, "confirmed", 0) or 0),
+                failed,
+            )
+        elif requested:
+            logger.debug(
+                "connector.scheduler.acknowledged id=%s type=%s count=%d",
+                connector_id,
+                connector_type,
+                requested,
+            )
+
+    def _discard_acknowledgements(self, connector: Any, connector_id: uuid.UUID, *, reason: str, staged: int) -> None:
+        """Leave the source holding its messages, and say that it happened.
+
+        The silent version of this is the defect: a poll that fetched, failed
+        to ship and left no trace reads as a quiet source on the next poll.
+        """
+        try:
+            pending = len(connector.pending_acknowledgements())
+            connector.discard_acknowledgements()
+        except Exception:  # never let acknowledgement bookkeeping break a poll
+            logger.debug("connector.scheduler.discard_failed id=%s", connector_id)
+            return
+        if pending:
+            logger.warning(
+                "connector.scheduler.acknowledgement_withheld id=%s reason=%s messages=%d events=%d",
+                connector_id,
+                reason,
+                pending,
+                staged,
+            )
+
     async def _sync_vulnerability_findings(self, connector: Any, target: Any) -> None:
         """Materialise a scanner's findings as vulnerability rows, if it has any.
 
@@ -890,11 +1124,7 @@ class ConnectorScheduler:
 
         try:
             async with self._engine.connect() as conn:
-                tenants = (
-                    await conn.execute(
-                        text("SELECT DISTINCT tenant_id FROM connectors WHERE is_enabled")
-                    )
-                ).scalars().all()
+                tenants = (await conn.execute(text("SELECT DISTINCT tenant_id FROM connectors WHERE is_enabled"))).scalars().all()
         except Exception:  # pragma: no cover
             logger.exception("connector.scheduler.promotion_tenant_enum_failed")
             return
@@ -909,25 +1139,15 @@ class ConnectorScheduler:
                         text("SELECT set_config('aisoc.tenant_id', :tid, true)"),
                         {"tid": str(tenant_id)},
                     )
-                    overdue = (
-                        await conn.execute(text(MARK_OVERDUE_SQL), {"tenant_id": tenant_id})
-                    ).rowcount
-                    resolved = (
-                        await conn.execute(text(RESOLVE_REMEDIATED_SQL), {"tenant_id": tenant_id})
-                    ).rowcount
-                    candidates = (
-                        await conn.execute(text(PROMOTE_CANDIDATES_SQL), {"tenant_id": tenant_id})
-                    ).fetchall()
+                    overdue = (await conn.execute(text(MARK_OVERDUE_SQL), {"tenant_id": tenant_id})).rowcount
+                    resolved = (await conn.execute(text(RESOLVE_REMEDIATED_SQL), {"tenant_id": tenant_id})).rowcount
+                    candidates = (await conn.execute(text(PROMOTE_CANDIDATES_SQL), {"tenant_id": tenant_id})).fetchall()
 
                     promoted = 0
                     for row in candidates:
                         cve = str(row.cve_id)
                         score = float(row.cvss_score) if row.cvss_score is not None else None
-                        sev = (
-                            "critical"
-                            if (score is not None and score >= 9.0) or row.is_exploited
-                            else "high"
-                        )
+                        sev = "critical" if (score is not None and score >= 9.0) or row.is_exploited else "high"
                         hosts = row.affected_hosts or []
                         why = []
                         if row.patch_due_date is not None:
@@ -948,9 +1168,7 @@ class ConnectorScheduler:
                                 ),
                                 "severity": sev,
                                 "affected_hosts": json.dumps(hosts),
-                                "tags": json.dumps(
-                                    ["patch-window", "vulnerability", cve.lower()]
-                                ),
+                                "tags": json.dumps(["patch-window", "vulnerability", cve.lower()]),
                                 "idempotency_key": f"vuln-promo:{cve.lower()}",
                                 "connector_id": None,
                                 "raw_event": json.dumps(
@@ -973,8 +1191,7 @@ class ConnectorScheduler:
 
                 if overdue or promoted or resolved:
                     logger.info(
-                        "connector.scheduler.vuln_promotion tenant=%s marked_overdue=%d "
-                        "alerts_promoted=%d alerts_resolved=%d",
+                        "connector.scheduler.vuln_promotion tenant=%s marked_overdue=%d alerts_promoted=%d alerts_resolved=%d",
                         tenant_id,
                         overdue,
                         promoted,
@@ -982,9 +1199,7 @@ class ConnectorScheduler:
                     )
             except Exception:
                 # One tenant's failure must not stop the others' sweep.
-                logger.exception(
-                    "connector.scheduler.vuln_promotion_failed tenant=%s", tenant_id
-                )
+                logger.exception("connector.scheduler.vuln_promotion_failed tenant=%s", tenant_id)
 
     async def _record_failure(self, connector_id: uuid.UUID) -> None:
         if self._engine is None:  # pragma: no cover

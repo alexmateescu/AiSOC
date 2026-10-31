@@ -18,14 +18,19 @@ for ``"secret"``) is caught at import time, not at form-render time.
 
 from __future__ import annotations
 
+import hashlib
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal
 
+import structlog
+
 if TYPE_CHECKING:
     from app.federated.query import UnifiedQuery
+
+logger = structlog.get_logger()
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +144,11 @@ class Capability(str, Enum):
     GET_HOST = "get_host"
     GET_DETECTIONS = "get_detections"
     GET_USER_ACTIVITY = "get_user_activity"
+    # A distributed osquery query across a fleet, through osctrl, FleetDM or
+    # AiSOC's own TLS endpoint. Narrower than it looks: the caller names one
+    # of a closed set of allowlisted templates and never writes SQL, which is
+    # the same boundary LOOKUP_ENDPOINT_TELEMETRY draws.
+    OSQUERY_LIVE_QUERY = "osquery_live_query"
     # Gap-closure Phase 4.2. Two reads that do not fit the three above
     # because their subject is neither a host nor a principal: a cloud
     # control-plane audit trail, and endpoint telemetry searched by
@@ -173,6 +183,29 @@ class Capability(str, Enum):
     # channel something, this asks an end user to confirm or deny, and the
     # action is not finished until they answer.
     CHATOPS_VERIFY = "chatops_verify"
+
+    # MAILBOX — reported-phish remediation across the recipients of one
+    # message. The subject is a message in a mailbox, which is neither a
+    # host nor a principal, so none of the containment verbs above fit.
+    #
+    # SEARCH_MAILBOXES is the read every one of the others depends on: a
+    # purge takes a per-mailbox message id, and only a search maps one
+    # internet message id onto the mailboxes that hold a copy.
+    SEARCH_MAILBOXES = "search_mailboxes"
+    # Soft delete, never a hard one. On Microsoft Graph that is a move to
+    # the `recoverableitemsdeletions` well-known folder; on Gmail it is
+    # `users.messages.trash`. Both are documented and both are undone by
+    # RESTORE_EMAIL, which is why the verb is PURGE and not DELETE: a
+    # verb whose rollback resolves to nothing has no business being
+    # dispatched across a thousand mailboxes.
+    PURGE_EMAIL = "purge_email"
+    RESTORE_EMAIL = "restore_email"
+    # Per-mailbox sender block. Graph documents it as an inbox message
+    # rule and Gmail as a filter; neither vendor exposes its tenant-wide
+    # block list through the API this platform speaks, so this verb is
+    # scoped to the mailboxes it is dispatched against and says so.
+    BLOCK_SENDER = "block_sender"
+    UNBLOCK_SENDER = "unblock_sender"
 
     # TICKET — bidirectional ITSM (Jira / ServiceNow / etc.).
     PUSH_CASE = "push_case"
@@ -306,6 +339,68 @@ class OAuthHints:
 
     def to_dict(self) -> dict[str, Any]:
         return {k: v for k, v in asdict(self).items() if v not in (None, [])}
+
+
+@dataclass(frozen=True)
+class CollectionBudget:
+    """What one poll of a queue- or object-backed source is allowed to take.
+
+    Depth plan 4.1. Every connector before these three pulled from an API
+    that answers a time window, so the volume a poll could return was bounded
+    by the window. A queue is not: an SQS queue after a six-hour outage, a
+    Pub/Sub subscription with seven days of retention or an Event Hubs
+    partition at its retention edge each hold as much as the estate produced
+    in that time, and a poll written as "drain it" turns the recovery into an
+    out-of-memory kill, or a flood through ingest that costs more than the
+    outage did.
+
+    So the bound is declared rather than implied, and the declaration carries
+    the sentence saying where the remainder goes. That field is not
+    decoration: a bound that *drops* the overflow has exactly the same shape
+    in code as one that leaves it for the next poll, and only one of them is
+    backpressure — the other is silent data loss. Writing down which it is
+    makes the reviewer's question answerable from the declaration.
+    """
+
+    #: Queue receives / object listings / partition reads per poll.
+    max_batches_per_poll: int
+    #: Normalized events per poll, across every batch. The two bounds are
+    #: independent because one object can hold a hundred thousand records:
+    #: bounding batches alone bounds nothing.
+    max_events_per_poll: int
+    #: Why the overflow is safe — which durable thing still holds it, and
+    #: what makes the next poll see it again.
+    backlog_stays_on_the_queue: str
+
+    def __post_init__(self) -> None:
+        if self.max_batches_per_poll <= 0 or self.max_events_per_poll <= 0:
+            raise ValueError("a collection budget with a non-positive bound is not a bound")
+        if not self.backlog_stays_on_the_queue.strip():
+            raise ValueError("a bounded poll must say where the remainder goes; an unexplained bound reads as data loss")
+
+
+@dataclass(frozen=True)
+class AcknowledgementResult:
+    """What answering the source actually achieved.
+
+    Phase 3. A connector used to acknowledge inside its own fetch and log a
+    failure at ``warning``, which meant the scheduler could not tell a
+    drained queue from one that is silently refusing every delete — and the
+    two look identical from a poll that reports success either way.
+
+    ``failed`` is the number that matters: those messages will be redelivered,
+    so the next poll re-reads source data that downstream has already
+    accepted. That is a duplicate, which is survivable, but it is a fact about
+    the deployment an operator should be able to see rather than infer from a
+    backlog that never shrinks.
+    """
+
+    #: Handles the connector tried to answer.
+    requested: int
+    #: Handles the source confirmed. These will not be redelivered.
+    confirmed: int
+    #: Handles the source refused or that expired. These will be redelivered.
+    failed: int
 
 
 @dataclass(frozen=True)
@@ -448,7 +543,8 @@ class BaseConnector(ABC):
     # The durable half of this shipped already: ``connector_repo.record_checkpoint``
     # persists a cursor into ``connector_config.checkpoint``, and the scheduler
     # seeds it before each poll and advances it only after ingest accepted the
-    # batch, so a failed push never moves it forward.
+    # entire submitted batch, so a failed or partially rejected push never
+    # moves it forward.
     #
     # What was missing was adoption, and the reason it stayed missing is worth
     # keeping. The scheduler reached the connector through
@@ -474,6 +570,31 @@ class BaseConnector(ABC):
     # The tie-breaker is not optional. Two events in the same second are
     # ordinary, and a cursor on time alone either loses the second one or
     # replays the first forever.
+    #
+    # ----------------------------- and where it is wrong (phase 3) -----------
+    #
+    # Everything above assumes the source hands rows over in roughly event
+    # order, which is true of a time-windowed API poll and is what makes a
+    # high-water mark safe there: anything at or below the cursor really has
+    # been seen.
+    #
+    # A queue makes no such promise. Pub/Sub gives no ordering unless the
+    # topic was created with message ordering *and* the publisher sets an
+    # ordering key, which a Cloud Logging sink does not; S3 notifications over
+    # SQS are unordered by construction. On those sources an event older than
+    # the last batch's newest is an ordinary first arrival, and a high-water
+    # mark discards it the only time it will ever be offered.
+    #
+    # Such a connector declares :attr:`dedup_identity_field` instead. The
+    # queue is what guarantees nothing is lost — an unacknowledged message
+    # comes back — so the cursor's only remaining job is to recognise the
+    # duplicate that at-least-once delivery will eventually produce, and a set
+    # of identities does that without needing an order. Rows keep their
+    # arrival order, because arrival order is the only order the source has.
+    #
+    # The set is bounded, and the direction of the bound is the point: falling
+    # off the end of it costs a duplicate, where falling outside a watermark
+    # cost the event. See :attr:`max_dedup_identities`.
 
     #: Field on a raw row carrying its event time. ``None`` means this
     #: connector does not checkpoint, which is the honest default.
@@ -483,11 +604,61 @@ class BaseConnector(ABC):
     #: the same timestamp. Required alongside ``checkpoint_time_field``.
     checkpoint_id_field: tuple[str, ...] = ()
 
+    #: Per-poll bound for a queue- or object-backed source (depth plan 4.1).
+    #: ``None`` for the API-polling connectors, where the time window is the
+    #: bound. See :class:`CollectionBudget` for why the declaration carries a
+    #: sentence rather than only two numbers.
+    collection_budget: CollectionBudget | None = None
+
+    #: Field carrying a stable, source-scoped identity for a row. Declaring it
+    #: switches the cursor from a monotonic event-time watermark to a bounded
+    #: set of seen identities — the right shape for an unordered queue, where
+    #: "older than the last batch" does not mean "already seen".
+    #:
+    #: The identity must survive a redelivery of the same source data. A
+    #: Pub/Sub ``messageId`` does; its ``ackId`` does not, because the vendor
+    #: mints a fresh one every time it hands the message over.
+    dedup_identity_field: tuple[str, ...] = ()
+
+    #: How many identities the cursor remembers. Sized to cover more than one
+    #: poll's worth for the connectors that declare it, because the window
+    #: that needs covering is "accepted downstream but not yet acknowledged",
+    #: which is at most the batch in flight. Exceeding it re-emits an event,
+    #: which fusion and the lake can collapse; it never drops one.
+    #:
+    #: Stored as 16-hex truncated digests rather than raw identities: an
+    #: object key is long and names a customer's bucket layout, and bounding
+    #: the width bounds the JSONB this writes to a connector row (~190 kB at
+    #: the default) regardless of what the source calls things.
+    max_dedup_identities: int = 10_000
+
     #: Staged by :meth:`apply_checkpoint`, read by the scheduler after ingest
     #: accepts the batch. Declared here so it has one type rather than being
     #: introduced inside a branch.
     _incoming_checkpoint: dict[str, str] | None = None
-    _next_checkpoint: dict[str, str] | None = None
+    _next_checkpoint: dict[str, Any] | None = None
+
+    #: Identities seeded from the persisted cursor, in the order they were
+    #: last seen, so the bound forgets the oldest first.
+    _incoming_seen: tuple[str, ...] = ()
+
+    #: Source-side handles — SQS receipt handles, Pub/Sub ack ids — for
+    #: messages whose events are in this poll's batch. Staged during the
+    #: fetch, committed by the scheduler once ingest confirms the batch is
+    #: durable. See :meth:`stage_acknowledgement`.
+    _pending_acks: tuple[str, ...] = ()
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        # Checked at import rather than at poll time: a connector declaring
+        # both schemes would silently use one of them, and which one is an
+        # implementation detail of a dispatch nobody reads twice.
+        if cls.dedup_identity_field and (cls.checkpoint_time_field or cls.checkpoint_id_field):
+            raise ValueError(
+                f"connector '{cls.connector_id}' declares both an event-time watermark and a dedup identity. "
+                "They answer the same question two different ways: pick the watermark for an ordered API poll, "
+                "the identity for an unordered queue."
+            )
 
     @classmethod
     def checkpoints(cls) -> bool:
@@ -497,22 +668,144 @@ class BaseConnector(ABC):
         returns False re-reads its overlap window after a restart, which is
         safe and means a long outage loses events older than that window.
         """
+        if cls.dedup_identity_field:
+            return True
         return bool(cls.checkpoint_time_field and cls.checkpoint_id_field)
+
+    @classmethod
+    def seen_tokens(cls, identities: Iterable[str]) -> list[str]:
+        """Dedup tokens for ``identities``, in order.
+
+        The connector id is part of the digest so two sources that happen to
+        mint the same record id cannot suppress each other's events. Tenant
+        scoping is structural rather than hashed in: the cursor lives on one
+        connector *instance* row, which belongs to exactly one tenant.
+        """
+        prefix = cls.connector_id.encode("utf-8")
+        return [hashlib.sha256(prefix + b"\x00" + str(identity).encode("utf-8")).hexdigest()[:16] for identity in identities]
 
     def set_checkpoint(self, checkpoint: dict[str, Any] | None) -> None:
         """Seed the poll with the last-accepted cursor (the scheduler owns it)."""
-        if isinstance(checkpoint, dict) and (checkpoint.get("time") or checkpoint.get("id")):
+        self._incoming_checkpoint = None
+        self._incoming_seen = ()
+        if not isinstance(checkpoint, dict):
+            return
+        if self.dedup_identity_field:
+            # A connector switched from a watermark to identity dedup finds
+            # the old `{"time", "id"}` shape in its config. Reading it would
+            # reinstate exactly the behaviour this replaced, so it is ignored
+            # — at the cost of re-emitting whatever the last poll emitted
+            # once, which is the safe direction.
+            seen = checkpoint.get("seen")
+            if isinstance(seen, list):
+                self._incoming_seen = tuple(str(token) for token in seen if token)
+            return
+        if checkpoint.get("time") or checkpoint.get("id"):
             self._incoming_checkpoint = {"time": str(checkpoint.get("time") or ""), "id": str(checkpoint.get("id") or "")}
-        else:
-            self._incoming_checkpoint = None
 
-    def get_checkpoint(self) -> dict[str, str] | None:
+    def get_checkpoint(self) -> dict[str, Any] | None:
         """The advanced cursor after a fetch, or ``None`` if nothing moved.
 
-        The scheduler persists this only once ingest has accepted the batch,
-        so a failed ingest never advances it.
+        The scheduler persists this only once ingest has accepted every
+        submitted event, so a failed or partially rejected ingest never
+        advances it.
         """
         return self._next_checkpoint
+
+    # ----------------------------- acknowledgement (phase 3) -----------------
+    #
+    # Separating "we have the data" from "the data is safe" is the whole of
+    # finding 4. A connector reading a queue used to answer the source inside
+    # ``fetch_alerts``, once the rows were in a local list — but a list is not
+    # durability, and ``fetch_alerts`` returns long before the scheduler
+    # pushes to ingest. A crash or a 5xx in that gap took messages that are no
+    # longer redeliverable, and no cursor can help once a message is gone.
+    #
+    # So the fetch *stages* the source's handles and the scheduler commits
+    # them, because the scheduler is the only layer that sees ingest's answer.
+    # Acceptance means broker-confirmed Kafka delivery: ``services/ingest``
+    # awaits ``PublishBatch`` with ``RequiredAcks: RequireAll`` and answers
+    # 500 on failure, so a 200 with ``accepted == submitted`` is a real
+    # guarantee. (Its graph fan-out is deliberately non-blocking and is not
+    # part of that guarantee.)
+    #
+    # The bound: an SQS visibility timeout and a Pub/Sub ack deadline are
+    # finite, so a held handle has an expiry. A connector that holds handles
+    # stops taking new work once the poll has spent its share of the deadline
+    # (see ``acknowledgement_hold_fraction``), leaving the rest for ingest and
+    # the checkpoint write. Overrunning anyway costs a duplicate — the handle
+    # is refused and the message redelivers — never a gap.
+
+    #: Share of the source's acknowledgement deadline a poll may spend before
+    #: it stops collecting. The remainder is the downstream budget: normalize,
+    #: filter, push to ingest, persist the cursor. Half each is deliberately
+    #: generous on both sides rather than tuned; the failure mode either way
+    #: is a duplicate.
+    acknowledgement_hold_fraction: float = 0.5
+
+    def stage_acknowledgement(self, handles: Iterable[str]) -> None:
+        """Record source handles to be answered once the batch is durable."""
+        fresh = tuple(str(handle) for handle in handles if handle)
+        if fresh:
+            self._pending_acks = self._pending_acks + fresh
+
+    def pending_acknowledgements(self) -> list[str]:
+        """Handles staged by this poll and not yet committed."""
+        return list(self._pending_acks)
+
+    def take_pending_acknowledgements(self) -> list[str]:
+        """Claim the staged handles, clearing them.
+
+        Claiming before the vendor call rather than after means a handle is
+        never committed twice if the call partially succeeds and is retried.
+        """
+        handles = list(self._pending_acks)
+        self._pending_acks = ()
+        return handles
+
+    def discard_acknowledgements(self) -> None:
+        """Drop the staged handles without answering the source.
+
+        What the scheduler does when ingest did not accept the batch. The
+        messages redeliver after their visibility timeout or ack deadline,
+        which is the entire reason they were not deleted.
+        """
+        self._pending_acks = ()
+
+    async def commit_acknowledgements(self) -> AcknowledgementResult:
+        """Answer the source for every staged handle.
+
+        The default is a no-op *only* when nothing was staged. A connector
+        that stages handles and does not implement this would hold them to
+        the end of the poll and then drop them, so the queue would never
+        drain — louder here than as a backlog nobody attributes to us.
+        """
+        if not self._pending_acks:
+            return AcknowledgementResult(requested=0, confirmed=0, failed=0)
+        raise NotImplementedError(
+            f"connector '{self.connector_id}' stages acknowledgements but does not implement commit_acknowledgements()"
+        )
+
+    def acknowledgement_deadline_seconds(self) -> int:
+        """Seconds a staged handle stays valid, or 0 when there is no deadline.
+
+        Overridden by connectors whose source enforces one: SQS reports the
+        visibility timeout it was asked for, Pub/Sub the subscription's ack
+        deadline.
+        """
+        return 0
+
+    def acknowledgement_hold_exhausted(self, elapsed_seconds: float) -> bool:
+        """Whether this poll has spent its share of the acknowledgement deadline.
+
+        Called from a fetch loop before taking another batch. False when the
+        source has no deadline, so a connector without one is unbounded by
+        this and bounded by its ``collection_budget`` alone.
+        """
+        deadline = self.acknowledgement_deadline_seconds()
+        if deadline <= 0:
+            return False
+        return elapsed_seconds >= deadline * self.acknowledgement_hold_fraction
 
     def _row_time(self, row: dict[str, Any]) -> str:
         return self._first_present(row, self.checkpoint_time_field)
@@ -528,12 +821,19 @@ class BaseConnector(ABC):
                 return str(value)
         return ""
 
+    def _row_identity(self, row: dict[str, Any]) -> str:
+        return self._first_present(row, self.dedup_identity_field)
+
     def apply_checkpoint(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Order, de-duplicate against the cursor, and stage the advance.
+        """De-duplicate against the cursor and stage the advance.
 
         A no-op for a connector that does not declare its cursor fields, so
-        it is safe to call unconditionally from ``fetch_alerts``.
+        it is safe to call unconditionally from ``fetch_alerts``. Dispatches
+        on which cursor the connector declared: an event-time watermark for an
+        ordered poll, a bounded identity set for an unordered queue.
         """
+        if self.dedup_identity_field:
+            return self._apply_identity_dedup(rows)
         if not self.checkpoints():
             return rows
 
@@ -555,6 +855,70 @@ class BaseConnector(ABC):
             self._next_checkpoint = {"time": self._row_time(last), "id": self._row_id(last)}
         else:
             self._next_checkpoint = None
+        return fresh
+
+    def _apply_identity_dedup(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Drop rows this cursor has already seen; keep everything else.
+
+        No ordering and no comparison against a watermark: on an unordered
+        source the only thing that makes a row a duplicate is having seen that
+        exact identity before.
+
+        Rows are not de-duplicated against *each other* within one batch. The
+        same object announced twice in one poll stays twice, which is what the
+        watermark did too — the atom here is the cross-poll redelivery that
+        at-least-once delivery guarantees, and collapsing within a batch would
+        break a connector whose rows legitimately share an identity (every
+        record read out of one S3 object shares its object key).
+        """
+        known = set(self._incoming_seen)
+        fresh: list[dict[str, Any]] = []
+        this_batch: list[str] = []
+        unidentified = 0
+
+        for row in rows:
+            identity = self._row_identity(row)
+            if not identity:
+                # Cannot be proven a duplicate, so it is not treated as one.
+                # Counted because a source that stopped emitting its id would
+                # otherwise present as a quietly growing duplicate rate.
+                unidentified += 1
+                fresh.append(row)
+                continue
+            token = self.seen_tokens([identity])[0]
+            if token in known:
+                continue
+            fresh.append(row)
+            this_batch.append(token)
+
+        if unidentified:
+            logger.warning(
+                "connector.dedup.row_without_identity",
+                connector=self.connector_id,
+                field=self.dedup_identity_field,
+                rows=unidentified,
+                detail="emitted without de-duplication; a redelivery of these cannot be recognised",
+            )
+
+        if not this_batch:
+            self._next_checkpoint = None
+            return fresh
+
+        # Oldest first, so truncation forgets what is least likely to still
+        # be in flight. The window that must stay covered is this batch: it is
+        # the one that has been accepted downstream but not yet acknowledged.
+        retained = [token for token in self._incoming_seen if token not in set(this_batch)] + this_batch
+        if len(retained) > self.max_dedup_identities:
+            dropped = len(retained) - self.max_dedup_identities
+            retained = retained[dropped:]
+            logger.info(
+                "connector.dedup.identities_truncated",
+                connector=self.connector_id,
+                dropped=dropped,
+                kept=len(retained),
+                detail="a redelivery older than the retained window would be re-emitted, not dropped",
+            )
+        self._next_checkpoint = {"seen": retained}
         return fresh
 
     # ----------------------------- federated search --------------------------

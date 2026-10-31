@@ -59,12 +59,36 @@ Every agent decision in AiSOC is logged to a persistent ledger; \
 \`aisoc_replay_decision\` and \`aisoc_explain_step\` are the auditable surface.`;
 
 /**
+ * A decision taken before a tool runs, and the report after it.
+ *
+ * Over stdio there is nothing to decide: the server holds the operator's own
+ * key and a tool call can do only what that person could already do. Over
+ * HTTP the credential arrives per request and several tenants share the
+ * process, so `src/http.ts` supplies these two and the API decides. Optional
+ * here so the stdio path is byte-for-byte the behaviour it always had.
+ */
+export interface CallHooks {
+  /**
+   * Called before dispatch. Returning `{ allowed: false }` refuses the call
+   * with `reason` surfaced to the agent, and the tool never runs.
+   */
+  before(toolName: string, args: unknown): Promise<{ allowed: boolean; reason?: string; callId?: string }>;
+  /** Called on every exit path, including the refusals. */
+  after(
+    callId: string | undefined,
+    outcome: "success" | "error" | "invalid_arguments" | "unknown_tool" | "denied",
+    latencyMs: number,
+    errorKind?: string,
+  ): void;
+}
+
+/**
  * Build (but don't start) an MCP server bound to the AiSOC tool registry.
  *
  * Exported separately from the start helper so tests can drive request
  * handlers without spinning up a real stdio transport.
  */
-export function buildServer(cfg: ServerConfig, log: Logger): Server {
+export function buildServer(cfg: ServerConfig, log: Logger, hooks?: CallHooks): Server {
   const client = new AisocClient(cfg, log);
   // This server is a standing read path into a customer's alerts, cases and
   // event lake, and until now nothing recorded what it read. Off unless
@@ -110,11 +134,48 @@ export function buildServer(cfg: ServerConfig, log: Logger): Server {
         outcome: "unknown_tool",
         latency_ms: Date.now() - startedAt,
       });
+      hooks?.after(undefined, "unknown_tool", Date.now() - startedAt);
       // Unknown tool. Return as a tool-failure rather than throwing so the
       // agent gets a clear human message instead of a transport error.
       return toErrorResult(
         `Unknown tool: ${name}. Call tools/list to see what's available.`,
       );
+    }
+
+    // Authorization, when a transport supplied one. Before validation on
+    // purpose: a call that is not allowed must not have its arguments
+    // inspected and reported on, and the refusal has to be recorded whether
+    // or not the arguments were well-formed.
+    let callId: string | undefined;
+    if (hooks) {
+      let verdict: { allowed: boolean; reason?: string; callId?: string };
+      try {
+        verdict = await hooks.before(name, request.params.arguments);
+      } catch (err) {
+        // Fail closed. The gate module raises when it could not reach a
+        // decision, and "could not decide" is not "allowed".
+        log.error(`authorization failed for ${name}`, err);
+        telemetry.record({
+          tool_name: name,
+          argument_keys: keys,
+          outcome: "error",
+          latency_ms: Date.now() - startedAt,
+          error_kind: err instanceof Error ? err.constructor.name : "unknown",
+        });
+        return toErrorResult(err instanceof Error ? err.message : String(err));
+      }
+      callId = verdict.callId;
+      if (!verdict.allowed) {
+        telemetry.record({
+          tool_name: name,
+          argument_keys: keys,
+          outcome: "error",
+          latency_ms: Date.now() - startedAt,
+          error_kind: "NotAuthorized",
+        });
+        hooks.after(callId, "denied", Date.now() - startedAt);
+        return toErrorResult(verdict.reason ?? `${name} is not permitted for this credential.`);
+      }
     }
 
     // Validate via zod. Failed validation gives precise per-field issues.
@@ -129,6 +190,7 @@ export function buildServer(cfg: ServerConfig, log: Logger): Server {
         outcome: "invalid_arguments",
         latency_ms: Date.now() - startedAt,
       });
+      hooks?.after(callId, "invalid_arguments", Date.now() - startedAt);
       return toErrorResult(
         formatErrorForTool(new InvalidArgumentsError(name, issues)),
       );
@@ -142,6 +204,7 @@ export function buildServer(cfg: ServerConfig, log: Logger): Server {
         outcome: "success",
         latency_ms: Date.now() - startedAt,
       });
+      hooks?.after(callId, "success", Date.now() - startedAt);
       return toSuccessResult(result);
     } catch (err) {
       telemetry.record({
@@ -151,6 +214,12 @@ export function buildServer(cfg: ServerConfig, log: Logger): Server {
         latency_ms: Date.now() - startedAt,
         error_kind: err instanceof Error ? err.constructor.name : "unknown",
       });
+      hooks?.after(
+        callId,
+        "error",
+        Date.now() - startedAt,
+        err instanceof Error ? err.constructor.name : "unknown",
+      );
       // Log full error to stderr for debugging; surface a sanitised message
       // to the agent. We deliberately don't include stack traces in the
       // MCP response (PII / secrets risk).
@@ -205,6 +274,19 @@ export async function runServer(cfg: ServerConfig, log: Logger): Promise<void> {
 // ---------------------------------------------------------------------------
 
 /**
+ * structuredContent must be a JSON object (MCP spec), and the SDK client
+ * rejects the whole result otherwise. `typeof [] === "object"`, so the old
+ * guard let arrays through and every tool returning a list
+ * (aisoc_list_investigations) failed with "-32602 Invalid tools/call result".
+ * Arrays still reach the host in full as the fenced JSON text content.
+ */
+function asStructuredContent(data: unknown): Record<string, unknown> | undefined {
+  return typeof data === "object" && data !== null && !Array.isArray(data)
+    ? (data as Record<string, unknown>)
+    : undefined;
+}
+
+/**
  * Convert a `ToolResult` into the MCP `CallToolResult` shape. JSON results
  * become a fenced JSON code block so MCP hosts that render Markdown still
  * show structured data; text results pass through verbatim. We also include
@@ -220,19 +302,12 @@ function toSuccessResult(result: ToolResult): {
     const text = renderJson(result.data);
     return {
       content: [{ type: "text", text }],
-      structuredContent:
-        // Only surface as structuredContent if it's an object, per spec.
-        typeof result.data === "object" && result.data !== null
-          ? (result.data as Record<string, unknown>)
-          : undefined,
+      structuredContent: asStructuredContent(result.data),
     };
   }
   return {
     content: [{ type: "text", text: result.text }],
-    structuredContent:
-      typeof result.data === "object" && result.data !== null
-        ? (result.data as Record<string, unknown>)
-        : undefined,
+    structuredContent: asStructuredContent(result.data),
   };
 }
 

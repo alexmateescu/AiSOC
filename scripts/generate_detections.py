@@ -37,6 +37,7 @@ Design notes
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import re
 import sys
@@ -84,10 +85,12 @@ from detection_specs_index import CATEGORIES  # noqa: E402  (after sys.path twea
 OPERATORS: list[tuple[str, str, str]] = sorted(
     [
         ("_pattern_match_any", "pattern_match_any", "PATTERN_MATCH_ANY"),
+        ("_not_startswith_any", "not_startswith_any", "NOT STARTSWITH_ANY"),
         ("_not_endswith_any", "not_endswith_any", "NOT ENDSWITH_ANY"),
         ("_not_contains_any", "not_contains_any", "NOT CONTAINS_ANY"),
         ("_pattern_match", "pattern_match", "PATTERN_MATCH"),
         ("_not_startswith", "not_startswith", "NOT STARTSWITH"),
+        ("_not_endswith", "not_endswith", "NOT ENDSWITH"),
         ("_startswith_any", "startswith_any", "STARTSWITH_ANY"),
         ("_endswith_any", "endswith_any", "ENDSWITH_ANY"),
         ("_contains_any", "contains_any", "CONTAINS_ANY"),
@@ -272,33 +275,44 @@ def _check(field: str, op: str, expected: Any, event: dict[str, Any]) -> bool:
                     return True
         return False
 
+    # Prefix/suffix/substring operators fold case. The namespaces they are
+    # used on — Windows paths and process names, DNS labels, registry keys —
+    # are themselves case-insensitive, so a case-sensitive comparison is a
+    # rename away from being evaded: `PROCDUMP.EXE` ran the same binary that
+    # `procdump.exe` did and must not read as a different one. `contains_any`,
+    # `contains_all`, `has_any`, `match` and `pattern_match` already folded,
+    # so these were also the odd half of a split the rule author could not see.
+    # Equality and set membership (`eq`, `in`, `not_in`) stay exact: they carry
+    # enum and identifier values where case is meaning, not spelling.
     if op == "endswith":
-        return isinstance(actual, str) and actual.endswith(str(expected))
+        return isinstance(actual, str) and actual.lower().endswith(str(expected).lower())
 
     if op == "endswith_any":
         if not isinstance(expected, list) or not isinstance(actual, str):
             return False
-        return any(actual.endswith(str(s)) for s in expected)
+        haystack = actual.lower()
+        return any(haystack.endswith(str(s).lower()) for s in expected)
 
     if op == "startswith":
-        return isinstance(actual, str) and actual.startswith(str(expected))
+        return isinstance(actual, str) and actual.lower().startswith(str(expected).lower())
 
     if op == "startswith_any":
         if not isinstance(expected, list) or not isinstance(actual, str):
             return False
-        return any(actual.startswith(str(s)) for s in expected)
+        haystack = actual.lower()
+        return any(haystack.startswith(str(s).lower()) for s in expected)
 
     if op == "not_startswith":
         if not isinstance(actual, str):
             return False
-        return not actual.startswith(str(expected))
+        return not actual.lower().startswith(str(expected).lower())
 
     if op == "contains":
         # Single substring contains. List actual ⇒ membership; string ⇒ substring.
         if isinstance(actual, list):
-            return expected in actual
+            return _to_lc_str(expected) in {_to_lc_str(x) for x in actual}
         if isinstance(actual, str):
-            return str(expected) in actual
+            return str(expected).lower() in actual.lower()
         return False
 
     if op == "has_any":
@@ -332,7 +346,27 @@ def _check(field: str, op: str, expected: Any, event: dict[str, Any]) -> bool:
         # otherwise-broad endpoint rules (e.g. browser-credential-grabber).
         if not isinstance(expected, list) or not isinstance(actual, str):
             return False
-        return not any(actual.endswith(str(s)) for s in expected)
+        haystack = actual.lower()
+        return not any(haystack.endswith(str(s).lower()) for s in expected)
+
+    # Three shipped rules used `not_startswith_any` and it had never been an
+    # operator, so `path_not_startswith_any` was read as a field name. The
+    # reachability gate hid that by stripping a suffix the matcher did not
+    # know, so all three were reported reachable and could not fire.
+    #
+    # A missing field returns False, exactly as the negations beside it do: a
+    # negation that flips to True on an absent field fires on every event
+    # that happens not to carry it.
+    if op == "not_startswith_any":
+        if not isinstance(expected, list) or not isinstance(actual, str):
+            return False
+        haystack = actual.lower()
+        return not any(haystack.startswith(str(s).lower()) for s in expected)
+
+    if op == "not_endswith":
+        if not isinstance(actual, str):
+            return False
+        return not actual.lower().endswith(str(expected).lower())
 
     if op == "not_contains_any":
         if not isinstance(expected, list):
@@ -409,6 +443,13 @@ def _literal_str_representer(dumper: yaml.Dumper, data: _LiteralStr):  # type: i
 yaml.add_representer(_LiteralStr, _literal_str_representer)  # type: ignore[arg-type]
 
 
+def _retirement_reason(category: str, slug: str) -> str:
+    """Why this rule is not loaded by the stateless engine, or '' if it is."""
+    from rule_retirement import retirement_reason  # noqa: PLC0415
+
+    return retirement_reason(f"{category}/{slug}")
+
+
 def render_rule_yaml(*, rule_id: str, category: str, spec: dict) -> str:
     """Render the canonical YAML for one detection rule."""
     name: str = spec["name"]
@@ -437,7 +478,15 @@ def render_rule_yaml(*, rule_id: str, category: str, spec: dict) -> str:
     }
     if playbook:
         rule["playbook"] = playbook
-    rule["enabled"] = True
+    # A rule the windowed-translation pass decided about is not loaded by the
+    # stateless engine, so the catalogue must not present it as running. The
+    # reason travels with it: `build_marketplace.py` reads `quarantine_reason`
+    # off the YAML, so a reader of the marketplace entry sees the windowed
+    # rule that replaced it, or why no rule could.
+    retirement = _retirement_reason(category, spec["slug"])
+    rule["enabled"] = not retirement
+    if retirement:
+        rule["quarantine_reason"] = retirement
     rule["author"] = "AiSOC"
     rule["created"] = "2026-05-03"
     rule["modified"] = "2026-05-03"
@@ -604,6 +653,43 @@ def time_of_day_fields(
     }
 
 
+#: Internal address space, by explicit list rather than `ipaddress.is_private`
+#: / `is_global`: those predicates have moved between Python minors, and a
+#: security predicate must not answer differently under two interpreter
+#: builds of the same commit. Mirrors the vendored copy exactly.
+_INTERNAL_NETWORKS = tuple(
+    ipaddress.ip_network(net)
+    for net in (
+        "10.0.0.0/8",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+        "127.0.0.0/8",
+        "169.254.0.0/16",
+        "fc00::/7",
+        "fe80::/10",
+        "::1/128",
+    )
+)
+
+
+def ip_privacy_fields(event: dict[str, Any], requested: set[str] | None = None) -> dict[str, bool]:
+    """`ip_is_internal` from `src_ip`, when some rule asks for it.
+
+    Absent, not false, when the event carries no parseable source address:
+    an unknown origin is not an external one.
+    """
+    if not requested or "ip_is_internal" not in requested:
+        return {}
+    raw = event.get("src_ip")
+    if not isinstance(raw, str) or not raw.strip():
+        return {}
+    try:
+        addr = ipaddress.ip_address(raw.strip())
+    except ValueError:
+        return {}
+    return {"ip_is_internal": any(addr in net for net in _INTERNAL_NETWORKS)}
+
+
 def enrich(
     event: dict[str, Any],
     requested: set[str] | None = None,
@@ -619,6 +705,7 @@ def enrich(
     derived: dict[str, Any] = {}
     derived.update(time_of_day_fields(event, business_start=business_start, business_end=business_end))
     derived.update(comparison_fields(event, requested))
+    derived.update(ip_privacy_fields(event, requested))
     return event if not derived else {**derived, **event}
 
 
@@ -637,7 +724,7 @@ def requested_derived_fields(rules: list[dict[str, Any]]) -> set[str]:
                     walk(value)
                     continue
                 field, _ = _split_op(key)
-                if _COMPARISON_RE.match(field) or field.startswith("is_"):
+                if _COMPARISON_RE.match(field) or field.startswith("is_") or field == "ip_is_internal":
                     names.add(field)
         elif isinstance(clause, list):
             for item in clause:

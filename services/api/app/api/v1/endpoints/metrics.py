@@ -444,6 +444,23 @@ async def get_dashboard_metrics(
             )
         )
 
+    # `source_count_map` used to be built and then only ever *looked up*, so a
+    # tenant pushing events through `POST /v1/ingest/batch` or an inbox
+    # webhook — neither of which creates a connector instance — saw "Connected
+    # Sources 0" above an empty panel while hundreds of their alerts sat in
+    # the queue.
+    #
+    # Nothing is invented here: an entry exists only because alerts carrying
+    # that `connector_type` landed inside the selected window, which is the
+    # same evidence the count itself rests on. The status is `ingesting`
+    # rather than `active` because `active` is a health value the poller
+    # reports and nothing is polling these.
+    for connector_type, count in sorted(source_count_map.items()):
+        if connector_type in seen:
+            continue
+        seen.add(connector_type)
+        sources.append(SourceStat(name=connector_type, count=count, status="ingesting"))
+
     # ── Top MITRE tactics ─────────────────────────────────────────────────────
     # Python-side aggregation: avoids set-returning-function-in-SELECT pitfalls
     # across Postgres versions and gives identical results for our scale
@@ -882,6 +899,32 @@ def _pct_delta(current: float, previous: float) -> float | None:
     return round(((current - previous) / previous) * 100.0, 2)
 
 
+def _events_of_interest_sql(start, end) -> str:
+    """The lake count query for events that arrived in ``[start, end)``.
+
+    Filters on ``ingest_time`` — when the event *landed in the lake*
+    (``DEFAULT now64()`` in ``clickhouse/001_init.sql``), which is the
+    question an intake funnel asks: of the events that arrived in this
+    window, how many advanced. ``event_time`` is when the event *occurred*,
+    which late or backfilled data pushes outside the window, so it is the
+    wrong clock for an arrival funnel — and it is the column
+    ``usage_metering`` already counts arrivals by.
+
+    There is no ``ingested_at`` column: naming it made this query fail with
+    ClickHouse ``Code: 47, Missing columns: 'ingested_at'`` on every call, so
+    the funnel silently served the Postgres fallback on every deployment with
+    a reachable lake (reported in discussion #1568). A pure builder so the
+    column can be checked against the schema in a test without a live
+    ClickHouse.
+    """
+    return (
+        "SELECT count() AS cnt "
+        "FROM aisoc.raw_events "
+        f"WHERE ingest_time >= toDateTime('{start.strftime('%Y-%m-%d %H:%M:%S')}') "
+        f"AND ingest_time < toDateTime('{end.strftime('%Y-%m-%d %H:%M:%S')}')"
+    )
+
+
 async def _events_of_interest(db, tenant_id, start, end) -> int:
     """Count tenant raw events that landed in the analytical lake.
 
@@ -908,12 +951,7 @@ async def _events_of_interest(db, tenant_id, start, end) -> int:
     except Exception:  # pragma: no cover — defensive
         return await _events_of_interest_from_alerts(db, tenant_id, start, end)
 
-    sql = (
-        "SELECT count() AS cnt "
-        "FROM aisoc.raw_events "
-        f"WHERE ingested_at >= toDateTime('{start.strftime('%Y-%m-%d %H:%M:%S')}') "
-        f"AND ingested_at < toDateTime('{end.strftime('%Y-%m-%d %H:%M:%S')}')"
-    )
+    sql = _events_of_interest_sql(start, end)
 
     try:
         rewrite = rewrite_for_tenant(sql, tenant_id, row_cap=1)
@@ -1036,6 +1074,14 @@ async def _funnel_window(db, tenant_id, start, end, *, mitre_total: int) -> dict
     # (i.e. multiple raw events fused into a single alert). Single-event
     # alerts are excluded so the ratio stays meaningful when one detection
     # rule fires repeatedly.
+    #
+    # The predicate was always right and was unsatisfiable until issue #1244:
+    # the only pipeline writer appended one id *before* the insert, and a
+    # deduplicated event's insert is filtered out by the sink's
+    # `WHERE NOT EXISTS`, so no row could ever reach two. The tile read 0 by
+    # construction on a pipeline that was deduplicating the whole time.
+    # `AlertSink._record_deduplicated_event` is what feeds this now; a zero
+    # here means no event deduplicated in the window, not that nobody looked.
     correlation_instances = (
         await db.scalar(
             select(func.count()).where(

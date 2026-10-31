@@ -35,6 +35,7 @@ from app.services.effective_permissions.base import (
     chain_ids,
 )
 from app.services.effective_permissions.gcp import GcpIamResolver
+from app.services.effective_permissions.github import GitHubResolver
 from app.services.effective_permissions.gws import GoogleWorkspaceResolver
 from app.services.effective_permissions.okta import OktaResolver
 
@@ -47,6 +48,7 @@ SUPPORTED_PROVIDERS: dict[str, type[Resolver]] = {
     "gcp": GcpIamResolver,
     "okta": OktaResolver,
     "gws": GoogleWorkspaceResolver,
+    "github": GitHubResolver,
 }
 
 
@@ -62,6 +64,7 @@ _PROVIDER_LOG_TOKENS: dict[str, str] = {
     "gcp": "gcp",
     "okta": "okta",
     "gws": "gws",
+    "github": "github",
 }
 
 

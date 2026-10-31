@@ -16,7 +16,9 @@ import pytest
 from app.core.config import settings
 from app.models.alert import FusionDecision
 from app.services.dlq import InMemoryDLQ
-from app.workers.consumer import FusionWorker
+from app.workers.consumer import FusionWorker, PermanentProcessingError
+
+from tests.kafka_doubles import TwoStageProducer
 
 pytestmark = pytest.mark.asyncio
 
@@ -50,7 +52,10 @@ def _worker_with_dlq() -> tuple[FusionWorker, InMemoryDLQ]:
         )
     )
     worker = FusionWorker(engine=engine, sink=None, dlq=dlq)
-    worker._producer = AsyncMock()  # noqa: SLF001 — test drives the internals
+    # Not an AsyncMock: its `send` cannot distinguish an enqueue from a
+    # delivery, so a publish that never leaves the process passes. See
+    # tests.kafka_doubles.TwoStageProducer.
+    worker._producer = TwoStageProducer()  # noqa: SLF001 — test drives the internals
     return worker, dlq
 
 
@@ -59,7 +64,9 @@ async def test_valid_event_is_processed_and_not_dead_lettered():
     await worker._process_message(_valid_raw_event(), topic=RAW_EVENTS)  # noqa: SLF001
     assert dlq.records == []
     worker._engine.process.assert_awaited_once()  # noqa: SLF001
-    worker._producer.send.assert_awaited_once()  # noqa: SLF001
+    assert len(worker._producer.enqueued) == 1  # noqa: SLF001
+    assert worker._producer.futures[0].done(), "published without waiting for the broker"  # noqa: SLF001
+    await worker._producer.drain()  # noqa: SLF001
 
 
 async def test_missing_ocsf_event_is_dead_lettered_not_dropped():
@@ -98,7 +105,16 @@ async def test_invalid_raw_alert_is_dead_lettered_not_silently_dropped():
     worker._engine.process.assert_not_awaited()  # noqa: SLF001
 
 
-async def test_dead_letter_never_crashes_the_consumer_when_sink_fails():
+async def test_failed_dead_letter_is_not_reported_as_handled():
+    """A poison message whose capture failed must not let the offset commit.
+
+    The old contract returned cleanly when the DLQ raised. The consume loop
+    read that as success and committed the offset, so the poison message
+    existed only in a log line. The capture failure now propagates as a
+    permanent processing failure; `_handle_message` holds the message
+    uncommitted until a DLQ accepts it (or shutdown).
+    """
+
     class ExplodingDLQ:
         async def record(self, dead_letter):  # noqa: ANN001, ARG002
             raise RuntimeError("dlq sink down")
@@ -106,5 +122,5 @@ async def test_dead_letter_never_crashes_the_consumer_when_sink_fails():
     engine = SimpleNamespace(process=AsyncMock())
     worker = FusionWorker(engine=engine, sink=None, dlq=ExplodingDLQ())
     worker._producer = AsyncMock()  # noqa: SLF001
-    # Poison message + failing DLQ: must return cleanly, not raise.
-    await worker._process_message({"tenant_id": TENANT}, topic=RAW_EVENTS)  # noqa: SLF001
+    with pytest.raises(PermanentProcessingError):
+        await worker._process_message({"tenant_id": TENANT}, topic=RAW_EVENTS)  # noqa: SLF001

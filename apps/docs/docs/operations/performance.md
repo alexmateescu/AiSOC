@@ -70,6 +70,102 @@ its 1.5 GiB limit, PostgreSQL sat near 7% CPU on 97 MiB, and ingest never
 exceeded 29 MiB. Fusion is the bottleneck, which is why the drain rate is
 roughly 45% of what ingest accepts.
 
+## Single host, Docker Compose (CORE profile), 2026-10-07
+
+The depth plan's Phase 0 baseline, taken so every later change to ingest,
+fusion or detection has a "before" on the same harness. Saturation only --
+no steady-state pacing was run, so there is no row to plan latency against
+here; use the 2026-09-27 steady-state column for that.
+
+A different host from the run above, which is most of the difference in the
+drain rate: a 6-CPU, 15.6 GiB Linux VM on Apple silicon, against the
+18-core host the September run used. Quoting the two drain rates against
+each other would be comparing machines, not releases.
+
+| | Saturation |
+|---|---|
+| Events pushed | 20,000 |
+| Ingest accepted | 397.6 events/s |
+| Pipeline drain rate | **130.3 alerts/s** |
+| Event-to-alert p50 | 54,903 ms |
+| Event-to-alert p95 | 100,248 ms |
+| Event-to-alert p99 | 103,933 ms |
+| Event-to-alert max | 105,194 ms |
+| Peak consumer lag | 13,952 messages |
+| Lag after drain | 0 messages |
+| Dead-letter rate | 0.00 |
+| Events that produced no alert | 0 |
+| Events that produced more than one alert | 0 |
+
+Fusion again held one core at roughly 77% while ingest never exceeded 29 MiB,
+so the bottleneck is where the September run found it. Artefact:
+`docs/perf/results/2026-10-07-compose-depth-baseline.json`.
+
+**The harness could not run from a clean checkout before this run.** It
+invoked `go run ./services/demo-producer` from the repository root, where
+there is no `go.mod` -- the producer is its own module -- so the subprocess
+failed before starting. Earlier published figures must have come from a
+prebuilt `--producer-bin`, which needs no module context.
+
+## Single host, Docker Compose, realistic mix, 2026-10-11
+
+Every run above pushes one event shape, and every instance of it becomes
+an alert. No estate looks like that. In a real deployment almost all
+telemetry is routine, and the work fusion does is evaluating the detection
+corpus against traffic that matches nothing — so an all-alerting harness
+over-measures the alert path and under-measures detection.
+
+This run is **one alerting event in every hundred** (`--alert-every 100`).
+The other ninety-nine are routine authentication telemetry: successful
+sign-ins, satisfied MFA challenges, read-only console views.
+
+| | Saturation, 1-in-100 mix |
+|---|---|
+| Events pushed | 6,000 (60 alerting, 5,940 routine) |
+| Ingest accepted | 122.6 events/s |
+| Event-to-alert p50 | 946 ms |
+| Event-to-alert p95 | **1,195 ms** |
+| Event-to-alert p99 | 1,503 ms |
+| Event-to-alert max | 1,503 ms |
+| Peak consumer lag | 15 messages |
+| Lag after drain | 0 messages |
+| Routine events that raised an alert | **0 of 5,940 (0.00)** |
+| Alerting events that raised no alert | 0 of 60 |
+| Alerting events that raised more than one | 0 |
+| Dead-letter rate | 0.00 |
+
+Artefact: `docs/perf/results/2026-10-11-compose-realistic-mix.json`.
+**Not an SLO.** One deployment, the machine named at the top of this page,
+that date.
+
+### What the first attempt at this measured, and why it is worth knowing
+
+The first run of this mix reported a routine-event alert rate of **1.00**:
+every one of the 3,960 "benign" events became an alert. Not because the
+detection corpus fired on them — because of where they entered.
+
+The load path sends an undeclared connector type. The ingest normalizer's
+generic fallback files an undeclared connector as class 2001, Security
+Finding, and the promoter promotes OCSF category 2 unconditionally.
+**Eight of the twelve declared connector profiles are category 2**, so on
+those connectors no event can be routine whatever it contains.
+
+The routine population is therefore sent as `okta_system_log`, class 3002
+(Authentication), where promotion needs `severity_id >= 4` — a property of
+the event rather than of the connector. That is what the 0.00 above is
+measuring.
+
+### Two things this run is not
+
+**It is not a measure of the rule index.** The stack it ran against is the
+published image set, not a build of the branch that added the index to
+fusion. The index is measured separately and in process: 2,511 rules,
+797 candidates for a routine cloud event (a 68.3% reduction), and
+2.760 ms/event down to 1.066 ms/event over 2,000 iterations — a 2.6x
+improvement on detection evaluation alone.
+
+**It is not a cloud-hardware run.** See the note at the end of this page.
+
 ## Three-node Kubernetes (kind), 2026-09-27
 
 Installed from `infra/helm/aisoc` with `values-ha.yaml` and
@@ -154,3 +250,89 @@ appearing on the promotion hot path. They are deliberately not set near the
 measured values: GitHub runners are shared, throttled and noisy, and a gate
 that fires on runner jitter gets disabled within a week. **A passing perf job
 is not evidence that any number on this page still holds on your hardware.**
+
+## Scaling on lag
+
+`GET /scale-hint` on the fusion service publishes the consumer backlog
+and a suggested replica count. AiSOC does not scale itself — an
+autoscaler belongs to the cluster, would need write access to the
+orchestrator, and would fight whatever scaler you already run. ADR-0012
+records that decision.
+
+```json
+{
+  "status": "ok",
+  "lag_messages": 31204,
+  "lag_measured": true,
+  "replica_eps": 122.56,
+  "drain_target_seconds": 120.0,
+  "suggested_replicas": 3,
+  "basis": "31204 message(s) backlog, cleared in 120s at 122.6 events/s per replica"
+}
+```
+
+`replica_eps` defaults to the ingest rate measured in the realistic-mix
+run above, which is a laptop's figure. Set `AISOC_FUSION_REPLICA_EPS` to
+your own and the hint is derived from that instead;
+`AISOC_FUSION_DRAIN_TARGET_SECONDS` changes how fast you want a backlog
+cleared.
+
+`lag_measured: false` means the backlog could not be read — no partition
+assignment yet, or a broker that did not answer. It is **not** zero
+backlog, and a scaler should treat it as no signal rather than as an
+all-clear.
+
+A KEDA `ScaledObject` consuming it:
+
+```yaml
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: aisoc-fusion
+spec:
+  scaleTargetRef:
+    name: aisoc-fusion
+  minReplicaCount: 1
+  maxReplicaCount: 20
+  triggers:
+    - type: metrics-api
+      metadata:
+        targetValue: "1"
+        url: "http://aisoc-fusion:8000/scale-hint"
+        valueLocation: "suggested_replicas"
+```
+
+## No cloud-hardware run exists yet, and that is a gap
+
+The depth plan asks for a run on stated cloud hardware, aiming at a
+sustained 5,000 events/s through detection at p95 under 2 seconds on one
+documented instance size.
+
+**Not measured.** Every figure on this page comes from a laptop — one
+18-core Apple-silicon host and one 6-CPU Linux VM on it — or from a kind
+cluster on the same machine. No cloud instance has been provisioned for
+this project, so there is no row here for one, and no number on this page
+should be read as describing one. A laptop VM's disk, network and CPU
+scheduling are not an instance type's, and extrapolating from one to the
+other is how a figure becomes a promise nobody can keep.
+
+What is needed to close it is an account and an instance, not code: the
+harness already records the hardware fingerprint, the load shape and the
+commit into every result file, and `scripts/check_perf_results.py` already
+refuses a result that drops any of them. Running
+
+```bash
+python3 scripts/perf/load_harness.py \
+    --target compose --events 500000 --workers 32 --batch 100 \
+    --alert-every 100 --target-eps 5000 --drain-timeout 1800 \
+    --assert-benign-alert-rate-max 0.001 \
+    --out docs/perf/results/<date>-<instance-type>-realistic-mix.json
+```
+
+on a named instance type produces the row, and the result file carries the
+machine it came off so it cannot later be quoted as something else.
+
+Until then the honest statement is the one at the top of this page: these
+are measurements of specific deployments on specific hardware on specific
+dates, they are not a service-level objective, and the 5,000 events/s
+target remains an aim rather than a result.

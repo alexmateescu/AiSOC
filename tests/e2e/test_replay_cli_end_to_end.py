@@ -334,6 +334,13 @@ def stack(splunk: str) -> Iterator[dict[str, str]]:
         # verdict for the same evidence every time.
         "AISOC_DETERMINISTIC": "1",
         "AISOC_CORS_ORIGINS": "http://127.0.0.1",
+        # The mock Splunk is a loopback HTTP server, and connector egress now
+        # goes through the SSRF guard (GHSA-cq4g-g6wp-4m2w), which refuses
+        # loopback regardless of AISOC_SSRF_ALLOW_PRIVATE. This is the guard's
+        # operator escape for exactly this deployment shape — a vendor
+        # reachable on a local address — named per exact host, with the
+        # metadata blocklist still unoverridable.
+        "AISOC_SSRF_ALLOW_HOSTS": "127.0.0.1",
     }
 
     services = [
@@ -556,10 +563,19 @@ def test_only_latency_differs_between_the_two_runs(stack: dict[str, str], connec
         with urllib.request.urlopen(request, timeout=60) as response:  # noqa: S310
             full.append(response.read().decode())
 
+    # Mirrors LATENCY_LINE_PREFIXES in
+    # packages/aisoc-benchmark/aisoc_benchmark/replay.py. The report carries
+    # latency in three lines — mean, p50 and p95 — any of which can differ by
+    # a millisecond between two runs on one host. The claim this test defends
+    # is that *only* latency is non-reproducible, so the check is that every
+    # differing line is one of those, not that at most one line differs: the
+    # latter flaked the moment p95 came out 0 ms in one run and 1 ms in the
+    # other, because that value appears in both the standalone `- p95:` line
+    # and the `- Mean latency:` summary.
+    latency_prefixes = ("- Mean latency:", "- p50:", "- p95:")
     differing = [(a, b) for a, b in zip(full[0].split("\n"), full[1].split("\n"), strict=True) if a != b]
-    assert len(differing) <= 1, f"more than latency differs between two runs: {differing}"
-    if differing:
-        assert differing[0][0].startswith("- Mean latency:")
+    non_latency = [pair for pair in differing if not pair[0].startswith(latency_prefixes)]
+    assert not non_latency, f"more than latency differs between two runs: {non_latency}"
 
 
 def test_the_run_wrote_nothing_through_triage(stack: dict[str, str]) -> None:

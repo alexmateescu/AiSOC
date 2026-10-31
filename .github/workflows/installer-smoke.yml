@@ -332,6 +332,93 @@ jobs:
           Write-Host "REGRESSION: undocumented exit code $rc from -Diagnose" -ForegroundColor Red
           exit 1
 
+  # The one install step that decides whether the stack can boot at all, run
+  # on the OS it was broken on. install.ps1 plain-copied `.env.example` for
+  # as long as it existed: that ships `ENVIRONMENT=production` with
+  # `SECRET_KEY`, `JWT_SECRET`, `METRICS_TOKEN` and `AISOC_CREDENTIAL_KEY`
+  # empty, and `enforce_secure_defaults` refuses to start the API on exactly
+  # those values — so a fresh Windows install ended at "These services are
+  # not running: api" with nothing pointing back at the copy.
+  #
+  # Nothing here could see it: the Windows jobs above run `-Diagnose` only,
+  # which makes no changes, and a full install needs Docker Desktop. This
+  # job needs neither — it dot-sources the installer's own function and
+  # checks the file it produces, so it exercises the real code path on a
+  # real Windows runner in seconds.
+  env-secrets-windows:
+    name: .env secrets are generated on Windows
+    runs-on: windows-latest
+    timeout-minutes: 10
+    needs: lint-powershell
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          # 3.11, like every other workflow and every service image. The
+          # installer tells a Windows user to install 3.12 — the host
+          # scripts are stdlib-only and support 3.9+ — but CI must exercise
+          # the interpreter the project actually ships.
+          python-version: "3.11"
+
+      - name: Initialize-EnvFile produces a bootable .env
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          # Dot-source the installer with only its final `Invoke-Main` call
+          # removed, so every function is defined and nothing runs. Writing
+          # a temp copy rather than Invoke-Expression keeps the param()
+          # block legal — it has to be the first statement of a script.
+          $src = Get-Content -Raw -Encoding UTF8 .\install.ps1
+          $trimmed = $src -replace '(?m)^Invoke-Main\s*\r?$', ''
+          if ($trimmed -eq $src) {
+            Write-Host '::error::install.ps1 no longer ends by calling Invoke-Main; this job needs updating'
+            exit 1
+          }
+          $shim = Join-Path $env:RUNNER_TEMP 'install-functions.ps1'
+          Set-Content -Path $shim -Value $trimmed -Encoding UTF8
+          . $shim
+
+          $script:RepoRoot = (Get-Location).Path
+          if (Test-Path .env) { Remove-Item .env -Force }
+
+          Initialize-EnvFile
+
+          if (-not (Test-Path .env)) {
+            Write-Host '::error::Initialize-EnvFile produced no .env'
+            exit 1
+          }
+
+          # Every name scripts/ensure_env.py generates must come out with a
+          # real value. The names are read from the generator itself rather
+          # than copied into this file, so adding a secret there cannot
+          # leave this check behind.
+          $generatorSrc = Get-Content -Raw -Encoding UTF8 scripts/ensure_env.py
+          $block = [regex]::Match($generatorSrc, 'GENERATED[^=]*=\s*\{(.*?)\n\}', 'Singleline')
+          if (-not $block.Success) {
+            Write-Host '::error::could not find the GENERATED mapping in scripts/ensure_env.py'
+            exit 1
+          }
+          $names = @([regex]::Matches($block.Groups[1].Value, '"([A-Z0-9_]+)"\s*:') | ForEach-Object { $_.Groups[1].Value })
+          if ($names.Count -lt 1) { Write-Host '::error::no generated-secret names found'; exit 1 }
+          Write-Host "checking $($names.Count) generated secrets"
+
+          $envText = Get-Content .env
+          $empty = @()
+          foreach ($name in $names) {
+            $line = $envText | Where-Object { $_ -match "^$name=" } | Select-Object -Last 1
+            $value = if ($line) { ($line -replace "^$name=", '').Trim() } else { '' }
+            if ([string]::IsNullOrWhiteSpace($value)) { $empty += $name }
+          }
+
+          if ($empty.Count -gt 0) {
+            Write-Host "::error::these secrets are empty in the generated .env: $($empty -join ', ')"
+            Write-Host 'The API refuses to start in production on empty secrets, so this install could not boot.'
+            exit 1
+          }
+
+          Write-Host "OK: all $($names.Count) generated secrets carry values."
+
   uninstaller-safety:
     name: Uninstaller safety refusal exit code
     runs-on: ubuntu-latest

@@ -31,6 +31,8 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 
 from app.connectors.base import BaseConnector, Capability, ConnectorSchema, Field, OAuthHints
+from app.connectors.posture import POSTURE_SNAPSHOT_ID
+from app.connectors.posture import gcp as gcp_posture
 
 logger = structlog.get_logger()
 
@@ -236,6 +238,11 @@ class GCPSCCConnector(BaseConnector):
         """Fetch one SCC finding by full resource name (``external_id`` from normalize)."""
         if not (resource_id or "").strip():
             return {}
+        if resource_id == POSTURE_SNAPSHOT_ID:
+            await self._authenticate()
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                collected = await gcp_posture.collect(client, self._headers(), organization_id=self._organization_id)
+            return collected.to_resource_config()
         rid = resource_id.strip()
         url = f"{_SCC_BASE}/{rid}"
 

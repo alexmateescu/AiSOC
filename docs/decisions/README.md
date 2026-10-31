@@ -22,6 +22,12 @@ ADRs are immutable once accepted. If a decision changes, write a new ADR that su
 | [ADR-0006](./0006-llm-gateway-in-core.md) | The LLM gateway belongs in the CORE profile | accepted | 2026-09-24 |
 | [ADR-0007](./0007-connectors-and-actions-in-core.md) | `connectors` and `actions` belong in the CORE profile | accepted | 2026-09-26 |
 | [ADR-0008](./0008-scim-trust-boundary.md) | SCIM is a third-party write surface into identity, and is scoped by its credential | accepted | 2026-09-27 |
+| [ADR-0009](./0009-auto-close-without-an-earned-grant.md) | Whether a tenant with no closure policy may auto-close | proposed | 2026-10-04 |
+| [ADR-0010](./0010-entity-and-session-context-in-core.md) | Entity and session context in CORE is a Postgres store; Neo4j stays in `full` | accepted | 2026-10-11 |
+| [ADR-0011](./0011-behavioural-baselines-in-core.md) | Behavioural baselines in CORE are a fusion module; the UEBA service stays in `full` | accepted | 2026-10-11 |
+| [ADR-0012](./0012-how-fusion-scales.md) | How fusion scales — required-field indexing, entity partitioning, and a scale hint the cluster acts on | accepted | 2026-10-11 |
+| [ADR-0013](./0013-truncating-a-hash-chained-audit-log.md) | Truncating a hash-chained audit log without making an intact chain look tampered with | accepted | 2026-10-11 |
+| [ADR-0014](./0014-tenant-erasure-crosses-the-audit-trigger.md) | Tenant erasure crosses the audit-log immutability trigger; nothing smaller does | accepted | 2026-10-12 |
 
 ## Authoring conventions
 

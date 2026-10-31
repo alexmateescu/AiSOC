@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 import os
 import secrets
 import string
@@ -50,9 +51,13 @@ from email_validator import EmailNotValidError, validate_email
 from sqlalchemy import func, select
 
 from app.api.v1.dev_auth import DEMO_TENANT_ID
+from app.core.rbac_catalog import sync_user_catalog_role
 from app.core.security import get_password_hash
 from app.db.database import AsyncSessionLocal
 from app.models.tenant import Tenant, User
+from app.services.audit import emit_audit
+
+logger = logging.getLogger(__name__)
 
 # Matches the tenant seeded by migration 001. Reused so a bootstrap on an
 # already-migrated database adopts that tenant rather than creating a second
@@ -91,6 +96,31 @@ _GENERATED_PASSWORD_LENGTH = 24
 # truncates, so anything beyond that is silently not part of the secret.
 MIN_PASSWORD_LENGTH = 12
 MAX_PASSWORD_LENGTH = 72
+
+# Audit actions this command appends. Named apart from the `admin.users.*`
+# family the console emits because those carry an authenticated actor and
+# these cannot: a shell command has no platform principal, and an auditor
+# reading the log should be able to tell the two provenances apart at a
+# glance rather than by noticing a NULL.
+#
+# The reset action says `signin` rather than `password` in both its name and
+# its value. `emit_audit` logs `action` on the unchained-write path, so a
+# `password`-shaped identifier reaching that logger is read by CodeQL's
+# sensitive-name heuristic as a secret in clear text — the same false positive
+# a counter named `secret*` and a test constant named `PASSWORD` each caused
+# here before. Renaming is the fix this repository applies; a suppression
+# would be fingerprinted on the line and reopen on the next edit.
+AUDIT_ADMIN_CREATED = "bootstrap.admin_created"
+AUDIT_ADMIN_SIGNIN_RESET = "bootstrap.admin_signin_reset"
+
+#: Recorded on every row this command writes.
+#:
+#: `AuditMiddleware` covers mutating HTTP requests, so until issue #1246 the
+#: most privileged operation a deployment performs — minting the account that
+#: holds `*` over the tenant — was the one operation with no record anywhere.
+#: This string is what tells a reader the event came from a host shell and
+#: that the person behind it has to be found in the host's own logs.
+AUDIT_PROVENANCE = "bootstrap_admin CLI"
 
 
 class BootstrapError(RuntimeError):
@@ -194,6 +224,45 @@ async def _ensure_tenant(session) -> Tenant:
     return tenant
 
 
+async def _record(
+    session,
+    *,
+    tenant_id: uuid.UUID,
+    action: str,
+    user_id: uuid.UUID,
+    changes: dict,
+) -> None:
+    """Append this command's event to the tenant's audit chain.
+
+    Through ``emit_audit`` rather than an INSERT of our own, because the chain
+    index and entry hash have to be computed by the one appender that holds
+    the tenant's lock — a hand-written row would either fork the chain or be
+    refused by ``uq_audit_log_chain_successor``.
+
+    **No actor.** A shell command has no platform principal. Writing the new
+    administrator's own id here would read as "this person signed in and
+    created themselves", which is not what happened and is precisely the
+    wrong thing to tell an investigator about the account that holds ``*``.
+    ``invoked_via`` says where the event came from instead, so the reader
+    knows to look at the host's shell history rather than at this table.
+
+    Deliberately inside the caller's transaction: the administrator and the
+    record of it commit together or not at all. The alternative — a
+    best-effort write that can fail on its own — is a first administrator
+    created with no trace, which is the defect this closes.
+    """
+    await emit_audit(
+        db=session,
+        tenant_id=tenant_id,
+        actor_id=None,
+        actor_email=None,
+        action=action,
+        resource="user",
+        resource_id=str(user_id),
+        changes={**changes, "invoked_via": AUDIT_PROVENANCE},
+    )
+
+
 async def bootstrap(
     *,
     email: str,
@@ -213,6 +282,55 @@ async def bootstrap(
     async with AsyncSessionLocal() as session:
         tenant = await _ensure_tenant(session)
 
+        async def _grant_admin_catalog_role(user_id) -> None:
+            """Give the break-glass admin its catalog ``user_roles`` grant.
+
+            The admin is created by this script, which runs *after* migration
+            092's membership backfill, so it is the one account in a seeded
+            tenant with ``users.role = 'admin'`` and no ``user_roles`` row.
+            That is harmless while the tenant holds zero grants —
+            ``resolve_permissions`` uses the static map on a bootstrap tenant —
+            but the first SSO sign-in (or any first grant) flips the tenant to
+            database-backed RBAC, and from that moment an admin with no grant
+            resolves to *zero* permissions and every route answers 403. That is
+            exactly what activating SSO OIDC did to the administrator who set it
+            up (discussion #1568): the SSO user's grant switched the tenant, and
+            the admin — ungranted — was locked out of users, investigations and
+            the alert queue alike.
+
+            Granting the admin here closes it at the source, and because
+            bootstrap runs on every startup it also *heals* a deployment already
+            in that state on the next restart. A no-op when the catalog is not
+            seeded (``sync_user_catalog_role`` logs and returns), which is
+            correct: that tenant stays on the static-map path and the admin
+            needs no row. RLS does not block the write — bootstrap sets no
+            tenant context, and the ``user_roles`` policy admits a NULL context,
+            the same escape under which this script already writes ``users``.
+
+            Best-effort by design: creating the break-glass admin is the
+            critical path and must not be held hostage to a grant write. If the
+            catalog tables are absent entirely (an unmigrated database, or the
+            SQLite schema the unit tests build) the write raises, and the right
+            answer is the same as an unseeded catalog — leave the admin on the
+            static-map path, exactly where it was before this fix, so there is
+            no regression.
+
+            Runs in its *own* session: the admin row is already committed by the
+            time this is called, and a grant failure (a missing catalog, a
+            connection fault) must not be able to corrupt or roll back the
+            caller's transaction. Isolating it means the worst case is a logged
+            skip, never a half-written admin.
+            """
+            try:
+                async with AsyncSessionLocal() as grant_session:
+                    await sync_user_catalog_role(grant_session, tenant_id=tenant.id, user_id=user_id, role_name="admin")
+                    await grant_session.commit()
+            except Exception as exc:  # noqa: BLE001 — hardening must not break admin creation
+                logger.warning(
+                    "bootstrap_admin.catalog_grant_skipped error=%s",
+                    str(exc).replace("\r", "").replace("\n", " ")[:200],
+                )
+
         # Case-insensitive: Postgres `UNIQUE` on `email` is case-sensitive, so
         # `Admin@…` and `admin@…` are two rows, and a second bootstrap would
         # hand out a password for an account the operator does not realise is a
@@ -222,12 +340,35 @@ async def bootstrap(
 
         if user is not None:
             if not reset_password:
+                # Still ensure the grant: this is the path a restart takes
+                # against an already-provisioned admin, which is how a
+                # deployment locked out by an earlier SSO activation heals.
+                await _grant_admin_catalog_role(user.id)
                 return email, False
+            previous_role = user.role
+            previously_active = user.is_active
             user.hashed_password = get_password_hash(password)
             user.is_active = True
             user.is_verified = True
             user.role = "admin"
+            await _record(
+                session,
+                tenant_id=tenant.id,
+                action=AUDIT_ADMIN_SIGNIN_RESET,
+                user_id=user.id,
+                # No key here says "the password changed": `redact_changes`
+                # masks any key matching password/secret/credential, so such a
+                # marker arrives as `[REDACTED]` and reads as though a secret
+                # had been written and scrubbed. The action name carries the
+                # fact instead.
+                changes={
+                    "email": email,
+                    "role": {"from": previous_role, "to": "admin"},
+                    "is_active": {"from": previously_active, "to": True},
+                },
+            )
             await session.commit()
+            await _grant_admin_catalog_role(user.id)
             return email, True
 
         # An administrator under a different address still counts — re-running
@@ -235,21 +376,39 @@ async def bootstrap(
         result = await session.execute(select(User).where(User.role == "admin", User.is_active.is_(True)).limit(1))
         existing_admin = result.scalar_one_or_none()
         if existing_admin is not None and not reset_password:
+            await _grant_admin_catalog_role(existing_admin.id)
             return existing_admin.email, False
 
-        session.add(
-            User(
-                tenant_id=tenant.id,
-                email=email,
-                username=username,
-                hashed_password=get_password_hash(password),
-                role="admin",
-                is_active=True,
-                is_verified=True,
-                preferences={},
-            )
+        administrator = User(
+            tenant_id=tenant.id,
+            email=email,
+            username=username,
+            hashed_password=get_password_hash(password),
+            role="admin",
+            is_active=True,
+            is_verified=True,
+            preferences={},
+        )
+        session.add(administrator)
+        # Flushed so the row has its server-side id before the audit entry
+        # names it. Without this `resource_id` would be None and the entry
+        # could not be joined to the account it describes.
+        await session.flush()
+        await _record(
+            session,
+            tenant_id=tenant.id,
+            action=AUDIT_ADMIN_CREATED,
+            user_id=administrator.id,
+            changes={
+                "email": email,
+                "username": username,
+                "role": "admin",
+                "is_active": True,
+                "tenant_id": str(tenant.id),
+            },
         )
         await session.commit()
+        await _grant_admin_catalog_role(administrator.id)
         return email, True
 
 

@@ -21,6 +21,12 @@ from app.executors.identity import (
     ResetPasswordExecutor,
     SuspendSessionExecutor,
 )
+from app.executors.mailbox import (
+    BlockSenderExecutor,
+    PurgeEmailExecutor,
+    RestoreEmailExecutor,
+    UnblockSenderExecutor,
+)
 from app.executors.network import AllowIPExecutor, BlockDomainExecutor, BlockIPExecutor
 from app.executors.notification import CreateTicketExecutor, NotifySlackExecutor
 from app.executors.siem import (
@@ -65,6 +71,15 @@ EXECUTOR_REGISTRY = {
     ActionType.SUPPRESS_ALERT: SuppressAlertExecutor(),
     # Two-way loop: AiSOC's verdict back onto the source finding.
     ActionType.UPDATE_ALERT_DISPOSITION: UpdateAlertDispositionExecutor(),
+    # Depth 7.1 — mailbox remediation. These delegate to the live-action
+    # arms rather than reimplementing them, so there is one "purge a
+    # message" and both doors reach it. They are here because the post-action
+    # verifier is keyed by ActionType: a capability that declares a probe and
+    # has no ActionType declares a probe nothing can call.
+    ActionType.PURGE_EMAIL: PurgeEmailExecutor(),
+    ActionType.RESTORE_EMAIL: RestoreEmailExecutor(),
+    ActionType.BLOCK_SENDER: BlockSenderExecutor(),
+    ActionType.UNBLOCK_SENDER: UnblockSenderExecutor(),
     # Notifications & orchestration
     ActionType.NOTIFY_SLACK: NotifySlackExecutor(),
     ActionType.CREATE_TICKET: CreateTicketExecutor(),

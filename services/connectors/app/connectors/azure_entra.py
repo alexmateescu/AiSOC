@@ -26,6 +26,8 @@ import httpx
 import structlog
 
 from app.connectors.base import BaseConnector, Capability, ConnectorSchema, Field, OAuthHints
+from app.connectors.posture import POSTURE_SNAPSHOT_ID
+from app.connectors.posture import azure as azure_posture
 
 logger = structlog.get_logger()
 
@@ -197,6 +199,26 @@ class AzureEntraConnector(BaseConnector):
 
         return [self.normalize(e) for e in events]
 
+    # ------------------------- posture --------------------------
+
+    async def get_resource_config(self, resource_id: str, at_ts: str | None = None) -> dict[str, Any]:
+        """Return the directory posture snapshot for the sentinel id.
+
+        This connector models the identity plane, so the only resource it can
+        describe is the directory itself. Any other id raises rather than
+        returning ``{}``, because a caller asking for a resource that was
+        never collectable should see that, not an empty config that reads as
+        "this resource has no settings".
+        """
+        if resource_id != POSTURE_SNAPSHOT_ID:
+            raise NotImplementedError(
+                f"{self.connector_id} describes the directory, not individual resources; the only id it answers is {POSTURE_SNAPSHOT_ID!r}"
+            )
+        await self._authenticate()
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            collected = await azure_posture.collect(client, self._headers(), tenant_id=self._tenant_id)
+        return collected.to_resource_config()
+
     # ----------------------- normalize --------------------------
 
     def normalize(self, raw: dict[str, Any]) -> dict[str, Any]:
@@ -210,6 +232,8 @@ class AzureEntraConnector(BaseConnector):
                 "medium": "medium",
                 "high": "high",
             }.get(risk, "medium")
+            device = raw.get("deviceDetail") or {}
+            location = raw.get("location") or {}
             return {
                 "source": self.connector_id,
                 "external_id": raw.get("id", ""),
@@ -224,6 +248,42 @@ class AzureEntraConnector(BaseConnector):
                 "actor": raw.get("userDisplayName"),
                 "actor_email": raw.get("userPrincipalName"),
                 "event_type": "azure.entra.signin.risky",
+                # Depth 7.3 — adversary-in-the-middle session reuse. Graph's
+                # `signIn` resource carries all of this and `normalize()`
+                # emitted none of it, so a rule grouping by session or
+                # comparing networks had nothing to read: the engine
+                # flattens `raw_event` one level and `deviceDetail` arrives
+                # as a dict.
+                #
+                # `sessionId` is read first and `correlationId` is **not** a
+                # fallback for it. They mean different things: a correlation
+                # id identifies one sign-in request, a session id identifies
+                # the session the sign-in established. Substituting one for
+                # the other would make every sign-in its own session and the
+                # reuse detection could never fire, while looking like it
+                # worked. Both are emitted under their own names and the
+                # detection names the one it needs.
+                "session_id": raw.get("sessionId"),
+                "correlation_id": raw.get("correlationId"),
+                "src_asn": raw.get("autonomousSystemNumber"),
+                "src_country": location.get("countryOrRegion"),
+                "user_agent": raw.get("userAgent"),
+                "client_browser": device.get("browser"),
+                "client_os": device.get("operatingSystem"),
+                "client_app": raw.get("clientAppUsed"),
+                "device_id": device.get("deviceId"),
+                "device_compliant": device.get("isCompliant"),
+                # Graph states this directly, so there is nothing to infer.
+                # `None` when the field is absent, which is not the same as
+                # single-factor: an older API version that does not return
+                # it must not make every sign-in look unchallenged.
+                "mfa_satisfied": (
+                    None
+                    if raw.get("authenticationRequirement") is None
+                    else raw.get("authenticationRequirement") == "multiFactorAuthentication"
+                ),
+                "authentication_requirement": raw.get("authenticationRequirement"),
+                "incoming_token_type": raw.get("incomingTokenType"),
                 "raw_event": raw,
                 "created_at": raw.get("createdDateTime"),
             }

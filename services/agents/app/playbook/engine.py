@@ -13,11 +13,14 @@ Design goals:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
+import re
+import secrets
 import time
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import Enum
 from typing import Any
 
@@ -25,8 +28,15 @@ import httpx
 
 from app.playbook import pause as playbook_pause
 
-from . import action_bridge
-from .bounds import clamp_timeout
+from . import action_bridge, idempotency, references, verification
+from .bounds import (
+    ABSOLUTE_MAX_LOOP_ITERATIONS,
+    ABSOLUTE_MAX_PARALLEL_BRANCHES,
+    DEFAULT_MAX_LOOP_ITERATIONS,
+    MAX_INLINE_WAIT_SECONDS,
+    clamp_timeout,
+    clamp_wait_seconds,
+)
 from .errors import PermanentStepFailure
 from .models import Playbook, PlaybookStep, StepCondition, StepType
 from .ssrf_guard import SSRFError, validate_outbound_url
@@ -93,6 +103,10 @@ class PlaybookRun:
         self.run_id: str = str(uuid.uuid4())
         self.playbook_id: str = playbook.id
         self.playbook_name: str = playbook.name
+        #: The top-level step list, so a `wait` can find the index it must
+        #: resume from. A nested wait has no such index and is refused
+        #: rather than written as a pause nothing can use.
+        self.steps: list[PlaybookStep] = list(playbook.steps)
         self.status: RunStatus = RunStatus.PENDING
         self.trigger_context: dict[str, Any] = trigger_context
         # Accumulated output from previous steps — available to later steps as {{prev.*}}
@@ -401,44 +415,154 @@ async def _handle_investigate(step: PlaybookStep, context: dict[str, Any], http:
     return r.json()
 
 
-async def _handle_notify(step: PlaybookStep, context: dict[str, Any], http: httpx.AsyncClient) -> dict:
-    channel = step.params.get("channel", "webhook")
-    url = step.params.get("url", "")
-    message = step.params.get("message", "AiSOC playbook notification")
-    # Simple template substitution
-    for k, v in context.items():
-        message = message.replace(f"{{{{{k}}}}}", str(v))
+#: ``${NAME}`` — an integration this tenant has configured. Resolved by the
+#: API against connector instances and the vault; see `app.playbook.references`.
+_REFERENCE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
-    if channel == "webhook" and url:
-        # SSRF guard: webhook URLs are author-controlled; reject loopback,
-        # cloud-metadata, and other unsafe destinations before dispatching.
+#: ``{{dot.path}}`` — a value from the run context. Rendered in this process,
+#: because the context never leaves it.
+_CONTEXT_TOKEN = re.compile(r"\{\{\s*([A-Za-z_][\w.]*)\s*\}\}")
+
+
+def _render_context(text: str, context: dict[str, Any]) -> str:
+    """Substitute ``{{dot.path}}`` from the run context.
+
+    An unresolved path renders as the empty string rather than leaving the
+    braces in place. Leaving them would put a literal ``{{alert.user}}`` into
+    a URL path or a pager message, which reads to whoever receives it as a
+    templating bug in AiSOC rather than as a field the alert did not carry.
+    ``_resolve_field`` already distinguishes the two for conditions; here the
+    step's own result records which paths were empty.
+    """
+
+    def _one(match: re.Match[str]) -> str:
+        value = _resolve_field(context, match.group(1))
+        if value is None:
+            return ""
+        if isinstance(value, dict | list):
+            return json.dumps(value, separators=(",", ":"))
+        return str(value)
+
+    return _CONTEXT_TOKEN.sub(_one, text)
+
+
+def _unrendered_context_paths(text: str, context: dict[str, Any]) -> list[str]:
+    return sorted({m.group(1) for m in _CONTEXT_TOKEN.finditer(text) if _resolve_field(context, m.group(1)) is None})
+
+
+def _notify_execute_enabled() -> bool:
+    """Whether a notify step may reach a person.
+
+    Off unless an operator turns it on, for the reason every outbound verb
+    in this engine is: a playbook that pages on-call the moment it is
+    imported is a worse first-run experience than one that previews.
+    Governance downstream can still refuse what this allows.
+    """
+    return os.getenv("AISOC_PLAYBOOK_NOTIFY_EXECUTE", "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _http_execute_enabled() -> bool:
+    """Whether an http step may leave the process.
+
+    An ``http`` step in the shipped packs deletes sessions, posts WAF rules
+    and resets passwords in bulk. It changes vendor state through a path the
+    capability contract cannot see, so it ships off and previews instead.
+    """
+    return os.getenv("AISOC_PLAYBOOK_HTTP_EXECUTE", "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
+async def _handle_http(step: PlaybookStep, context: dict[str, Any], http: httpx.AsyncClient | None) -> dict:
+    """Call one path on one of the tenant's configured integrations.
+
+    Three things happen in an order that matters:
+
+    1. ``{{dot.path}}`` is rendered from the run context, in this process.
+    2. ``${NAME}`` is resolved by the API from connector instances and the
+       vault. Before this, nothing resolved it and all 69 steps in the packs
+       died at the guard with ``scheme '' is not allowed`` — ``urlsplit``
+       reads a string beginning ``${`` as having no scheme.
+    3. The *resolved* URL goes through the SSRF guard. After substitution,
+       not before: the value came out of a tenant record, so it is exactly
+       as untrusted as the step that asked for it.
+    """
+    method = str(step.params.get("method", "POST")).upper()
+    raw_url = str(step.params.get("url", ""))
+    headers_ref = str(step.params.get("headers_env") or "")
+    body_template = step.params.get("body_template")
+
+    url = _render_context(raw_url, context)
+    names = [m.group(1) for m in _REFERENCE.finditer(url)]
+    if headers_ref:
+        names.append(headers_ref)
+
+    resolved = await references.resolve(tenant_id=str(context.get("tenant_id") or ""), names=names) if names else {}
+
+    missing = sorted({name for name in names if name not in resolved})
+    if missing:
+        return {
+            "executed": False,
+            "error": (
+                f"this tenant has no integration configured for {', '.join(missing)}, so the step was not sent. "
+                f"Connect it, or map the name on the connector instance."
+            ),
+            "unresolved_references": missing,
+        }
+
+    url = _REFERENCE.sub(lambda m: str(resolved[m.group(1)].get("value", "")), url)
+
+    headers: dict[str, str] = {str(k): str(v) for k, v in (step.params.get("headers") or {}).items()}
+    if headers_ref:
+        headers.update({str(k): str(v) for k, v in (resolved[headers_ref].get("headers") or {}).items()})
+
+    body: Any = step.params.get("body", {})
+    if isinstance(body_template, str):
+        rendered = _render_context(body_template, context)
         try:
-            validate_outbound_url(url)
-        except SSRFError as exc:
-            raise SSRFError(f"notify step rejected: {exc}") from exc
-        r = await http.post(url, json={"text": message}, timeout=step.timeout_seconds)
-        return {"status": r.status_code}
-    # Why it did not deliver, accurately. This said "no url" whatever the
-    # cause, including when a url *was* supplied and the channel simply
-    # was not `webhook` — so an operator debugging a silent playbook went
-    # looking for a missing field that was right there in front of them.
-    reason = "no url" if not url else f"channel {channel!r} has no sender; only 'webhook' delivers, and a url was supplied"
-    return {"channel": channel, "message": message, "delivered": False, "reason": reason}
+            body = json.loads(rendered)
+        except json.JSONDecodeError:
+            # Sent as text rather than guessed at. A body_template that does
+            # not render to JSON is an authoring error, and silently posting
+            # ``{}`` instead would make a bulk password reset look like it
+            # ran against nobody.
+            body = None
+            headers.setdefault("Content-Type", "text/plain")
 
-
-async def _handle_http(step: PlaybookStep, context: dict[str, Any], http: httpx.AsyncClient) -> dict:
-    method = step.params.get("method", "POST").upper()
-    url = step.params.get("url", "")
-    body = step.params.get("body", {})
-    headers = step.params.get("headers", {})
-    # SSRF guard: arbitrary HTTP calls from playbooks must not reach
-    # loopback, RFC1918, link-local, or cloud-metadata endpoints by default.
     try:
         validate_outbound_url(url)
     except SSRFError as exc:
         raise SSRFError(f"http step rejected: {exc}") from exc
-    r = await http.request(method, url, json=body, headers=headers, timeout=step.timeout_seconds)
-    return {"status": r.status_code, "body": r.text[:500]}
+
+    # Header *names* only, in both branches. The run record is readable by
+    # anyone with access to the case, and a resolved bearer token in it is a
+    # credential leak that outlives the incident.
+    record: dict[str, Any] = {
+        "url": url,
+        "method": method,
+        "header_names": sorted(headers),
+        "unrendered_context_paths": _unrendered_context_paths(raw_url, context),
+    }
+
+    if not _http_execute_enabled():
+        return {
+            **record,
+            "executed": False,
+            "previewed": True,
+            "reason": "http steps preview unless AISOC_PLAYBOOK_HTTP_EXECUTE is set; nothing was sent",
+        }
+
+    assert http is not None, "a live http step needs the engine's client"
+    if body is None:
+        response = await http.request(
+            method, url, content=_render_context(str(body_template), context), headers=headers, timeout=step.timeout_seconds
+        )
+    else:
+        response = await http.request(method, url, json=body, headers=headers, timeout=step.timeout_seconds)
+    return {
+        **record,
+        "executed": 200 <= response.status_code < 300,
+        "status": response.status_code,
+        "body": response.text[:500],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -479,7 +603,65 @@ _TARGET_KEYS: dict[StepType, tuple[str, ...]] = {
     StepType.SEARCH_SIEM: ("query", "search"),
     StepType.CREATE_NOTABLE_EVENT: ("title", "name"),
     StepType.CREATE_TICKET: (),
+    # Depth 5.1. `notify` was answered inside the engine with one sender
+    # (`channel == "webhook"`) while all 63 steps in the packs address Slack,
+    # Teams, email or PagerDuty by `webhook_env` / `service_key_env`. It is a
+    # contracted capability in `services/actions` with a Slack arm that
+    # predates this work, so the verb moves to where its credentials and its
+    # contract already live rather than growing a second set of senders here.
+    StepType.NOTIFY: ("recipient", "channel_name", "to"),
+    # Same move, different reason. The in-engine handler imported
+    # `app.clients.osctrl_client`, which exists only in `services/actions`, so
+    # every live query in this image raised. The clients it wanted are beside
+    # the executors it now dispatches to.
+    StepType.OSQUERY_LIVE_QUERY: ("host", "hostname", "device_id", "host_id"),
 }
+
+#: Verbs whose step params do not already read as the capability's params.
+#: Keyed by step type, each returns ``(vendor_id, params)``.
+#:
+#: Written as a table rather than inside the handler factory so the mapping
+#: is visible next to the target keys above. A verb that needs one of these
+#: and does not have one dispatches with the author's spelling, which the
+#: executor does not read — the shape that made every pack notify send the
+#: default string, because the packs write `message_template` and the old
+#: handler read `message`.
+_PARAM_ADAPTERS: dict[StepType, Any] = {}
+
+
+def _notify_params(step: PlaybookStep, context: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """Channel picks the vendor arm; the rendered template is the message.
+
+    The channel is pinned into ``vendor_id`` rather than left for the
+    executor to infer, for the reason the SIEM arms pin ``alert_vendor``:
+    otherwise whichever destination happens to have credentials first
+    decides where a page goes.
+    """
+    params = dict(step.params)
+    template = params.pop("message_template", None) or params.get("message") or "AiSOC playbook notification"
+    params["message"] = _render_context(str(template), context)
+    channel = str(params.pop("channel", "") or "").strip().lower()
+    return channel, params
+
+
+def _osquery_params(step: PlaybookStep, context: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """The backend picks the vendor arm; the hosts are the fleet to ask.
+
+    The timeout is clamped here and again in the executor. Not belt and
+    braces for its own sake: ``params`` is an untyped dict that bypasses the
+    Pydantic bound on ``PlaybookStep.timeout_seconds``, so a playbook could
+    otherwise ask a fleet for a day — and the two services deploy
+    independently, so neither can rely on the other having clamped first.
+    """
+    params = dict(step.params)
+    backend = str(params.pop("backend", "") or "osctrl").strip().lower()
+    if not params.get("target_hosts"):
+        host = _resolve_target(step, context)
+        if host:
+            params["target_hosts"] = [host]
+    params["timeout_seconds"] = clamp_timeout(params.get("timeout_seconds", 60), default=60)
+    return backend, params
+
 
 #: Step types that name a verb but deliberately have no bridge, with the
 #: reason. The engine reports the reason instead of a bare "no handler", and
@@ -537,12 +719,18 @@ def _make_response_handler(step_type: StepType):
     """
 
     async def _handler(step: PlaybookStep, context: dict[str, Any], http: httpx.AsyncClient) -> dict:
+        adapter = _PARAM_ADAPTERS.get(step_type)
+        if adapter is None:
+            vendor_id = str(step.params.get("vendor") or step.params.get("vendor_id") or "")
+            params = dict(step.params)
+        else:
+            vendor_id, params = adapter(step, context)
         report = await action_bridge.dispatch_step(
             capability=step_type.value,
             tenant_id=str(context.get("tenant_id") or ""),
             target=_resolve_target(step, context),
-            params=dict(step.params),
-            vendor_id=str(step.params.get("vendor") or step.params.get("vendor_id") or ""),
+            params=params,
+            vendor_id=vendor_id,
             confidence=_resolve_confidence(step, context),
             playbook_run_id=str(context.get("_run_id") or ""),
             playbook_step_id=step.id,
@@ -570,131 +758,23 @@ async def _handle_close_case(step: PlaybookStep, context: dict[str, Any], http: 
     return {"case_id": case_id, "status": "closed"}
 
 
-async def _handle_osquery_live_query(step: PlaybookStep, context: dict[str, Any], http: httpx.AsyncClient) -> dict:
-    """Dispatch a distributed osquery live query via osctrl, FleetDM, or aisoc-direct.
-
-    Expected ``step.params`` keys
-    ------------------------------
-    backend : str
-        One of ``"osctrl"``, ``"fleetdm"``, ``"aisoc_direct"``.
-    instance_id : str
-        Connector instance ID (looked up from the API to retrieve credentials).
-    target_hosts : list[str]
-        Host UUIDs / hostnames to query.
-    template : str
-        Allowlist template ID (see ``osquery_allowlist``).
-    template_params : dict, optional
-        Parameters forwarded to the template renderer.
-    timeout_seconds : int, optional
-        How long to wait for all hosts to respond (default: 60).
-    """
-    # These osquery clients live in `services/actions`, not in this service —
-    # `services/agents/app/clients/` does not exist. Every `osquery_live_query`
-    # step therefore died with an unhandled ModuleNotFoundError at execution
-    # time, and the `except AllowlistError` handler below referenced a name
-    # that could never bind. The NL playbook drafter actively offers this step
-    # type, so a user could author a playbook that was guaranteed to crash.
-    #
-    # Fail with an actionable message instead of a traceback. Wiring this
-    # properly means dispatching through the actions service over HTTP, the
-    # same way SIEM writeback already does, rather than importing across a
-    # service boundary that does not exist in this image.
-    try:
-        from app.clients.aisoc_direct_client import AiSOCDirectClient  # noqa: PLC0415
-        from app.clients.fleetdm_client import FleetDMClient  # noqa: PLC0415
-        from app.clients.osctrl_client import OsctrlClient  # noqa: PLC0415
-        from app.clients.osquery_allowlist import AllowlistError  # noqa: PLC0415
-    except ModuleNotFoundError as exc:
-        # Raised, not returned. A returned dict leaves ``step_status`` at
-        # SUCCESS, so every live query in the shipped agents image — where
-        # these clients are always absent — was reported as a step that ran
-        # while nothing had been asked of any endpoint. That is the same
-        # defect the missing-handler branch above exists to remove, and it
-        # became reachable from the console the moment the editor could
-        # author this step type.
-        #
-        # Permanent because the module will not appear between attempt one
-        # and attempt four: the image either ships the clients or it does not.
-        logger.error("playbook.osquery_clients_unavailable: %s", exc)
-        raise PermanentStepFailure(
-            "osquery_live_query is not executable in the agents service: the "
-            "osquery backend clients ship in services/actions. Run this step "
-            "through the actions service, or remove it from the playbook."
-        ) from exc
-
-    backend: str = step.params.get("backend", "osctrl")
-    target_hosts: list[str] = step.params.get("target_hosts") or [context.get("host_id") or context.get("host", "")]
-    template: str = step.params.get("template", "")
-    template_params: dict[str, Any] = step.params.get("template_params") or {}
-    # Runtime clamp — params bypass the Pydantic validator on PlaybookStep, so
-    # a malicious or malformed playbook could otherwise pin the connector
-    # thread for hours. See services/agents/app/playbook/bounds.py.
-    timeout_seconds: int = clamp_timeout(step.params.get("timeout_seconds", 60), default=60)
-
-    if not template:
-        return {"error": "osquery_live_query: 'template' param is required", "partial": True}
-
-    # Credential resolution: fetch the connector instance config from the API.
-    instance_id: str = step.params.get("instance_id") or context.get("connector_instance_id", "")
-    creds: dict[str, Any] = {}
-    if instance_id:
-        try:
-            r = await http.get(
-                f"{_API_URL}/api/v1/connectors/instances/{instance_id}",
-                timeout=10,
-            )
-            if r.status_code == 200:
-                creds = r.json().get("auth_config") or {}
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Could not fetch connector creds for %s: %s", instance_id, exc)
-
-    try:
-        if backend == "osctrl":
-            client = OsctrlClient(
-                base_url=creds.get("base_url") or step.params.get("base_url", ""),
-                environment=creds.get("environment") or step.params.get("environment", "default"),
-                api_token=creds.get("api_token") or step.params.get("api_token", ""),
-                verify_tls=step.params.get("verify_tls", True),
-            )
-            return await client.live_query(target_hosts, template, template_params, timeout_seconds)
-
-        if backend == "fleetdm":
-            client_fleet = FleetDMClient(
-                base_url=creds.get("base_url") or step.params.get("base_url", ""),
-                api_token=creds.get("api_token") or step.params.get("api_token") or None,
-                username=creds.get("username") or step.params.get("username") or None,
-                password=creds.get("password") or step.params.get("password") or None,
-                verify_tls=step.params.get("verify_tls", True),
-            )
-            return await client_fleet.live_query(target_hosts, template, template_params, timeout_seconds)
-
-        if backend == "aisoc_direct":
-            client_direct = AiSOCDirectClient(
-                base_url=creds.get("base_url") or step.params.get("base_url", ""),
-                api_token=creds.get("api_token") or step.params.get("api_token", ""),
-            )
-            return await client_direct.live_query(target_hosts, template, template_params, timeout_seconds)
-
-        return {"error": f"Unknown osquery backend: {backend!r}", "partial": True}
-
-    except AllowlistError as exc:
-        return {"error": f"osquery allowlist violation: {exc}", "partial": True}
-    except NotImplementedError as exc:
-        return {"error": str(exc), "partial": True, "stub": True}
-
-
 #: Verbs dispatched through the action registry. Derived from `_TARGET_KEYS`
 #: so the two cannot drift: a verb added to one without the other would
 #: either dispatch with no target or declare a target nothing reads.
 RESPONSE_STEP_TYPES: frozenset[StepType] = frozenset(_TARGET_KEYS)
 
+_PARAM_ADAPTERS.update(
+    {
+        StepType.NOTIFY: _notify_params,
+        StepType.OSQUERY_LIVE_QUERY: _osquery_params,
+    }
+)
+
 _HANDLERS = {
     StepType.ENRICH: _handle_enrich,
     StepType.INVESTIGATE: _handle_investigate,
-    StepType.NOTIFY: _handle_notify,
     StepType.HTTP: _handle_http,
     StepType.CLOSE_CASE: _handle_close_case,
-    StepType.OSQUERY_LIVE_QUERY: _handle_osquery_live_query,
     **{step_type: _make_response_handler(step_type) for step_type in sorted(RESPONSE_STEP_TYPES, key=lambda s: s.value)},
 }
 
@@ -756,6 +836,70 @@ async def _suspend_for_approval(pr: PlaybookRun, step: PlaybookStep, step_idx: i
         approval_id=approval_id,
         ttl_hours=_approval_ttl(step),
     )
+
+
+async def _suspend_for_wait(
+    pr: PlaybookRun,
+    step: PlaybookStep,
+    http: Any,
+    *,
+    seconds: int,
+    until_callback: bool,
+) -> Any:
+    """Persist where a long wait stopped, and how it will be woken.
+
+    The step index is found by identity rather than passed in, because a
+    wait can sit inside a ``loop`` or a ``parallel`` branch where there is
+    no top-level index to resume from. A nested wait that cannot name its
+    resume point is refused here rather than written as a pause nothing
+    can use — a row that looks resumable and is not is worse than no row.
+    """
+    tenant_id = str(pr.context.get("tenant_id") or pr.trigger_context.get("tenant_id") or "")
+    if not tenant_id:
+        logger.warning("Wait step %s has no tenant in context; cannot suspend", step.name)
+        return None
+
+    step_index = next((i for i, candidate in enumerate(pr.steps) if candidate.id == step.id), -1)
+    if step_index < 0:
+        logger.error(
+            "Wait step %s is nested inside control flow, so the run has no index to resume from; failing the step closed",
+            step.name,
+        )
+        return None
+
+    return await playbook_pause.suspend(
+        kind="wait",
+        resume_at=(datetime.now(UTC) + timedelta(seconds=seconds)) if seconds > 0 and not until_callback else None,
+        resume_token=secrets.token_urlsafe(32),
+        tenant_id=tenant_id,
+        run_id=pr.run_id,
+        playbook_id=pr.playbook_id,
+        playbook_name=pr.playbook_name,
+        step_index=step_index,
+        step_id=step.id,
+        run_context=pr.context,
+        step_results=pr.step_results,
+        ttl_hours=_wait_ttl(step, seconds),
+    )
+
+
+def _wait_ttl(step: PlaybookStep, seconds: int) -> float:
+    """How long the pause row may sit before it expires with an outcome.
+
+    Comfortably past the wait itself, so a timer that fires a little late
+    is still resumable; an author who sets a deadline gets theirs instead.
+    """
+    raw = step.params.get("expires_in_hours")
+    try:
+        if raw is not None:
+            return float(raw)
+    except (TypeError, ValueError):
+        # An unparseable deadline falls through to the computed default
+        # below rather than failing the step. The value is author-supplied
+        # in playbook YAML, and refusing to run a containment playbook over
+        # a malformed TTL would be the worse outcome of the two.
+        pass
+    return max(playbook_pause.DEFAULT_WAIT_TTL_HOURS, (seconds / 3600.0) * 2)
 
 
 def _approval_ttl(step: PlaybookStep) -> float | None:
@@ -861,20 +1005,991 @@ async def resume_after_approval(
     return await PlaybookEngine().resume(playbook, pause)
 
 
+async def resume_wait(*, resume_token: str) -> PlaybookRun | None:
+    """Continue a run suspended at a ``wait`` step.
+
+    Returns the finished run, or None when the token matches no waiting
+    pause. The pause is resolved **before** the run continues, so a
+    callback delivered twice — which is the normal behaviour of every
+    webhook sender that does not get a 2xx quickly enough — resumes once.
+    """
+    pause = await playbook_pause.find_wait_by_token(resume_token=resume_token)
+    if pause is None:
+        return None
+    return await _resume_pause(pause, resolution="resumed by callback")
+
+
+async def resume_verification(*, resume_token: str, answer: str, signature: str) -> PlaybookRun | None:
+    """Record a signed answer and continue the run that was waiting on it.
+
+    Returns the finished run, or None when the token matches no waiting
+    verification, the signature does not verify for the stage the pause is
+    actually on, or somebody answered first. The caller gets one refusal
+    for all of those on purpose, so the route cannot be used to learn
+    whether a token was ever valid.
+
+    The outcome is written **before** the pause is resolved and the pause
+    is resolved **before** the run continues, which is what makes a double
+    click resume once: the second attempt matches no unanswered, waiting
+    row.
+    """
+    pause = await playbook_pause.find_verification_by_token(resume_token=resume_token)
+    if pause is None:
+        return None
+
+    stage = pause.verification_stage or verification.STAGE_USER
+    if not verification.signature_valid(resume_token=resume_token, answer=answer, stage=stage, signature=signature):
+        # A user-stage link presented after the question escalated lands
+        # here, which is the point of binding the stage into the signature.
+        logger.info("playbook verification: refused an answer whose signature does not verify for stage %s", stage)
+        return None
+
+    if not await playbook_pause.record_verification_outcome(pause_id=pause.id, tenant_id=pause.tenant_id, outcome=answer):
+        # Already answered. Not an error: a chat client that prefetches
+        # links, or a person who clicked twice.
+        return None
+
+    return await _resume_pause(
+        pause,
+        resolution=f"{stage} answered {answer}",
+        extra_context=_verification_context(stage=stage, outcome=answer, pause=pause),
+    )
+
+
+def _verification_context(*, stage: str, outcome: str, pause: Any) -> dict[str, Any]:
+    """What a resumed run reads to branch on.
+
+    Both the nested object and the flat ``verification_outcome`` are set.
+    The nested form is what a reader writes conditions against; the flat
+    one exists because ``_resolve_field`` walks dots and a playbook author
+    writing ``verification_outcome`` should not get silence.
+    """
+    payload = {
+        "outcome": outcome,
+        "stage": stage,
+        "subject": pause.verification_subject,
+        "manager": pause.verification_manager,
+    }
+    return {"verification": payload, "verification_outcome": outcome}
+
+
+async def resume_due_verifications(*, now: Any = None, limit: int = 50) -> list[str]:
+    """Escalate or time out every verification whose stage deadline passed.
+
+    Two different things, and the stage decides which:
+
+    * **User stage.** Resolve the manager and ask them, keeping the same
+      pause and the same token. The run stays suspended — this is the
+      escalation, not the end of the question. A subject with no manager
+      in the directory has nobody to escalate to, so the run resumes
+      immediately with ``no_manager`` rather than waiting out a second
+      deadline for a prompt that was never sent.
+    * **Manager stage.** Nobody answered. The run resumes with
+      ``timed_out``, which is the outcome the plan requires and is a thing
+      a playbook can branch on — unlike an expired pause, which leaves the
+      run neither waiting nor finished.
+
+    Returns the run ids that *resumed*. An escalation is deliberately not
+    in that list: nothing resumed, a second question was asked.
+    """
+    resumed: list[str] = []
+    for pause in await playbook_pause.due_verifications(now=now, limit=limit):
+        stage = pause.verification_stage or verification.STAGE_USER
+        if stage == verification.STAGE_MANAGER:
+            run = await _time_out_verification(pause)
+            if run is not None:
+                resumed.append(pause.run_id)
+            continue
+        run = await _escalate_verification(pause)
+        if run is not None:
+            resumed.append(pause.run_id)
+    return resumed
+
+
+async def _time_out_verification(pause: Any) -> PlaybookRun | None:
+    """Nobody answered either question. Resume with the recorded outcome."""
+    if not await playbook_pause.record_verification_outcome(pause_id=pause.id, tenant_id=pause.tenant_id, outcome="timed_out"):
+        return None
+    return await _resume_pause(
+        pause,
+        resolution="nobody answered before the manager deadline",
+        extra_context=_verification_context(stage=verification.STAGE_MANAGER, outcome="timed_out", pause=pause),
+    )
+
+
+async def _escalate_verification(pause: Any) -> PlaybookRun | None:
+    """Ask the manager. Returns a run only when there was nobody to ask."""
+    subject = pause.verification_subject or ""
+    context = pause.run_context or {}
+    # The step's own params travelled with the pause, so an author who
+    # named a manager is honoured on the sweeper too. Reading `{}` here was
+    # the first version and it silently ignored the author.
+    step_params = dict(context.get("_verification_step_params") or {})
+    lookup = await verification.resolve_manager(
+        tenant_id=pause.tenant_id,
+        subject=subject,
+        step_params=step_params,
+        context=context,
+    )
+    if lookup.manager is None:
+        if lookup.source == "error":
+            # Transient. Leaving the row waiting means the next sweep tries
+            # again; recording `no_manager` here would turn a database blip
+            # into a permanent statement about somebody's reporting line.
+            logger.warning(
+                "playbook verification: manager lookup for run %s failed; leaving the pause to the next sweep",
+                pause.run_id,
+            )
+            return None
+        if not await playbook_pause.record_verification_outcome(pause_id=pause.id, tenant_id=pause.tenant_id, outcome="no_manager"):
+            return None
+        return await _resume_pause(
+            pause,
+            resolution=f"{subject} did not answer and has no manager in the directory",
+            extra_context=_verification_context(stage=verification.STAGE_USER, outcome="no_manager", pause=pause),
+        )
+
+    deadline = datetime.now(UTC) + timedelta(seconds=verification.manager_stage_seconds())
+    if not await playbook_pause.escalate_to_manager(
+        pause_id=pause.id,
+        tenant_id=pause.tenant_id,
+        manager=lookup.manager,
+        resume_at=deadline,
+    ):
+        # Another replica escalated, or an answer arrived first. Both are
+        # fine and neither is this sweep's business any more.
+        return None
+
+    try:
+        links = verification.answer_links(
+            base_url=_verification_public_url(),
+            resume_token=pause.resume_token or "",
+            stage=verification.STAGE_MANAGER,
+        )
+    except verification.VerificationConfigError as exc:
+        logger.error("playbook verification: cannot sign the manager prompt for run %s: %s", pause.run_id, exc)
+        return None
+
+    step = PlaybookStep(
+        id=pause.step_id,
+        name="verification escalation",
+        type=StepType.VERIFY_USER,
+        params=step_params,
+    )
+    delivery = await _deliver_verification_prompt(
+        step=step,
+        context=context,
+        tenant_id=pause.tenant_id,
+        recipient=lookup.manager,
+        stage=verification.STAGE_MANAGER,
+        links=links,
+        run_id=pause.run_id,
+    )
+    if not delivery.get("executed"):
+        # Said out loud at warning. The row is now on the manager stage
+        # with a deadline, so the run still ends with `timed_out` rather
+        # than hanging — but an operator should know the second question
+        # never reached anybody.
+        logger.warning(
+            "playbook verification: escalation for run %s was recorded but the prompt did not deliver: %s",
+            pause.run_id,
+            delivery.get("error") or delivery.get("summary") or "unknown",
+        )
+    return None
+
+
+async def resume_due_waits(*, now: Any = None, limit: int = 50) -> list[str]:
+    """Resume every timer wait that has come due. Returns the run ids.
+
+    Driven by ``app.playbook.sweeper``. Without a caller this function and
+    the whole durable half of ``wait`` would be the shape this plan keeps
+    finding: a mechanism that exists, passes its tests and is reached by
+    nothing, so every long wait hangs and the run record says ``paused``
+    forever.
+    """
+    resumed: list[str] = []
+    for pause in await playbook_pause.due_waits(now=now, limit=limit):
+        run = await _resume_pause(pause, resolution="resumed on its timer")
+        if run is not None:
+            resumed.append(pause.run_id)
+    return resumed
+
+
+async def _resume_pause(pause: Any, *, resolution: str, extra_context: dict[str, Any] | None = None) -> PlaybookRun | None:
+    """Claim a pause and continue its run. Shared by every resumer.
+
+    ``extra_context`` is merged into the stored run context before the run
+    restarts, which is how a verification answer reaches the ``condition``
+    step that branches on it. A wait and an approval pass nothing: they
+    resume a run, they do not tell it anything it did not already know.
+    """
+    claimed = await playbook_pause.resolve(
+        pause_id=pause.id,
+        tenant_id=pause.tenant_id,
+        status="resumed",
+        resolution=resolution,
+    )
+    if not claimed:
+        # Another replica, or a second delivery of the same callback, got
+        # there first. Not an error.
+        return None
+
+    from app.playbook.store import PlaybookStore
+
+    playbook = PlaybookStore.default().get(pause.playbook_id)
+    if playbook is None:
+        logger.warning(
+            "Cannot resume run %s: playbook %s is no longer in the store",
+            pause.run_id,
+            pause.playbook_id,
+        )
+        return None
+    return await PlaybookEngine().resume(playbook, pause, extra_context=extra_context)
+
+
+# ---------------------------------------------------------------------------
+# Control flow — wait, parallel, loop
+# ---------------------------------------------------------------------------
+#
+# A playbook could branch and it could not wait, fan out or repeat. So
+# "contain, then re-check in five minutes", "revoke every session this user
+# holds" and "ask three vendors at once" each had to be hand-unrolled into a
+# fixed chain of steps, which is why none of the 62 shipped packs attempts
+# any of them.
+#
+# Three properties the three steps share, each of which has an opposite that
+# would be worse than not having the step at all:
+#
+# * **Bounded.** A playbook is author-supplied and these are the first steps
+#   that multiply work. Iterations, fan-out and nesting all have ceilings in
+#   `bounds.py`, and the ceiling is reported in the result rather than
+#   silently truncating.
+# * **Honest when empty.** A `parallel` or `loop` with no children, or a
+#   `loop` over a path that resolved to nothing, fails rather than reporting
+#   a success for work it did not do. That is the same rule the missing-
+#   handler branch below exists to enforce.
+# * **Idempotent per execution.** Every child carries a key derived from its
+#   coordinates, so the third iteration is distinguishable from the fourth
+#   and a resumed run reproduces the same keys. See `idempotency.py`.
+
+
+async def _run_children(
+    step: PlaybookStep,
+    pr: PlaybookRun,
+    http: httpx.AsyncClient,
+    *,
+    dry_run: bool,
+    path: tuple[str, ...],
+    context: dict[str, Any],
+) -> tuple[bool, list[dict]]:
+    """Run a child list in order. Returns ``(all_succeeded, results)``.
+
+    Children are executed through ``_invoke_step``, so a child gets the same
+    retry policy and the same ``executed`` check a top-level step gets.
+
+    Each child's result is merged into the *local* context rather than the
+    run's, so two parallel branches cannot overwrite each other's values and
+    then be read by whichever happened to finish last. The branch results
+    are attached to the parent step's result, which is what a later step
+    reads through ``_step_<parent id>``.
+    """
+    results: list[dict] = []
+    succeeded = True
+    for child in step.steps:
+        if child.condition and not _evaluate_condition(child.condition, context):
+            results.append({"step_id": child.id, "name": child.name, "status": StepStatus.SKIPPED})
+            continue
+        child_pr = _scoped_run(pr, context)
+        status, result = await _invoke_step(child, child_pr, http, dry_run=dry_run, path=path)
+        results.append({"step_id": child.id, "name": child.name, "status": status, "result": result})
+        for key, value in result.items():
+            if not key.startswith("_"):
+                context[key] = value
+        if status == StepStatus.FAILED:
+            succeeded = False
+            if child.on_failure == "abort":
+                break
+    return succeeded, results
+
+
+def _scoped_run(pr: PlaybookRun, context: dict[str, Any]) -> PlaybookRun:
+    """A view of the run whose context is the child's.
+
+    ``_invoke_step`` reads ``pr.context`` (for the dispatch tenant and the
+    response verbs' targets) and ``pr.run_id`` (for the audit trail). A
+    child needs the second unchanged and the first scoped, so it gets a
+    shallow stand-in rather than a copy of the whole run — copying would
+    give a loop iteration its own ``step_results`` and lose them.
+    """
+    scoped = object.__new__(PlaybookRun)
+    scoped.__dict__.update(pr.__dict__)
+    scoped.context = context
+    return scoped
+
+
+async def _control_wait(
+    step: PlaybookStep,
+    pr: PlaybookRun,
+    http: httpx.AsyncClient,
+    *,
+    dry_run: bool,
+    path: tuple[str, ...],
+) -> tuple[StepStatus, dict]:
+    """Hold the run for a timer or until something calls back.
+
+    Two forms, and the split is about worker occupancy rather than about
+    how long an author may wait:
+
+    * a short timer sleeps in process, because suspending to Postgres and
+      waking again costs more than the wait;
+    * anything longer, or ``until: callback``, becomes a **durable pause**
+      on the same table the approval step uses, so it survives a restart.
+      A ``wait`` that lived in a process would be lost by a deploy, and the
+      run would hang with no record of why.
+
+    A dry run neither sleeps nor suspends: a preview that took five minutes
+    to tell an author their playbook is sound is a preview nobody runs.
+    """
+    until = str(step.params.get("until") or "").strip().lower()
+    seconds = clamp_wait_seconds(step.params.get("seconds", step.params.get("duration_seconds")))
+
+    if dry_run:
+        return StepStatus.SUCCESS, {
+            "dry_run": True,
+            "executed": False,
+            "would_wait_seconds": seconds,
+            "would_wait_for_callback": until == "callback",
+        }
+
+    if until != "callback" and 0 < seconds <= MAX_INLINE_WAIT_SECONDS:
+        await asyncio.sleep(seconds)
+        return StepStatus.SUCCESS, {"waited_seconds": seconds, "durable": False}
+
+    if until != "callback" and seconds <= 0:
+        # Refused rather than treated as "no wait". A `wait` step with no
+        # duration and no callback is an authoring mistake, and passing it
+        # through would make the step a no-op that reports success — which
+        # is indistinguishable from a wait that happened.
+        return StepStatus.FAILED, {
+            "executed": False,
+            "error": 'a wait step needs `seconds` or `until: "callback"`; it waited for nothing and did not report that it had',
+        }
+
+    pause = await _suspend_for_wait(pr, step, http, seconds=seconds, until_callback=until == "callback")
+    if pause is None:
+        # Nothing can resume this run, so continuing past the wait would
+        # run the steps the wait exists to delay. Same reasoning as the
+        # approval step failing closed when its pause cannot be written.
+        return StepStatus.FAILED, {
+            "executed": False,
+            "error": "the wait could not be persisted, so nothing could resume this run; it was failed rather than skipped",
+        }
+    return StepStatus.PENDING, {
+        "paused": True,
+        "pause_id": pause.id,
+        "resume_token": pause.resume_token,
+        "resume_at": pause.resume_at.isoformat() if pause.resume_at else None,
+        "durable": True,
+    }
+
+
+async def _control_parallel(
+    step: PlaybookStep,
+    pr: PlaybookRun,
+    http: httpx.AsyncClient,
+    *,
+    dry_run: bool,
+    path: tuple[str, ...],
+) -> tuple[StepStatus, dict]:
+    """Run each child concurrently, then join.
+
+    ``join`` is ``all`` (default) or ``any``. ``all`` fails the parallel
+    step when any branch failed; ``any`` succeeds when at least one did.
+    There is deliberately no "ignore failures" join — that is what
+    ``on_failure: continue`` on the parallel step itself already means, and
+    spelling it twice would let a playbook say two different things.
+
+    Each branch gets its **own context**, snapshotted from the run before
+    the branches start. Sharing one dict would make the merged result
+    depend on which branch finished first, and two branches enriching the
+    same indicator would race to overwrite each other.
+    """
+    branches = step.steps
+    if not branches:
+        return StepStatus.FAILED, {
+            "executed": False,
+            "error": "a parallel step with no branches runs nothing; declare its `steps` or remove it",
+        }
+    if len(branches) > ABSOLUTE_MAX_PARALLEL_BRANCHES:
+        return StepStatus.FAILED, {
+            "executed": False,
+            "error": f"a parallel step may fan out to at most {ABSOLUTE_MAX_PARALLEL_BRANCHES} branches; this one declares {len(branches)}",
+        }
+
+    join = str(step.params.get("join") or "all").strip().lower()
+    if join not in {"all", "any"}:
+        return StepStatus.FAILED, {"executed": False, "error": f"unknown join {join!r}; expected 'all' or 'any'"}
+
+    async def _branch(index: int, child: PlaybookStep) -> tuple[bool, dict]:
+        branch_path = idempotency.child_path(path, "b", index)
+        context = dict(pr.context)
+        if child.condition and not _evaluate_condition(child.condition, context):
+            return True, {"step_id": child.id, "name": child.name, "status": StepStatus.SKIPPED}
+        status, result = await _invoke_step(child, _scoped_run(pr, context), http, dry_run=dry_run, path=branch_path)
+        return status != StepStatus.FAILED, {"step_id": child.id, "name": child.name, "status": status, "result": result}
+
+    outcomes = await asyncio.gather(*(_branch(i, child) for i, child in enumerate(branches)))
+    succeeded = [ok for ok, _ in outcomes]
+    results = [record for _, record in outcomes]
+
+    joined = all(succeeded) if join == "all" else any(succeeded)
+    payload: dict[str, Any] = {
+        "join": join,
+        "branches": results,
+        "branches_succeeded": sum(1 for ok in succeeded if ok),
+        "branches_total": len(results),
+    }
+    if not joined:
+        payload["error"] = f"{len(results) - sum(succeeded)} of {len(results)} parallel branches failed under join {join!r}"
+    return (StepStatus.SUCCESS if joined else StepStatus.FAILED), payload
+
+
+async def _control_loop(
+    step: PlaybookStep,
+    pr: PlaybookRun,
+    http: httpx.AsyncClient,
+    *,
+    dry_run: bool,
+    path: tuple[str, ...],
+) -> tuple[StepStatus, dict]:
+    """Run the child steps once per item, bounded.
+
+    ``over`` is a dot-path into the run context — never a literal list in
+    the playbook, which would make the loop a copy-paste of its body. The
+    list it resolves to routinely came out of an enrichment response, which
+    is to say out of attacker-influenced data, so the iteration count is
+    capped and the cap is reported rather than silently truncating.
+
+    Each iteration binds ``item`` and ``index`` into a context of its own,
+    so a later iteration cannot read a value an earlier one left behind
+    unless the author asked for it through the loop's own result.
+    """
+    if not step.steps:
+        return StepStatus.FAILED, {
+            "executed": False,
+            "error": "a loop step with no body runs nothing; declare its `steps` or remove it",
+        }
+
+    over = str(step.params.get("over") or "").strip()
+    if not over:
+        return StepStatus.FAILED, {"executed": False, "error": "a loop step needs `over`, a dot-path into the run context"}
+
+    items = _resolve_field(pr.context, over)
+    if items is None:
+        # Distinct from an empty list below: "the path resolved to nothing"
+        # is usually a typo in the path, and reporting it as "zero items"
+        # sends the author looking at their data instead of their playbook.
+        return StepStatus.FAILED, {"executed": False, "error": f"loop `over` path {over!r} resolved to nothing in the run context"}
+    if not isinstance(items, list | tuple):
+        return StepStatus.FAILED, {
+            "executed": False,
+            "error": f"loop `over` path {over!r} resolved to a {type(items).__name__}, not a list",
+        }
+
+    requested = len(items)
+    ceiling = min(
+        int(step.params.get("max_iterations") or DEFAULT_MAX_LOOP_ITERATIONS),
+        ABSOLUTE_MAX_LOOP_ITERATIONS,
+    )
+    truncated = requested > ceiling
+    items = list(items)[:ceiling]
+
+    iterations: list[dict] = []
+    failures = 0
+    for index, item in enumerate(items):
+        context = dict(pr.context)
+        context["item"] = item
+        context["index"] = index
+        ok, results = await _run_children(
+            step,
+            pr,
+            http,
+            dry_run=dry_run,
+            path=idempotency.child_path(path, "i", index),
+            context=context,
+        )
+        iterations.append({"index": index, "item": item, "steps": results})
+        if not ok:
+            failures += 1
+            if step.params.get("on_item_failure", "continue") == "abort":
+                break
+
+    payload: dict[str, Any] = {
+        "over": over,
+        "items_seen": requested,
+        "iterations_run": len(iterations),
+        "iterations": iterations,
+        "failed_iterations": failures,
+    }
+    if truncated:
+        # Said out loud. A loop that quietly stopped at 25 of 300 sessions
+        # leaves 275 live and a run record that reads as a clean sweep.
+        payload["truncated"] = True
+        payload["error"] = (
+            f"loop over {over!r} had {requested} items and the ceiling is {ceiling}; {requested - ceiling} were not processed"
+        )
+        return StepStatus.FAILED, payload
+    if failures:
+        payload["error"] = f"{failures} of {len(iterations)} loop iterations failed"
+        return StepStatus.FAILED, payload
+    return StepStatus.SUCCESS, payload
+
+
+#: Where the person being asked is found, params first then the run
+#: context. Deliberately *not* an entry in ``_TARGET_KEYS``:
+#: ``RESPONSE_STEP_TYPES`` is derived from that table, and a verb listed
+#: there is dispatched through the action registry and graded on
+#: ``executed``. A verification is a question, not an action on an estate,
+#: and adding it to the table would make the engine fail every unanswered
+#: prompt as an action that did not run.
+_VERIFY_SUBJECT_KEYS: tuple[str, ...] = ("subject", "user", "username", "user_id", "upn", "email")
+
+
+def _first_present(keys: tuple[str, ...], *sources: dict[str, Any]) -> str:
+    for key in keys:
+        for source in sources:
+            value = source.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return ""
+
+
+async def _control_verify_user(
+    step: PlaybookStep,
+    pr: PlaybookRun,
+    http: httpx.AsyncClient,
+    *,
+    dry_run: bool,
+    path: tuple[str, ...],
+) -> tuple[StepStatus, dict]:
+    """Ask the affected person whether they recognise their own activity.
+
+    Depth 5.4. The step suspends the run on a ``verification`` pause and
+    the answer resumes it with ``verification.outcome`` in the context, so
+    the next step can be a plain ``condition`` on it. The branching is
+    therefore the engine's existing branching rather than a second
+    mechanism only this verb understands.
+
+    The order below is the whole of the contract's caution, and it is an
+    order rather than a set:
+
+    1. **Refuse before resolving anything.** A confirmed true positive is
+       not asked, and a class the tenant did not opt into is not asked. The
+       refusal is a successful step with ``sent: false`` and the reason, not
+       a failure — "we deliberately did not ask" is an outcome a playbook
+       should be able to branch on, and failing the step would abort the
+       containment that follows under the default ``on_failure: abort``.
+    2. **Mint the credential before sending.** An unsigned link would take
+       an answer from anybody who reached the route, so a missing secret
+       fails the step rather than sending an unsigned prompt.
+    3. **Persist before delivering.** A prompt delivered with no pause is a
+       question nobody can answer; a pause written with no prompt expires
+       with a recorded outcome. Only one of those two orders is recoverable.
+    """
+    subject = _first_present(_VERIFY_SUBJECT_KEYS, step.params, pr.context)
+    if not subject:
+        return StepStatus.FAILED, {
+            "executed": False,
+            "sent": False,
+            "error": "a verify_user step needs a subject (user, username, upn or email) and found none in its params or the run context",
+        }
+
+    tenant_id = str(pr.context.get("tenant_id") or pr.trigger_context.get("tenant_id") or "")
+    if not tenant_id:
+        return StepStatus.FAILED, {
+            "executed": False,
+            "sent": False,
+            "error": "a verify_user step has no tenant in the run context, so neither the opt-in policy nor the pause could be written",
+        }
+
+    human_initiated = bool(pr.context.get("initiated_by_human") or pr.trigger_context.get("initiated_by_human"))
+    if verification.is_confirmed_true_positive(pr.context):
+        # No opt-out, and no exception for a human-initiated run either.
+        # The reason is not consent, it is that the message would tell an
+        # attacker holding the account that they have been seen.
+        decision = await verification.may_auto_send(tenant_id=tenant_id, step_params=step.params, context=pr.context)
+        return StepStatus.SUCCESS, {
+            "sent": False,
+            "subject": subject,
+            "verification": {"outcome": "refused", "reason": decision.reason, "stage": None},
+            "reason": decision.reason,
+        }
+    if not human_initiated:
+        decision = await verification.may_auto_send(tenant_id=tenant_id, step_params=step.params, context=pr.context)
+        if not decision.allowed:
+            return StepStatus.SUCCESS, {
+                "sent": False,
+                "subject": subject,
+                "verification": {"outcome": "refused", "reason": decision.reason, "stage": None},
+                "reason": decision.reason,
+            }
+
+    resume_token = verification.mint_resume_token()
+    try:
+        links = verification.answer_links(
+            base_url=_verification_public_url(),
+            resume_token=resume_token,
+            stage=verification.STAGE_USER,
+        )
+    except verification.VerificationConfigError as exc:
+        return StepStatus.FAILED, {"executed": False, "sent": False, "error": str(exc)}
+
+    if dry_run or not verification.execute_enabled():
+        # A preview names the person who would be asked. "A prompt would be
+        # sent" without the recipient is the kind of preview that reads as
+        # reassurance and answers nothing.
+        return StepStatus.SUCCESS, {
+            "sent": False,
+            "previewed": True,
+            "subject": subject,
+            "answers": [link["answer"] for link in links],
+            "reason": (
+                "verify_user previews unless AISOC_PLAYBOOK_VERIFY_EXECUTE is set; nobody was messaged" if not dry_run else "dry run"
+            ),
+        }
+
+    step_index = next((i for i, candidate in enumerate(pr.steps) if candidate.id == step.id), -1)
+    if step_index < 0:
+        # Same refusal as a nested wait, for the same reason: a pause that
+        # names no resume point is a row that looks resumable and is not.
+        return StepStatus.FAILED, {
+            "executed": False,
+            "sent": False,
+            "error": "a verify_user step nested inside control flow has no index to resume from; it was failed closed rather than asked",
+        }
+
+    # The escalation runs on the sweeper, long after this process has
+    # forgotten the step, so the parameters that decide *how* to ask —
+    # the channel and the message — travel with the pause. Reading them
+    # back off the playbook at escalation time would silently change the
+    # question if the playbook had been edited in between.
+    stored_context = dict(pr.context)
+    stored_context["_verification_step_params"] = dict(step.params)
+
+    pause = await playbook_pause.suspend(
+        kind="verification",
+        resume_at=datetime.now(UTC) + timedelta(seconds=verification.user_stage_seconds()),
+        resume_token=resume_token,
+        tenant_id=tenant_id,
+        run_id=pr.run_id,
+        playbook_id=pr.playbook_id,
+        playbook_name=pr.playbook_name,
+        step_index=step_index,
+        step_id=step.id,
+        run_context=stored_context,
+        step_results=pr.step_results,
+        verification_stage=verification.STAGE_USER,
+        verification_subject=subject,
+        ttl_hours=_verification_ttl(step),
+    )
+    if pause is None:
+        return StepStatus.FAILED, {
+            "executed": False,
+            "sent": False,
+            "error": "the verification could not be persisted, so nothing could resume this run; it was failed rather than asked",
+        }
+
+    delivery = await _deliver_verification_prompt(
+        step=step,
+        context=pr.context,
+        tenant_id=tenant_id,
+        recipient=subject,
+        stage=verification.STAGE_USER,
+        links=links,
+        run_id=pr.run_id,
+    )
+    if not delivery.get("executed"):
+        # The pause stays. A prompt that did not reach anybody expires with
+        # `timed_out` on the sweeper, which is a recorded outcome the run
+        # can branch on — strictly better than a cancelled pause, which
+        # leaves the run neither waiting nor finished.
+        return StepStatus.FAILED, {
+            "executed": False,
+            "sent": False,
+            "paused": True,
+            "pause_id": pause.id,
+            "subject": subject,
+            "error": f"the verification prompt was not delivered: {delivery.get('error') or delivery.get('summary') or 'unknown'}",
+        }
+
+    return StepStatus.PENDING, {
+        "paused": True,
+        "sent": True,
+        "pause_id": pause.id,
+        "subject": subject,
+        "stage": verification.STAGE_USER,
+        "escalates_at": pause.resume_at.isoformat() if pause.resume_at else None,
+        "durable": True,
+    }
+
+
+def _verification_public_url() -> str:
+    """Where an answer link points.
+
+    The agents service, not the actions service: the run that has to wake
+    lives here, and routing the click through a second service would mean a
+    second hop that can be configured, deployed and broken independently of
+    the thing it exists to resume.
+    """
+    return os.getenv("AISOC_AGENTS_PUBLIC_URL", "").strip() or os.getenv("CONSOLE_PUBLIC_BASE_URL", "").strip() or "http://localhost:8001"
+
+
+def _verification_ttl(step: PlaybookStep) -> float:
+    """How long the whole two-stage question may take before it expires.
+
+    Comfortably past both stages, so a manager answering a little late is
+    still heard. An author who sets ``expires_in_hours`` gets theirs.
+    """
+    raw = step.params.get("expires_in_hours")
+    try:
+        if raw is not None:
+            return float(raw)
+    except (TypeError, ValueError):
+        # An unparseable author value falls through to the derived default
+        # below — a wrong TTL must not stop the question being asked.
+        pass
+    total = verification.user_stage_seconds() + verification.manager_stage_seconds()
+    return max(DEFAULT_VERIFICATION_TTL_HOURS, (total / 3600.0) * 2)
+
+
+#: Floor for how long a verification row may sit. Both stages plus slack,
+#: so the sweeper's `timed_out` is what ends an unanswered question rather
+#: than the TTL expiring it with no outcome for the run to read.
+DEFAULT_VERIFICATION_TTL_HOURS = 24.0
+
+
+async def _deliver_verification_prompt(
+    *,
+    step: PlaybookStep,
+    context: dict[str, Any],
+    tenant_id: str,
+    recipient: str,
+    stage: str,
+    links: list[dict[str, str]],
+    run_id: str,
+) -> dict:
+    """Send one prompt through the configured destination.
+
+    Dispatched as a governed ``notify`` through ``action_bridge``, which is
+    where the Slack, Teams, email and PagerDuty arms and their credentials
+    already live after 5.1. Writing a fifth sender here would be the shape
+    5.1 removed, and it would be one the capability contract cannot see.
+    """
+    channel = str(step.params.get("channel") or "slack").strip().lower()
+    template = str(
+        step.params.get("message_template")
+        or step.params.get("message")
+        or "AiSOC is checking recent activity on {{subject}}. Was this you?"
+    )
+    body = _render_context(template.replace("{{subject}}", recipient), context)
+    choices = "\n".join(f"{link['label']}: {link['url']}" for link in links)
+
+    params = {k: v for k, v in step.params.items() if k not in {"channel", "message", "message_template", "manager", "manager_email"}}
+    params["message"] = f"{body}\n\n{choices}"
+    params["recipient"] = recipient
+    return await action_bridge.dispatch_step(
+        capability="notify",
+        tenant_id=tenant_id,
+        target=recipient,
+        params=params,
+        vendor_id=channel,
+        confidence=None,
+        playbook_run_id=run_id,
+        playbook_step_id=f"{step.id}:{stage}",
+    )
+
+
+#: Step types the run loop hands to a control-flow coroutine rather than to
+#: ``_HANDLERS``. Keyed here rather than tested with an ``in`` against a set
+#: so a type added to one and not the other cannot silently fall through to
+#: "no handler".
+_CONTROL_FLOW: dict[StepType, Any] = {
+    StepType.WAIT: _control_wait,
+    StepType.PARALLEL: _control_parallel,
+    StepType.LOOP: _control_loop,
+    StepType.VERIFY_USER: _control_verify_user,
+}
+
+
+async def _invoke_step(
+    step: PlaybookStep,
+    pr: PlaybookRun,
+    http: httpx.AsyncClient,
+    *,
+    dry_run: bool,
+    path: tuple[str, ...] = (),
+) -> tuple[StepStatus, dict]:
+    """Run one step and report ``(status, result)``.
+
+    Lifted out of ``PlaybookEngine.run`` unchanged so ``parallel`` and
+    ``loop`` execute their children through exactly the same path as a
+    top-level step — the retry policy, the permanent-failure rule and the
+    ``executed`` check are properties of a step, not of where it sits in a
+    playbook. A second copy for children would be a second place for "a
+    handler that returned is not a step that ran" to drift out of.
+
+    What stays in the caller: branching, cycle detection and the approval
+    suspension, all of which are about a step's *position* in a run rather
+    than about running it.
+
+    ``path`` is the control-flow coordinates (``("b1", "i3")``). It reaches
+    only the idempotency key, which is the one thing that has to tell the
+    third loop iteration from the fourth.
+    """
+    result: dict = {}
+    step_status = StepStatus.SUCCESS
+    attempt = 0
+    handler = _HANDLERS.get(step.type)
+    unbridgeable = _UNBRIDGEABLE.get(step.type)
+    idempotency_key = idempotency.step_key(run_id=pr.run_id, step_id=step.id, path=path)
+
+    if step.type in _CONTROL_FLOW:
+        # Control flow needs the run, the client and the dry-run flag, none
+        # of which a `_HANDLERS` entry receives. Routed here rather than by
+        # widening the handler signature, so the fifteen response verbs are
+        # not handed a mutable run object they have no business touching.
+        step_status, result = await _CONTROL_FLOW[step.type](step, pr, http, dry_run=dry_run, path=path)
+        result["idempotency_key"] = idempotency_key
+        return step_status, result
+
+    if handler is None and not dry_run:
+        # Fail closed, and skip the retry loop — a missing handler
+        # will still be missing on the next attempt.
+        #
+        # This branch used to return ``{"skipped": True}`` while
+        # leaving step_status at SUCCESS, so twelve of the
+        # twenty-two declared step types reported that they had run
+        # when nothing had. The worst of them was ``approval``: a
+        # human decision point that passed on its own and let the
+        # run continue into the very action an analyst was supposed
+        # to authorise. Falling through to the shared tail below
+        # means the default ``on_failure: abort`` halts the run.
+        step_status = StepStatus.FAILED
+        result = {
+            "error": (
+                f"step type {step.type.value!r} is not runnable: {unbridgeable}"
+                if unbridgeable
+                else f"step type {step.type.value!r} has no handler in this engine"
+            ),
+            "unimplemented": True,
+            "executed": False,
+            "_elapsed_ms": 0,
+        }
+        logger.error(
+            "Step %s (%s) has no handler; failing closed rather than reporting success",
+            step.name,
+            step.type.value,
+        )
+    else:
+        while True:
+            attempt += 1
+            t0 = time.perf_counter()
+            try:
+                if dry_run:
+                    result = {"dry_run": True, "executed": False, "step": step.name}
+                    if handler is None:
+                        # A dry run exists to tell the author what
+                        # would happen. "dry_run: true" alone would
+                        # imply this step is fine.
+                        result["unimplemented"] = True
+                        result["would_fail"] = True
+                        if unbridgeable:
+                            result["reason"] = unbridgeable
+                    elif step.type in RESPONSE_STEP_TYPES:
+                        # Name the verb a live run would dispatch,
+                        # so a preview of a containment playbook
+                        # reads as a containment playbook.
+                        result["would_dispatch"] = step.type.value
+                        result["target"] = _resolve_target(step, pr.context)
+                else:
+                    result = await handler(step, pr.context, http)
+                elapsed = time.perf_counter() - t0
+                result["_elapsed_ms"] = round(elapsed * 1000)
+                # A handler that returned is not a step that ran.
+                # Every response verb reports `executed`, and a
+                # False there means the action was previewed, held
+                # for an analyst, blocked, unconfigured or refused
+                # — none of which is a step that did what it says.
+                # Reporting those as SUCCESS is the defect this
+                # whole path exists to remove, so they fail closed
+                # and the default `on_failure: abort` halts the run.
+                # `not dry_run` carried over from main: a preview reports
+                # `executed: false` by construction, so without this the
+                # engine called its own preview a failure and all 62 packs
+                # previewed as broken. The refactor would have dropped it.
+                if not dry_run and step.type in RESPONSE_STEP_TYPES and not result.get("executed"):
+                    step_status = StepStatus.FAILED
+                    result.setdefault(
+                        "error",
+                        f"{step.type.value} did not execute ({result.get('status', 'unknown')}): "
+                        f"{result.get('summary') or result.get('detail') or 'no vendor was touched'}",
+                    )
+                break  # the handler answered; status is set above
+            except Exception as exc:  # noqa: BLE001
+                elapsed = time.perf_counter() - t0
+                # A permanent failure will not become a different
+                # failure by being asked again. Sleeping 2s, 4s
+                # then 8s before repeating "this run has no
+                # tenant" costs an operator fourteen seconds of an
+                # incident and, worse, dresses a misconfiguration
+                # up as flakiness — so they wait for it to settle
+                # instead of going and fixing it.
+                permanent = isinstance(exc, PermanentStepFailure)
+                logger.error(
+                    "Step %s attempt %d failed (%s): %s",
+                    step.name,
+                    attempt,
+                    "permanent, not retried" if permanent else "retryable",
+                    exc,
+                )
+                if not permanent and attempt <= step.retry_max:
+                    await asyncio.sleep(min(2**attempt, 30))
+                else:
+                    step_status = StepStatus.FAILED
+                    result = {
+                        "error": str(exc),
+                        # Says, in the run record, why there was
+                        # one attempt and not four.
+                        "permanent": permanent,
+                        "attempts": attempt,
+                        "_elapsed_ms": round(elapsed * 1000),
+                    }
+                    break
+
+    result["idempotency_key"] = idempotency_key
+    return step_status, result
+
+
 class PlaybookEngine:
     """Executes playbooks step-by-step, emitting realtime events."""
 
-    async def resume(self, playbook: Playbook, pause: Any) -> PlaybookRun:
-        """Continue a suspended run from the step after its approval.
+    async def resume(self, playbook: Playbook, pause: Any, *, extra_context: dict[str, Any] | None = None) -> PlaybookRun:
+        """Continue a suspended run from the step after the one that paused.
 
         Rebuilds the run from what was stored rather than re-running the
-        first half: the steps before the approval already executed, and
+        first half: the steps before the pause already executed, and
         repeating them would re-send notifications and re-dispatch
         actions.
+
+        ``extra_context`` carries whatever the pause learned while it was
+        suspended — for a verification, the answer the run branches on.
         """
+        context = dict(pause.run_context or {})
+        if extra_context:
+            context.update(extra_context)
         return await self.run(
             playbook,
-            pause.run_context,
+            context,
             resume_from=pause.resume_index,
             resume_run_id=pause.run_id,
             resume_results=pause.step_results,
@@ -951,13 +2066,6 @@ class PlaybookEngine:
 
                 await _emit(pr.run_id, "step.started", {"step": step.name, "type": step.type}, http)
 
-                result: dict = {}
-                step_status = StepStatus.SUCCESS
-                attempt = 0
-                handler = _HANDLERS.get(step.type)
-
-                unbridgeable = _UNBRIDGEABLE.get(step.type)
-
                 # Parity 5.2. An approval step is a pause, and this engine
                 # had nowhere to pause to, so it failed closed and 12
                 # shipped playbooks aborted here. The position and the
@@ -995,107 +2103,26 @@ class PlaybookEngine:
                         step.name,
                     )
 
-                if handler is None and not dry_run:
-                    # Fail closed, and skip the retry loop — a missing handler
-                    # will still be missing on the next attempt.
-                    #
-                    # This branch used to return ``{"skipped": True}`` while
-                    # leaving step_status at SUCCESS, so twelve of the
-                    # twenty-two declared step types reported that they had run
-                    # when nothing had. The worst of them was ``approval``: a
-                    # human decision point that passed on its own and let the
-                    # run continue into the very action an analyst was supposed
-                    # to authorise. Falling through to the shared tail below
-                    # means the default ``on_failure: abort`` halts the run.
-                    step_status = StepStatus.FAILED
-                    result = {
-                        "error": (
-                            f"step type {step.type.value!r} is not runnable: {unbridgeable}"
-                            if unbridgeable
-                            else f"step type {step.type.value!r} has no handler in this engine"
-                        ),
-                        "unimplemented": True,
-                        "executed": False,
-                        "_elapsed_ms": 0,
-                    }
-                    logger.error(
-                        "Step %s (%s) has no handler; failing closed rather than reporting success",
-                        step.name,
-                        step.type.value,
-                    )
-                else:
-                    while True:
-                        attempt += 1
-                        t0 = time.perf_counter()
-                        try:
-                            if dry_run:
-                                result = {"dry_run": True, "executed": False, "step": step.name}
-                                if handler is None:
-                                    # A dry run exists to tell the author what
-                                    # would happen. "dry_run: true" alone would
-                                    # imply this step is fine.
-                                    result["unimplemented"] = True
-                                    result["would_fail"] = True
-                                    if unbridgeable:
-                                        result["reason"] = unbridgeable
-                                elif step.type in RESPONSE_STEP_TYPES:
-                                    # Name the verb a live run would dispatch,
-                                    # so a preview of a containment playbook
-                                    # reads as a containment playbook.
-                                    result["would_dispatch"] = step.type.value
-                                    result["target"] = _resolve_target(step, pr.context)
-                            else:
-                                result = await handler(step, pr.context, http)
-                            elapsed = time.perf_counter() - t0
-                            result["_elapsed_ms"] = round(elapsed * 1000)
-                            # A handler that returned is not a step that ran.
-                            # Every response verb reports `executed`, and a
-                            # False there means the action was previewed, held
-                            # for an analyst, blocked, unconfigured or refused
-                            # — none of which is a step that did what it says.
-                            # Reporting those as SUCCESS is the defect this
-                            # whole path exists to remove, so they fail closed
-                            # and the default `on_failure: abort` halts the run.
-                            if step.type in RESPONSE_STEP_TYPES and not result.get("executed"):
-                                step_status = StepStatus.FAILED
-                                result.setdefault(
-                                    "error",
-                                    f"{step.type.value} did not execute ({result.get('status', 'unknown')}): "
-                                    f"{result.get('summary') or result.get('detail') or 'no vendor was touched'}",
-                                )
-                            break  # the handler answered; status is set above
-                        except Exception as exc:  # noqa: BLE001
-                            elapsed = time.perf_counter() - t0
-                            # A permanent failure will not become a different
-                            # failure by being asked again. Sleeping 2s, 4s
-                            # then 8s before repeating "this run has no
-                            # tenant" costs an operator fourteen seconds of an
-                            # incident and, worse, dresses a misconfiguration
-                            # up as flakiness — so they wait for it to settle
-                            # instead of going and fixing it.
-                            permanent = isinstance(exc, PermanentStepFailure)
-                            logger.error(
-                                "Step %s attempt %d failed (%s): %s",
-                                step.name,
-                                attempt,
-                                "permanent, not retried" if permanent else "retryable",
-                                exc,
-                            )
-                            if not permanent and attempt <= step.retry_max:
-                                await asyncio.sleep(min(2**attempt, 30))
-                            else:
-                                step_status = StepStatus.FAILED
-                                result = {
-                                    "error": str(exc),
-                                    # Says, in the run record, why there was
-                                    # one attempt and not four.
-                                    "permanent": permanent,
-                                    "attempts": attempt,
-                                    "_elapsed_ms": round(elapsed * 1000),
-                                }
-                                break
+                step_status, result = await _invoke_step(step, pr, http, dry_run=dry_run)
 
                 pr.step_results.append({"step_id": step.id, "name": step.name, "status": step_status, "result": result})
+
+                # A durable pause stops the run. Depth 5.3 taught `wait` and
+                # `verify_user` to suspend to Postgres, and only the
+                # `approval` branch above knew to break — so a durable wait
+                # wrote its pause and then carried straight on into the
+                # steps it exists to delay, and ran them a second time when
+                # the callback resumed from `step_index + 1`.
+                #
+                # Keyed on the result rather than on the step type, because
+                # the same control step both sleeps in process (no pause)
+                # and suspends (a pause), and the type cannot tell them
+                # apart. `paused` with a `pause_id` is the only shape that
+                # means a row exists to wake this run.
+                if step_status == StepStatus.PENDING and result.get("paused") and result.get("pause_id"):
+                    pr.status = RunStatus.PAUSED
+                    await _emit(pr.run_id, "run.paused", {"step": step.name, "pause_id": result["pause_id"]}, http)
+                    break
                 # Merge result into context for downstream steps. The namespaced
                 # key ``_step_<id>`` always reflects this step's full result.
                 pr.context[f"_step_{step.id}"] = result

@@ -1,27 +1,48 @@
 {
-  "_about": "Complex AWS IAM fixture for the T3.2 effective-permissions resolver. Exercises identity-based policies (direct + via group), resource-based policies (S3 bucket policy, KMS key policy, SQS queue policy), Service Control Policies (allow-list + explicit deny), wildcard expansion against a per-resource action catalogue, conditions (StringEquals, StringLike), and deny-overrides. The aligned `aws_iam_simulator.json` next to this fixture is the synthesised IAM Policy Simulator reference set the test gate compares against — it captures, for 50 (principal, resource) pairs, the exact allow set every public IAM call resolves to with the same input.",
+  "_about": "Complex AWS IAM fixture for the T3.2 effective-permissions resolver. Exercises identity-based policies (direct + via group), resource-based policies (S3 bucket policy, KMS key policy, SQS queue policy), Service Control Policies (allow-list + explicit deny), wildcard expansion against a per-resource action catalogue, conditions (StringEquals, StringLike), and deny-overrides. The aligned `aws_iam_simulator.json` next to this fixture is the synthesised IAM Policy Simulator reference set the test gate compares against \u2014 it captures, for 50 (principal, resource) pairs, the exact allow set every public IAM call resolves to with the same input.",
   "account_id": "111122223333",
   "action_catalogue": {
     "s3": [
-      "s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket",
-      "s3:GetBucketAcl", "s3:PutBucketAcl", "s3:GetObjectVersion",
-      "s3:PutBucketPolicy", "s3:DeleteBucket", "s3:GetBucketLocation"
+      "s3:GetObject",
+      "s3:PutObject",
+      "s3:DeleteObject",
+      "s3:ListBucket",
+      "s3:GetBucketAcl",
+      "s3:PutBucketAcl",
+      "s3:GetObjectVersion",
+      "s3:PutBucketPolicy",
+      "s3:DeleteBucket",
+      "s3:GetBucketLocation"
     ],
     "kms": [
-      "kms:Decrypt", "kms:Encrypt", "kms:GenerateDataKey", "kms:DescribeKey",
-      "kms:ListKeys", "kms:ScheduleKeyDeletion"
+      "kms:Decrypt",
+      "kms:Encrypt",
+      "kms:GenerateDataKey",
+      "kms:DescribeKey",
+      "kms:ListKeys",
+      "kms:ScheduleKeyDeletion"
     ],
     "sqs": [
-      "sqs:SendMessage", "sqs:ReceiveMessage", "sqs:DeleteMessage",
-      "sqs:GetQueueAttributes", "sqs:PurgeQueue"
+      "sqs:SendMessage",
+      "sqs:ReceiveMessage",
+      "sqs:DeleteMessage",
+      "sqs:GetQueueAttributes",
+      "sqs:PurgeQueue"
     ],
     "ec2": [
-      "ec2:DescribeInstances", "ec2:StartInstances", "ec2:StopInstances",
-      "ec2:TerminateInstances", "ec2:RunInstances"
+      "ec2:DescribeInstances",
+      "ec2:StartInstances",
+      "ec2:StopInstances",
+      "ec2:TerminateInstances",
+      "ec2:RunInstances"
     ],
     "iam": [
-      "iam:GetRole", "iam:PassRole", "iam:CreateRole", "iam:DeleteRole",
-      "iam:ListRoles", "iam:AttachRolePolicy"
+      "iam:GetRole",
+      "iam:PassRole",
+      "iam:CreateRole",
+      "iam:DeleteRole",
+      "iam:ListRoles",
+      "iam:AttachRolePolicy"
     ]
   },
   "principals": [
@@ -29,23 +50,34 @@
       "id": "u-alice",
       "arn": "arn:aws:iam::111122223333:user/alice",
       "type": "user",
-      "groups": ["g-data-readers"],
-      "attached_policies": ["p-alice-direct"],
+      "groups": [
+        "g-data-readers"
+      ],
+      "attached_policies": [
+        "p-alice-direct"
+      ],
       "inline_policies": []
     },
     {
       "id": "u-bob",
       "arn": "arn:aws:iam::111122223333:user/bob",
       "type": "user",
-      "groups": ["g-data-writers"],
+      "groups": [
+        "g-data-writers"
+      ],
       "attached_policies": [],
-      "inline_policies": ["p-bob-inline"]
+      "inline_policies": [
+        "p-bob-inline"
+      ]
     },
     {
       "id": "u-carol",
       "arn": "arn:aws:iam::111122223333:user/carol",
       "type": "user",
-      "groups": ["g-data-readers", "g-data-writers"],
+      "groups": [
+        "g-data-readers",
+        "g-data-writers"
+      ],
       "attached_policies": [],
       "inline_policies": []
     },
@@ -54,7 +86,9 @@
       "arn": "arn:aws:iam::111122223333:user/dave",
       "type": "user",
       "groups": [],
-      "attached_policies": ["p-dave-admin"],
+      "attached_policies": [
+        "p-dave-admin"
+      ],
       "inline_policies": []
     },
     {
@@ -62,7 +96,9 @@
       "arn": "arn:aws:iam::111122223333:role/pipeline-runner",
       "type": "role",
       "groups": [],
-      "attached_policies": ["p-pipeline-cicd"],
+      "attached_policies": [
+        "p-pipeline-cicd"
+      ],
       "inline_policies": []
     },
     {
@@ -70,7 +106,30 @@
       "arn": "arn:aws:iam::111122223333:user/erin",
       "type": "user",
       "groups": [],
-      "attached_policies": ["p-erin-conditional"],
+      "attached_policies": [
+        "p-erin-conditional"
+      ],
+      "inline_policies": []
+    },
+    {
+      "id": "u-frank",
+      "arn": "arn:aws:iam::111122223333:user/frank",
+      "type": "user",
+      "groups": [
+        "g-data-writers"
+      ],
+      "attached_policies": [],
+      "inline_policies": [],
+      "permissions_boundary": "p-boundary-s3-read"
+    },
+    {
+      "id": "u-gina",
+      "arn": "arn:aws:iam::111122223333:user/gina",
+      "type": "user",
+      "groups": [
+        "g-data-writers"
+      ],
+      "attached_policies": [],
       "inline_policies": []
     }
   ],
@@ -78,13 +137,18 @@
     {
       "id": "g-data-readers",
       "name": "DataReaders",
-      "attached_policies": ["p-readers-s3"],
+      "attached_policies": [
+        "p-readers-s3"
+      ],
       "inline_policies": []
     },
     {
       "id": "g-data-writers",
       "name": "DataWriters",
-      "attached_policies": ["p-writers-s3", "p-writers-sqs"],
+      "attached_policies": [
+        "p-writers-s3",
+        "p-writers-sqs"
+      ],
       "inline_policies": []
     }
   ],
@@ -98,7 +162,10 @@
         "Statement": [
           {
             "Effect": "Allow",
-            "Action": ["kms:Decrypt", "kms:DescribeKey"],
+            "Action": [
+              "kms:Decrypt",
+              "kms:DescribeKey"
+            ],
             "Resource": "arn:aws:kms:us-east-1:111122223333:key/finance"
           }
         ]
@@ -143,7 +210,10 @@
         "Statement": [
           {
             "Effect": "Allow",
-            "Action": ["s3:Get*", "s3:List*"],
+            "Action": [
+              "s3:Get*",
+              "s3:List*"
+            ],
             "Resource": [
               "arn:aws:s3:::artifacts-prod",
               "arn:aws:s3:::artifacts-prod/*"
@@ -169,7 +239,9 @@
             "Action": "s3:GetObject",
             "Resource": "arn:aws:s3:::reports-prod/*",
             "Condition": {
-              "StringEquals": {"aws:RequestedRegion": "us-east-1"}
+              "StringEquals": {
+                "aws:RequestedRegion": "us-east-1"
+              }
             }
           }
         ]
@@ -184,7 +256,10 @@
         "Statement": [
           {
             "Effect": "Allow",
-            "Action": ["s3:GetObject", "s3:ListBucket"],
+            "Action": [
+              "s3:GetObject",
+              "s3:ListBucket"
+            ],
             "Resource": [
               "arn:aws:s3:::reports-prod",
               "arn:aws:s3:::reports-prod/*"
@@ -202,7 +277,10 @@
         "Statement": [
           {
             "Effect": "Allow",
-            "Action": ["s3:PutObject", "s3:DeleteObject"],
+            "Action": [
+              "s3:PutObject",
+              "s3:DeleteObject"
+            ],
             "Resource": "arn:aws:s3:::reports-prod/*"
           }
         ]
@@ -217,7 +295,10 @@
         "Statement": [
           {
             "Effect": "Allow",
-            "Action": ["sqs:SendMessage", "sqs:GetQueueAttributes"],
+            "Action": [
+              "sqs:SendMessage",
+              "sqs:GetQueueAttributes"
+            ],
             "Resource": "arn:aws:sqs:us-east-1:111122223333:ingest-queue"
           }
         ]
@@ -238,7 +319,9 @@
           },
           {
             "Effect": "Allow",
-            "Principal": {"AWS": "arn:aws:iam::111122223333:role/pipeline-runner"},
+            "Principal": {
+              "AWS": "arn:aws:iam::111122223333:role/pipeline-runner"
+            },
             "Action": "s3:PutObject",
             "Resource": "arn:aws:s3:::reports-prod/*"
           }
@@ -254,8 +337,21 @@
         "Statement": [
           {
             "Effect": "Allow",
-            "Principal": {"AWS": "*"},
+            "Principal": {
+              "AWS": "*"
+            },
             "Action": "s3:GetObject",
+            "Resource": "arn:aws:s3:::artifacts-prod/*"
+          },
+          {
+            "Effect": "Allow",
+            "Principal": {
+              "AWS": "arn:aws:iam::111122223333:user/frank"
+            },
+            "Action": [
+              "s3:PutObject",
+              "s3:DeleteObject"
+            ],
             "Resource": "arn:aws:s3:::artifacts-prod/*"
           }
         ]
@@ -270,8 +366,14 @@
         "Statement": [
           {
             "Effect": "Allow",
-            "Principal": {"AWS": "arn:aws:iam::111122223333:user/alice"},
-            "Action": ["kms:Decrypt", "kms:Encrypt", "kms:DescribeKey"],
+            "Principal": {
+              "AWS": "arn:aws:iam::111122223333:user/alice"
+            },
+            "Action": [
+              "kms:Decrypt",
+              "kms:Encrypt",
+              "kms:DescribeKey"
+            ],
             "Resource": "*"
           },
           {
@@ -292,7 +394,9 @@
         "Statement": [
           {
             "Effect": "Allow",
-            "Principal": {"AWS": "arn:aws:iam::111122223333:role/pipeline-runner"},
+            "Principal": {
+              "AWS": "arn:aws:iam::111122223333:role/pipeline-runner"
+            },
             "Action": "sqs:SendMessage",
             "Resource": "*"
           }
@@ -309,7 +413,11 @@
           {
             "Effect": "Allow",
             "Action": [
-              "s3:*", "kms:*", "sqs:*", "ec2:Describe*", "iam:Get*"
+              "s3:*",
+              "kms:*",
+              "sqs:*",
+              "ec2:Describe*",
+              "iam:Get*"
             ],
             "Resource": "*"
           }
@@ -325,7 +433,11 @@
         "Statement": [
           {
             "Effect": "Deny",
-            "Action": ["iam:CreateRole", "iam:DeleteRole", "iam:AttachRolePolicy"],
+            "Action": [
+              "iam:CreateRole",
+              "iam:DeleteRole",
+              "iam:AttachRolePolicy"
+            ],
             "Resource": "*"
           },
           {
@@ -335,9 +447,35 @@
           }
         ]
       }
+    },
+    {
+      "id": "p-boundary-s3-read",
+      "name": "BoundaryS3ReadOnly",
+      "kind": "identity",
+      "document": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Effect": "Allow",
+            "Action": [
+              "s3:Get*",
+              "s3:List*"
+            ],
+            "Resource": "*"
+          },
+          {
+            "Effect": "Deny",
+            "Action": "s3:DeleteObject",
+            "Resource": "*"
+          }
+        ]
+      }
     }
   ],
-  "scps": ["p-scp-allow-baseline", "p-scp-deny-iam-write"],
+  "scps": [
+    "p-scp-allow-baseline",
+    "p-scp-deny-iam-write"
+  ],
   "resources": [
     {
       "id": "res-bucket-reports",
@@ -345,11 +483,15 @@
       "kind": "s3:object",
       "service": "s3",
       "service_actions": [
-        "s3:GetObject", "s3:PutObject", "s3:DeleteObject",
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:DeleteObject",
         "s3:GetObjectVersion"
       ],
       "resource_policy_id": "p-bucket-reports",
-      "context": {"aws:RequestedRegion": "us-east-1"}
+      "context": {
+        "aws:RequestedRegion": "us-east-1"
+      }
     },
     {
       "id": "res-bucket-reports-bucket",
@@ -357,8 +499,11 @@
       "kind": "s3:bucket",
       "service": "s3",
       "service_actions": [
-        "s3:ListBucket", "s3:DeleteBucket", "s3:GetBucketAcl",
-        "s3:PutBucketAcl", "s3:GetBucketLocation"
+        "s3:ListBucket",
+        "s3:DeleteBucket",
+        "s3:GetBucketAcl",
+        "s3:PutBucketAcl",
+        "s3:GetBucketLocation"
       ],
       "resource_policy_id": "p-bucket-reports"
     },
@@ -367,7 +512,11 @@
       "arn": "arn:aws:s3:::artifacts-prod/build.tgz",
       "kind": "s3:object",
       "service": "s3",
-      "service_actions": ["s3:GetObject", "s3:PutObject"],
+      "service_actions": [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:DeleteObject"
+      ],
       "resource_policy_id": "p-bucket-artifacts"
     },
     {
@@ -375,7 +524,10 @@
       "arn": "arn:aws:s3:::artifacts-prod",
       "kind": "s3:bucket",
       "service": "s3",
-      "service_actions": ["s3:ListBucket", "s3:GetBucketLocation"],
+      "service_actions": [
+        "s3:ListBucket",
+        "s3:GetBucketLocation"
+      ],
       "resource_policy_id": "p-bucket-artifacts"
     },
     {
@@ -384,8 +536,11 @@
       "kind": "kms:key",
       "service": "kms",
       "service_actions": [
-        "kms:Decrypt", "kms:Encrypt", "kms:GenerateDataKey",
-        "kms:DescribeKey", "kms:ScheduleKeyDeletion"
+        "kms:Decrypt",
+        "kms:Encrypt",
+        "kms:GenerateDataKey",
+        "kms:DescribeKey",
+        "kms:ScheduleKeyDeletion"
       ],
       "resource_policy_id": "p-key-finance"
     },
@@ -395,8 +550,11 @@
       "kind": "sqs:queue",
       "service": "sqs",
       "service_actions": [
-        "sqs:SendMessage", "sqs:ReceiveMessage", "sqs:DeleteMessage",
-        "sqs:GetQueueAttributes", "sqs:PurgeQueue"
+        "sqs:SendMessage",
+        "sqs:ReceiveMessage",
+        "sqs:DeleteMessage",
+        "sqs:GetQueueAttributes",
+        "sqs:PurgeQueue"
       ],
       "resource_policy_id": "p-queue-ingest"
     },
@@ -406,7 +564,10 @@
       "kind": "iam:role",
       "service": "iam",
       "service_actions": [
-        "iam:GetRole", "iam:PassRole", "iam:CreateRole", "iam:DeleteRole",
+        "iam:GetRole",
+        "iam:PassRole",
+        "iam:CreateRole",
+        "iam:DeleteRole",
         "iam:AttachRolePolicy"
       ]
     }

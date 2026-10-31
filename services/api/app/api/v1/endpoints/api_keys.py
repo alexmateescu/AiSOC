@@ -67,6 +67,36 @@ VALID_SCOPES: frozenset[str] = frozenset(
         "actions:read",
         "lake:query",
         "hunts:read",
+        # The other two permissions the agent-tool surface enforces. The MCP
+        # server authenticates with a key, so without these aisoc_lake_schema
+        # (GET /lake/schema) and aisoc_preview_action (the dry-run, which
+        # `actions:execute` gates; live containment still needs an approver)
+        # were reachable only with "*".
+        "lake:read_schema",
+        "actions:execute",
+        # Depth 8.2. Mintable so a tenant can automate its own access
+        # governance — an on-call rotation approving elevations from a
+        # script, a change-management job adding a condition for a
+        # maintenance window. A permission absent from this set is one only
+        # a wildcard key can exercise, which is how `hunts:read` ended up
+        # reachable solely by the credential nobody should be using.
+        #
+        # `authorize_permission_grant` still refuses any of these to a
+        # minter who does not hold them, so being listed here widens
+        # nothing by itself.
+        "elevation:read",
+        "elevation:request",
+        "elevation:approve",
+        # Depth 6.1. Mintable so a tenant can pull its own AI-estate
+        # inventory into a CMDB or a governance report without a wildcard
+        # key. Listed here widens nothing by itself: the grant check below
+        # still refuses a scope the minter does not hold.
+        "ai_estate:read",
+        "ai_estate:write",
+        "access_conditions:read",
+        "access_conditions:write",
+        "workload_identities:read",
+        "workload_identities:write",
         "users:read",
         "threat_intel:read",
         "threat_intel:write",

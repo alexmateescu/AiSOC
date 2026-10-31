@@ -42,26 +42,39 @@ self_test_if_requested(__file__)
 
 REPO_ROOT = repo_root()
 SOURCE_FILE = REPO_ROOT / "services" / "agents" / "app" / "playbook" / "ssrf_guard.py"
-VENDORED_FILE = REPO_ROOT / "services" / "api" / "app" / "_vendor" / "ssrf_guard.py"
+#: Every vendored copy, kept byte-identical to the agents source. The
+#: connectors copy exists because that service opens outbound HTTP to
+#: tenant-controlled base URLs on every connector (GHSA-cq4g-g6wp-4m2w) and a
+#: guard that drifts from the one the playbook engine enforces is two SSRF
+#: policies wearing one name.
+VENDORED_FILES = (
+    REPO_ROOT / "services" / "api" / "app" / "_vendor" / "ssrf_guard.py",
+    REPO_ROOT / "services" / "connectors" / "app" / "security" / "ssrf_guard.py",
+)
 
 
 def _check() -> int:
     if not SOURCE_FILE.is_file():
         print(f"FAIL: source file missing: {SOURCE_FILE}", file=sys.stderr)
         return 1
-    if not VENDORED_FILE.is_file():
-        print(f"FAIL: vendored file missing: {VENDORED_FILE}", file=sys.stderr)
+    failed = False
+    for vendored in VENDORED_FILES:
+        if not vendored.is_file():
+            print(f"FAIL: vendored file missing: {vendored}", file=sys.stderr)
+            failed = True
+            continue
+        if not filecmp.cmp(SOURCE_FILE, vendored, shallow=False):
+            print(
+                "FAIL: vendored ssrf_guard.py is out of sync with source.\n"
+                f"  Source:   {SOURCE_FILE.relative_to(REPO_ROOT)}\n"
+                f"  Vendored: {vendored.relative_to(REPO_ROOT)}\n\n"
+                "Re-run: python scripts/sync_vendored_ssrf_guard.py",
+                file=sys.stderr,
+            )
+            failed = True
+    if failed:
         return 1
-    if not filecmp.cmp(SOURCE_FILE, VENDORED_FILE, shallow=False):
-        print(
-            "FAIL: vendored ssrf_guard.py is out of sync with source.\n"
-            f"  Source:   {SOURCE_FILE.relative_to(REPO_ROOT)}\n"
-            f"  Vendored: {VENDORED_FILE.relative_to(REPO_ROOT)}\n\n"
-            "Re-run: python scripts/sync_vendored_ssrf_guard.py",
-            file=sys.stderr,
-        )
-        return 1
-    print("OK: vendored ssrf_guard.py matches source.")
+    print(f"OK: {len(VENDORED_FILES)} vendored ssrf_guard.py copies match source.")
     return 0
 
 
@@ -69,10 +82,11 @@ def _sync() -> int:
     if not SOURCE_FILE.is_file():
         print(f"FAIL: source file missing: {SOURCE_FILE}", file=sys.stderr)
         return 1
-    VENDORED_FILE.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(SOURCE_FILE, VENDORED_FILE)
-    print(f"copied {SOURCE_FILE.relative_to(REPO_ROOT)} → {VENDORED_FILE.relative_to(REPO_ROOT)}")
-    print("\nDone. Don't forget to commit services/api/app/_vendor/ssrf_guard.py.")
+    for vendored in VENDORED_FILES:
+        vendored.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(SOURCE_FILE, vendored)
+        print(f"copied {SOURCE_FILE.relative_to(REPO_ROOT)} → {vendored.relative_to(REPO_ROOT)}")
+    print("\nDone. Don't forget to commit the vendored copies.")
     return 0
 
 

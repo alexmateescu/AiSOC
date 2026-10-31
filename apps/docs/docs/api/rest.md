@@ -43,13 +43,18 @@ API keys are created via `POST /api/v1/api-keys` and can be scoped to specific p
 
 ## Interactive Docs
 
-When running locally, interactive Swagger UI is available at:
+**`make up` does not serve them, and that is deliberate.** It starts a
+production-class stack with the interactive docs disabled, so
+`/api/docs` there answers 404 — pointing you at it would be pointing you at
+nothing. Read the committed spec instead:
+[`docs/openapi.yaml`](https://github.com/beenuar/AiSOC/blob/main/docs/openapi.yaml).
 
-- **Swagger UI**: [http://localhost:8000/api/docs](http://localhost:8000/api/docs)
-- **ReDoc**: [http://localhost:8000/api/redoc](http://localhost:8000/api/redoc)
-- **OpenAPI JSON**: [http://localhost:8000/api/openapi.json](http://localhost:8000/api/openapi.json)
+They are served by the development overlay (`make up-dev`), which is the
+only documented local path that enables them:
 
-The full spec is also committed at [`docs/openapi.yaml`](https://github.com/beenuar/AiSOC/blob/main/docs/openapi.yaml).
+- **Swagger UI**: `http://localhost:8000/api/docs`
+- **ReDoc**: `http://localhost:8000/api/redoc`
+- **OpenAPI JSON**: `http://localhost:8000/api/openapi.json`
 
 ## Endpoint Groups
 
@@ -189,6 +194,24 @@ Re-keying on `(tenant_id, natural_key)` is the proper fix and needs a migration.
 | `GET` | `/playbooks/{id}/runs` | Execution history |
 | `POST` | `/actions/dry-run` | Simulate an action |
 
+Every `GET` route in the cases family requires the **`cases:read`**
+permission (v20.0.0, [GHSA-wwq7-2xvh-qgq6](https://github.com/beenuar/AiSOC/security/advisories/GHSA-wwq7-2xvh-qgq6)).
+Role-based users are unaffected — every shipped role that can see the console
+case list already carries it — but an **API key** minted with only
+`alerts:read` can no longer list cases or read their comments, timeline and
+evidence chain. If a narrowly-scoped integration key breaks on a cases `GET`
+after upgrading, add `cases:read` to its scopes.
+
+**Breaking in v20.0.0:** `POST /cases/{id}/comments` no longer accepts
+`is_system` in the request body
+([GHSA-9mc5-hqgh-j6wf](https://github.com/beenuar/AiSOC/security/advisories/GHSA-9mc5-hqgh-j6wf)).
+The field let any `cases:write` holder author a comment the console renders as
+an unattributed "System note", so it could not be preserved — system notes are
+written by the server itself. The server **ignores** the field rather than
+refusing the request, so an existing client that still sends it keeps
+succeeding; only generated SDK request types lose the property. Responses
+still carry `is_system`, now always server-assigned.
+
 `PATCH` is **forward-only**. The case state machine
 (`new → triaged → investigating → contained → resolved → closed`) has no
 backward edge, which is what makes "this case was closed" mean something —
@@ -240,6 +263,7 @@ Where the model runs, and whether the credential pointed at it works.
 | `GET` | `/llm/runtime` | Where the local model is **actually** running |
 | `GET/PUT/DELETE` | `/llm/credentials` | The tenant's own provider credential (BYOK) |
 | `POST` | `/llm/credentials/test` | Place one real call with it and report what happened |
+| `POST` | `/llm/credentials/models` | List the chat models a `custom` endpoint serves |
 
 `/llm/status` reports *configuration*; `/llm/runtime` reports *outcome*. The
 two differ more often than you would expect: a GPU reservation is a request,
@@ -306,6 +330,55 @@ curl -sX POST "$AISOC_API/api/v1/llm/credentials/test" \
 Requires `settings:write` rather than `settings:read`: it spends the tenant's
 money and touches an external service, which is not a read. The request is one
 token against a fixed prompt.
+
+#### Listing a custom endpoint's models
+
+The `custom` provider points at any OpenAI-compatible endpoint. Rather than
+typing a model id, the console can ask the endpoint's `GET {base_url}/models`
+and offer the chat models it lists:
+
+```bash
+curl -sX POST "$AISOC_API/api/v1/llm/credentials/models" \
+  -H "Authorization: Bearer $AISOC_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"base_url": "https://llm.internal.example/v1", "api_key": "..."}'
+```
+
+```json
+{
+  "outcome": "ok",
+  "detail": "2 chat model(s) of 5 listed.",
+  "models": [
+    { "id": "vendor/model-a", "name": null },
+    { "id": "vendor/model-b", "name": null }
+  ],
+  "listed": 5,
+  "excluded": 3,
+  "truncated": false
+}
+```
+
+Both body fields are optional. `base_url` falls back to the saved `custom`
+credential's. `api_key` is used for this request only and never stored; when
+it is omitted the saved key is used, **but only if the target is the saved base
+URL** — a form that changed the base URL and left the key blank sends no key
+rather than the saved one.
+
+`/models` rows say little in the OpenAI shape, so the filter reads, strongest
+first: a declared `capabilities` flag, declared input/output modalities
+(`architecture.modality`, `input_modalities`/`output_modalities`), and a `type`
+or `mode` label (`chat`, or an image, video, audio, embedding or rerank family).
+When any row's label says chat, a row labelled otherwise is left out, because
+that endpoint names its routes in the label. A row that declares nothing is
+kept unless its id names a non-text family (`embed`, `tts`, `whisper`, `image`,
+…). It is a filter for a dropdown, not a capability guarantee: any id can still
+be typed, and `/test` is what proves it answers.
+
+Bounded on purpose: 10 s for the whole exchange, 2 MB of body, 5,000 rows
+examined and 500 models returned (`truncated` says when that cap was reached).
+Redirects are not followed. The same air-gap check and SSRF guard as `/test`
+apply, and `outcome` uses the same four values. It requires `settings:write`,
+like `/test`, because it makes the server dial an address the caller chose.
 
 See [Where the model runs](../operations/where-the-model-runs) for the four
 deployment options these routes report on.

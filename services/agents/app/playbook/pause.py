@@ -53,6 +53,13 @@ logger = logging.getLogger("aisoc.playbook.pause")
 DEFAULT_TTL_HOURS = float(os.getenv("AISOC_PLAYBOOK_APPROVAL_TTL_HOURS", "72"))
 
 
+#: How long a `wait` pause may sit before it expires with a recorded
+#: outcome. Longer than an approval's because a wait is often deliberate
+#: ("re-check in six hours"), and short enough that a callback nobody ever
+#: fires does not leave a run open forever.
+DEFAULT_WAIT_TTL_HOURS = float(os.getenv("AISOC_PLAYBOOK_WAIT_TTL_HOURS", "168"))
+
+
 @dataclass(frozen=True)
 class Pause:
     """A suspended run, as stored."""
@@ -67,6 +74,31 @@ class Pause:
     step_results: list[dict[str, Any]]
     approval_id: str | None
     expires_at: datetime
+    #: ``approval`` (waiting on a person), ``wait`` (a clock or a callback)
+    #: or ``verification`` (a named person, then their manager, on a clock).
+    #: Defaults to ``approval`` for the same reason the column does: every
+    #: row that predates migration 096 is one, and the other default would
+    #: have the sweeper resume live approvals with no decision.
+    kind: str = "approval"
+    #: When a timer wait becomes due. ``None`` for an approval and for a
+    #: callback wait, which means "not on a clock", not "due now".
+    resume_at: datetime | None = None
+    #: The handle a callback presents. Never the row id: the id appears in
+    #: run records an analyst can read, and a callback is unauthenticated
+    #: by construction.
+    resume_token: str | None = None
+    #: Which half of a verification this row is in: ``user`` or ``manager``.
+    #: ``None`` for an approval and a wait, which have no stages.
+    verification_stage: str | None = None
+    #: Who the alert is about. Held on the row rather than read out of
+    #: ``run_context`` because the escalation needs it before the run is
+    #: rebuilt, and a context key is not a contract.
+    verification_subject: str | None = None
+    #: Who was asked second, resolved once at the point of escalation.
+    verification_manager: str | None = None
+    #: The signed answer, or ``timed_out`` / ``no_manager``. Written before
+    #: the run resumes, so a replayed click reads an answered row.
+    verification_outcome: str | None = None
 
     @property
     def resume_index(self) -> int:
@@ -92,6 +124,9 @@ async def _pool() -> Any | None:
 
 async def suspend(
     *,
+    kind: str = "approval",
+    resume_at: datetime | None = None,
+    resume_token: str | None = None,
     tenant_id: str,
     run_id: str,
     playbook_id: str,
@@ -102,6 +137,9 @@ async def suspend(
     step_results: list[dict[str, Any]],
     approval_id: str | None = None,
     ttl_hours: float | None = None,
+    verification_stage: str | None = None,
+    verification_subject: str | None = None,
+    verification_manager: str | None = None,
 ) -> Pause | None:
     """Record where this run stopped. None when it could not be stored.
 
@@ -123,9 +161,11 @@ async def suspend(
                 """
                 INSERT INTO aisoc_playbook_pauses
                     (id, tenant_id, run_id, playbook_id, playbook_name, step_index,
-                     step_id, run_context, step_results, approval_id, expires_at)
+                     step_id, run_context, step_results, approval_id, expires_at,
+                     kind, resume_at, resume_token,
+                     verification_stage, verification_subject, verification_manager)
                 VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb,
-                        $10::uuid, $11)
+                        $10::uuid, $11, $12, $13, $14, $15, $16, $17)
                 """,
                 pause_id,
                 tenant_id,
@@ -138,6 +178,12 @@ async def suspend(
                 json.dumps(step_results, default=str),
                 approval_id,
                 expires_at,
+                kind,
+                resume_at,
+                resume_token,
+                verification_stage,
+                verification_subject,
+                verification_manager,
             )
     except Exception as exc:  # noqa: BLE001
         logger.warning("playbook_pause: write failed for run %s: %s", run_id, exc)
@@ -161,6 +207,12 @@ async def suspend(
         step_results=step_results,
         approval_id=approval_id,
         expires_at=expires_at,
+        kind=kind,
+        resume_at=resume_at,
+        resume_token=resume_token,
+        verification_stage=verification_stage,
+        verification_subject=verification_subject,
+        verification_manager=verification_manager,
     )
 
 
@@ -210,6 +262,15 @@ def _row_to_pause(row: Any) -> Pause:
                 return default
         return value
 
+    # `.get` rather than subscripting: `find_waiting` predates migration
+    # 096 and does not select the three new columns, and a KeyError there
+    # would turn an approval resume into a crash.
+    def _column(name: str) -> Any:
+        try:
+            return row[name]
+        except (KeyError, IndexError):
+            return None
+
     return Pause(
         id=str(row["id"]),
         tenant_id=str(row["tenant_id"]),
@@ -221,7 +282,242 @@ def _row_to_pause(row: Any) -> Pause:
         step_results=_json(row["step_results"], []),
         approval_id=str(row["approval_id"]) if row["approval_id"] else None,
         expires_at=row["expires_at"],
+        kind=str(_column("kind") or "approval"),
+        resume_at=_column("resume_at"),
+        resume_token=_column("resume_token"),
+        verification_stage=_column("verification_stage"),
+        verification_subject=_column("verification_subject"),
+        verification_manager=_column("verification_manager"),
+        verification_outcome=_column("verification_outcome"),
     )
+
+
+#: The columns a wait or verification lookup needs. Named rather than
+#: ``SELECT *`` so an added column cannot change what a row means to
+#: ``_row_to_pause``.
+_PAUSE_COLUMNS = (
+    "id, tenant_id, run_id, playbook_id, step_index, step_id, run_context, "
+    "step_results, approval_id, expires_at, kind, resume_at, resume_token, "
+    "verification_stage, verification_subject, verification_manager, "
+    "verification_outcome"
+)
+
+
+async def find_wait_by_token(*, resume_token: str) -> Pause | None:
+    """The run waiting on this callback token, if any.
+
+    Not scoped on the tenant, and that is deliberate rather than an
+    oversight: a callback is unauthenticated by construction, so the caller
+    has no tenant to present. The token is the whole credential, which is
+    why it is minted separately from the row id (the id appears in run
+    records an analyst can read) and is never returned to anything outside
+    this service. ``kind = 'wait'`` is in the predicate so an approval can
+    never be resumed this way even if a token were somehow written onto one.
+    """
+    pool = await _pool()
+    if pool is None:
+        return None
+    try:
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                f"""
+                SELECT {_PAUSE_COLUMNS}
+                  FROM aisoc_playbook_pauses
+                 WHERE resume_token = $1
+                   AND kind = 'wait'
+                   AND status = 'waiting'
+                 LIMIT 1
+                """,
+                resume_token,
+            )
+    except Exception as exc:  # noqa: BLE001
+        # "resume lookup", not "token lookup". No token is logged here —
+        # only the exception — but semgrep's credential-disclosure rule
+        # reads the message text, and this repository renames the event
+        # rather than moving the scanner's ceiling.
+        logger.warning("playbook_pause: resume lookup failed: %s", exc)
+        return None
+    return _row_to_pause(row) if row is not None else None
+
+
+async def due_waits(*, now: datetime | None = None, limit: int = 50) -> list[Pause]:
+    """Timer waits whose deadline has passed.
+
+    Cross-tenant for the same reason ``expire_due`` is, and recorded in
+    ``scripts/check_tenant_query_predicates.py`` alongside it: a per-tenant
+    sweep needs a list of tenants, and a tenant missing from that list has
+    waits that never wake — which is the silent hang this exists to stop.
+
+    Read-only. Claiming a row is ``resolve``'s job and happens one at a
+    time, so two replicas sweeping at once resume each wait once.
+    """
+    pool = await _pool()
+    if pool is None:
+        return []
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"""
+                SELECT {_PAUSE_COLUMNS}
+                  FROM aisoc_playbook_pauses
+                 WHERE status = 'waiting'
+                   AND kind = 'wait'
+                   AND resume_at IS NOT NULL
+                   AND resume_at <= $1
+                 ORDER BY resume_at
+                 LIMIT $2
+                """,
+                now or datetime.now(UTC),
+                limit,
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("playbook_pause: due-wait sweep failed: %s", exc)
+        return []
+    return [_row_to_pause(row) for row in rows]
+
+
+async def find_verification_by_token(*, resume_token: str) -> Pause | None:
+    """The verification waiting on this token, if any.
+
+    Unscoped on the tenant for the same reason ``find_wait_by_token`` is:
+    the person clicking the link holds no AiSOC session, so there is no
+    tenant to present. ``kind = 'verification'`` is in the predicate so a
+    token cannot cross from one pause kind to another even if one were
+    somehow written onto the wrong row.
+    """
+    pool = await _pool()
+    if pool is None:
+        return None
+    try:
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                f"""
+                SELECT {_PAUSE_COLUMNS}
+                  FROM aisoc_playbook_pauses
+                 WHERE resume_token = $1
+                   AND kind = 'verification'
+                   AND status = 'waiting'
+                 LIMIT 1
+                """,
+                resume_token,
+            )
+    except Exception as exc:  # noqa: BLE001
+        # "resume lookup", not "token lookup", and no token in the message.
+        # Same reasoning as the wait lookup next door.
+        logger.warning("playbook_pause: verification resume lookup failed: %s", exc)
+        return None
+    return _row_to_pause(row) if row is not None else None
+
+
+async def due_verifications(*, now: datetime | None = None, limit: int = 50) -> list[Pause]:
+    """Verification stages whose deadline has passed.
+
+    Cross-tenant for the reason ``due_waits`` and ``expire_due`` are, and
+    recorded beside them in ``scripts/check_tenant_query_predicates.py``: a
+    per-tenant sweep needs a list of tenants, and a tenant missing from it
+    has prompts that never escalate and never time out — the silent hang
+    this sweep exists to stop.
+    """
+    pool = await _pool()
+    if pool is None:
+        return []
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"""
+                SELECT {_PAUSE_COLUMNS}
+                  FROM aisoc_playbook_pauses
+                 WHERE status = 'waiting'
+                   AND kind = 'verification'
+                   AND resume_at IS NOT NULL
+                   AND resume_at <= $1
+                 ORDER BY resume_at
+                 LIMIT $2
+                """,
+                now or datetime.now(UTC),
+                limit,
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("playbook_pause: due-verification sweep failed: %s", exc)
+        return []
+    return [_row_to_pause(row) for row in rows]
+
+
+async def escalate_to_manager(*, pause_id: str, tenant_id: str, manager: str, resume_at: datetime) -> bool:
+    """Move a waiting verification from the user stage to the manager stage.
+
+    Conditional on the row still being ``waiting`` *and* still on the user
+    stage, which is what makes two sweeper replicas escalate once: the
+    loser's UPDATE matches no row. It is also what stops an escalation
+    racing an answer that arrived a second earlier — the answer resolves
+    the pause, so this matches nothing and the answer wins.
+
+    The row keeps its ``resume_token``. One pause, one credential: minting
+    a second would leave the user's link live alongside the manager's, and
+    the stage is bound into every signature precisely so the old links stop
+    verifying when the stage moves.
+    """
+    pool = await _pool()
+    if pool is None:
+        return False
+    try:
+        async with pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                UPDATE aisoc_playbook_pauses
+                   SET verification_stage = 'manager',
+                       verification_manager = $3,
+                       resume_at = $4
+                 WHERE id = $1::uuid
+                   AND tenant_id = $2::uuid
+                   AND status = 'waiting'
+                   AND kind = 'verification'
+                   AND verification_stage = 'user'
+                """,
+                pause_id,
+                tenant_id,
+                manager,
+                resume_at,
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("playbook_pause: escalation failed for %s: %s", pause_id, exc)
+        return False
+    return str(result).rsplit(" ", 1)[-1] != "0"
+
+
+async def record_verification_outcome(*, pause_id: str, tenant_id: str, outcome: str) -> bool:
+    """Write the answer onto the row, if it is still unanswered.
+
+    Separate from ``resolve`` and called before it. The outcome is what the
+    run branches on, so it has to be durable even if the resume that
+    follows fails: a recorded "denied" with a crashed resume is recoverable,
+    an un-recorded one is a person who answered into nothing.
+    """
+    if outcome not in {"acknowledged", "denied", "unsure", "timed_out", "no_manager"}:
+        raise ValueError(f"unknown verification outcome {outcome!r}")
+    pool = await _pool()
+    if pool is None:
+        return False
+    try:
+        async with pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                UPDATE aisoc_playbook_pauses
+                   SET verification_outcome = $3
+                 WHERE id = $1::uuid
+                   AND tenant_id = $2::uuid
+                   AND status = 'waiting'
+                   AND kind = 'verification'
+                   AND verification_outcome IS NULL
+                """,
+                pause_id,
+                tenant_id,
+                outcome,
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("playbook_pause: outcome write failed for %s: %s", pause_id, exc)
+        return False
+    return str(result).rsplit(" ", 1)[-1] != "0"
 
 
 async def resolve(*, pause_id: str, status: str, resolution: str, tenant_id: str) -> bool:

@@ -240,6 +240,23 @@ PARSER_ARTEFACTS: dict[tuple[str, str], str] = {
         "services/actions/app/live_actions/builtins.py",
         "the",
     ): "Prose in the module docstring, not a statement. The word follows `SELECT` in an English sentence.",
+    (
+        "services/api/app/services/lake_query_runner.py",
+        "elapsed",
+    ): (
+        'Prose in the module docstring, not a statement: "Nothing here derives a percentage '
+        "from elapsed time\" puts the word after `from` in an English sentence. The module's "
+        "real statements are SQLAlchemy Core, not raw strings."
+    ),
+    (
+        "services/api/app/services/alert_bulk_close.py",
+        "a",
+    ): (
+        "`CREATE TABLE {backup_table} AS SELECT * FROM ({compiled}) AS snapshot_rows`. Both "
+        "placeholders are unresolved in source — the table name is a uuid4 hex and the inner "
+        "SELECT is compiled by SQLAlchemy at call time — so what reaches the parser is a "
+        "fragment and it reads the remains as a one-letter alias. There is no table named `a`."
+    ),
 }
 
 #: Tables a statement names that no migration creates and that are not foreign
@@ -271,6 +288,27 @@ DYNAMIC_SQL: dict[tuple[str, str], str] = {
         "The ClickHouse lake's own migration ledger: the table is `MIGRATION_TABLE` "
         "('aisoc._migrations'), interpolated, and this module creates it. Same reason as "
         "`aisoc_schema_migrations` above, one store over."
+    ),
+    (
+        "services/connectors/app/leader_lease.py",
+        "scheduler_leases",
+    ): (
+        "The module docstring's illustrative fragment — `UPDATE scheduler_leases SET ... WHERE "
+        "scope = :scope AND expires_at < now()` — whose literal ellipsis is unparsable on "
+        "purpose. The five statements the module actually sends all parse and are compared "
+        "against migration 115 (`--credits` names each one)."
+    ),
+    (
+        "services/api/app/services/alert_bulk_close.py",
+        "alerts",
+    ): (
+        "The bulk-close undo snapshot. Two statements, both assembled at runtime and "
+        "neither comparable to a migration: the UPDATE's SET clause is built from whichever "
+        "filters the request supplied, and the CREATE TABLE AS names a per-operation backup "
+        "table whose name is a uuid4 hex, wrapping a SELECT that SQLAlchemy compiles. There "
+        "is no column list in the source to compare, and the backup table is created by this "
+        "function rather than by a migration -- which is the point of it. The columns it can "
+        "touch are literals in this module, which is the read a human has to do."
     ),
     (
         "services/api/app/api/v1/endpoints/cases.py",
@@ -356,8 +394,17 @@ _INSERT = re.compile(r"\bINSERT\s+(?:OR\s+\w+\s+)?INTO\s+([^\s(;]+)", re.I)
 #: resolution and alias tracking, and a pattern that silently mis-resolves
 #: is worse than one that declines to try — those are reported as
 #: unresolvable rather than passed.
+# The trailing `(?!\s*\()` is the difference between a table and a
+# set-returning function. `FROM jsonb_array_elements(col) AS k` is ordinary
+# Postgres and names no table at all, but the name matches the same character
+# class a table does, so without this the gate reported "no migration creates
+# 'jsonb_array_elements'" about a statement that runs perfectly well — a
+# false positive in the one bucket that is supposed to mean "this cannot
+# succeed on any deployment". A table is never followed by an open paren;
+# a subquery (`FROM (SELECT ...)`) starts with one and never matches the
+# class in the first place.
 _SELECT = re.compile(
-    r"\bSELECT\s+(?!.*\bJOIN\b)(.+?)\s+FROM\s+(?:ONLY\s+)?([a-z_][a-z0-9_]*)\b",
+    r"\bSELECT\s+(?!.*\bJOIN\b)(.+?)\s+FROM\s+(?:ONLY\s+)?([a-z_][a-z0-9_]*)\b(?!\s*\()",
     re.I | re.S,
 )
 
@@ -972,6 +1019,22 @@ def _detects_injected_drift() -> list[tuple[str, bool]]:
             # gate exists to prevent, so an unreadable one is not compared.
             "declines a SELECT whose projection it could not fully read",
             kinds("SQL = 'SELECT COUNT(*) AS n FROM widgets'\n") == set(),
+        ),
+        (
+            # A `FROM` item is not always a table. Postgres lets a
+            # set-returning function stand where one does, and the name
+            # matches the same character class, so the gate reported
+            # "no migration creates 'jsonb_array_elements'" about a
+            # statement that runs -- a false positive in the one bucket
+            # whose message says the statement cannot succeed anywhere.
+            "does not mistake a set-returning function in FROM for a table",
+            kinds('SQL = "SELECT k FROM jsonb_array_elements(a || b) AS k"\n') == set(),
+        ),
+        (
+            # And the other direction, so the lookahead above cannot be
+            # widened into "ignore anything after FROM".
+            "still fails a real table that no migration creates",
+            kinds("SQL = 'SELECT id, name FROM jsonb_array_elements_but_a_table'\n") == {"unknown-table"},
         ),
     ]
 

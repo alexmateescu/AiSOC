@@ -106,6 +106,20 @@ class RoleGrantDenied(Exception):
         self.unknown = unknown
 
 
+def known_roles() -> frozenset[str]:
+    """Every role name the product recognises.
+
+    The *vocabulary*, not a permission decision. A caller that needs to
+    reject a role nobody holds -- an MFA policy naming `infosce` would be
+    stored, match no user, and leave an administrator reading a page that
+    says a role is enforced while it is not -- asks here rather than
+    importing `ROLE_PERMISSIONS` and growing a second opinion about what a
+    role is. `check_one_permission_model.py` enforces that, and this module
+    is one of the four it names as the map's legitimate readers.
+    """
+    return frozenset(ROLE_PERMISSIONS)
+
+
 def wildcard_roles() -> frozenset[str]:
     """Roles whose declared permission list is the wildcard."""
     return frozenset(role for role, perms in ROLE_PERMISSIONS.items() if WILDCARD in perms)

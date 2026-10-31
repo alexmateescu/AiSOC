@@ -31,10 +31,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 
-from sqlalchemy import text
+from sqlalchemy import DateTime, Uuid, bindparam, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.services.usage_metering import MODEL_RUNS
 
 logger = logging.getLogger("aisoc.entitlements")
 
@@ -79,17 +80,23 @@ LIMIT_KEYS: Final[tuple[LimitKey, ...]] = (
         "SELECT count(*) FROM alerts WHERE tenant_id = :tenant_id AND created_at >= :since",
     ),
     LimitKey(
-        # Counted as alerts that carry AI output, because that is the row a
-        # triage actually writes. There is no usage-metering table in this
-        # build, and inventing a number for one would be worse than counting
-        # the evidence that a triage happened.
+        # Counted from the run, not from the alert, and kept byte-identical
+        # in intent to `usage_metering.triages_model` — a usage screen and a
+        # quota screen that define "a triage" separately are two surfaces
+        # that will eventually disagree in front of a customer.
+        #
+        # It used to read `alerts.ai_summary IS NOT NULL OR ai_score IS NOT
+        # NULL`, and the deterministic triage path writes both of those, so
+        # a tenant on a deployment with no model configured burned their
+        # whole AI-triage quota on triages no model performed. That is the
+        # expensive direction: the cap does not fail loudly, it just stops
+        # triaging, and the customer reports it as "the AI doesn't work".
         "triages_per_month",
         "AI triages / month",
-        "Alerts with AI triage output this calendar month.",
+        "Auto-triage runs that reached a model this calendar month.",
         (
-            "SELECT count(*) FROM alerts "
-            "WHERE tenant_id = :tenant_id AND created_at >= :month_start "
-            "AND (ai_summary IS NOT NULL OR ai_score IS NOT NULL)"
+            "SELECT count(*) FROM investigation_runs "
+            "WHERE tenant_id = :tenant_id AND created_at >= :month_start AND model_used IN :model_runs"
         ),
     ),
 )
@@ -194,18 +201,48 @@ def classify(used: int, limit: int | None) -> str:
     return "ok"
 
 
+#: Bind types for the parameters the limit queries use.
+#:
+#: Declared rather than inferred, for the same reason
+#: `usage_metering._statement` declares them: these are raw statements, so
+#: without a type the driver is handed a value and has to guess. The tenant
+#: was being bound as `str(uuid)` against a `UUID` column, which Postgres
+#: resolves by inferring the parameter's type from the comparison and no
+#: other driver does — so every one of these counts returned zero in any
+#: harness that was not Postgres, and a quota that reads zero is the one
+#: direction nobody investigates.
+_BIND_TYPES: Final[dict[str, Any]] = {
+    "tenant_id": Uuid(as_uuid=True),
+    "since": DateTime(timezone=True),
+    "month_start": DateTime(timezone=True),
+}
+
+#: Bound as a list, and imported rather than rebuilt here: a quota that
+#: decides "which runs are AI triages" for itself is a second definition,
+#: and the two drift in front of a customer who is being throttled.
+_EXPANDING: Final[tuple[str, ...]] = ("model_runs",)
+
+
 async def measure_usage(db: AsyncSession, tenant_id: uuid.UUID) -> dict[str, int]:
     """Count current usage of every limit key for one tenant."""
     now = datetime.now(UTC)
     params = {
-        "tenant_id": str(tenant_id),
+        "tenant_id": tenant_id,
         "since": now - timedelta(hours=24),
         "month_start": now.replace(day=1, hour=0, minute=0, second=0, microsecond=0),
+        # Imported rather than repeated, so "which runs are AI triages" has
+        # one definition shared with the usage meters.
+        "model_runs": list(MODEL_RUNS),
     }
     usage: dict[str, int] = {}
     for key in LIMIT_KEYS:
-        bound = {name: value for name, value in params.items() if f":{name}" in key.usage_sql}
-        result = await db.execute(text(key.usage_sql), bound)
+        present = [name for name in _BIND_TYPES if f":{name}" in key.usage_sql]
+        expanding = [name for name in _EXPANDING if f":{name}" in key.usage_sql]
+        statement = text(key.usage_sql).bindparams(
+            *[bindparam(name, type_=_BIND_TYPES[name]) for name in present],
+            *[bindparam(name, expanding=True) for name in expanding],
+        )
+        result = await db.execute(statement, {name: params[name] for name in (*present, *expanding)})
         usage[key.name] = int(result.scalar_one() or 0)
     return usage
 
@@ -234,3 +271,125 @@ async def headroom_for_tenant(
             )
         rows.append(Headroom(key=key.name, label=key.label, used=used, limit=limit, state=state))
     return rows
+
+
+# ── Enforcement ─────────────────────────────────────────────────────────────
+#
+# Everything above reports. Parity 4.5 asks for the other half: a limit an
+# operator configured should be able to actually stop work, with a clear
+# over-limit state rather than a silent one.
+#
+# Three properties decide the shape, and each is a reaction to how this has
+# gone wrong before.
+#
+# **Opt-in, per tenant, per key.** `tenants.limits` has been a *reporting*
+# input since it existed, so the numbers already written there were never
+# chosen as hard caps. Enforcement arriving switched on would turn every one
+# of them into a refusal on upgrade. Absence of a row means not enforced, and
+# migration `113` writes none.
+#
+# **A measurement failure does not refuse.** The fail-closed instinct is
+# wrong here and the precedent is explicit: a safety control that gets stuck
+# closed reads as working caution, and a quota that cannot count would stop a
+# customer's SOC for a reason that has nothing to do with their usage. An
+# unreadable count is logged at `error` and the work proceeds. The positive
+# control in the test suite is what keeps that honest in the other direction.
+#
+# **The refusal says what to do.** `LimitExceeded` carries the key, the
+# measured usage and the ceiling, because "quota exceeded" sends an operator
+# to a support channel while "47 of 45 connectors" sends them to the setting.
+
+
+class LimitExceeded(Exception):
+    """A tenant is over an enforced ceiling.
+
+    Raised only when an operator opted that key in. Carries the numbers
+    rather than a bare message: the caller turns this into an HTTP 402 or
+    409, and the operator reading it needs to know which limit, by how
+    much, and what the ceiling is.
+    """
+
+    def __init__(self, key: str, label: str, used: int, limit: int) -> None:
+        self.key = key
+        self.label = label
+        self.used = used
+        self.limit = limit
+        super().__init__(
+            f"{label} is at {used} of a configured limit of {limit}. "
+            f"Raise the limit for this tenant, or disable enforcement of '{key}', to continue."
+        )
+
+
+async def enforced_keys(db: AsyncSession, tenant_id: uuid.UUID) -> frozenset[str]:
+    """The limit keys this tenant has opted in to enforcing.
+
+    An unreadable table is an empty set, not an exception: enforcement is
+    the opt-in half of this module and a storage fault must not become a
+    refusal. Logged at `error`, because a deployment that wanted a ceiling
+    applied and is not getting one should be visible.
+    """
+    try:
+        result = await db.execute(
+            text("SELECT limit_key FROM aisoc_tenant_entitlement_enforcement  WHERE tenant_id = :tenant_id AND enforce IS TRUE").bindparams(
+                bindparam("tenant_id", type_=Uuid(as_uuid=True))
+            ),
+            {"tenant_id": tenant_id},
+        )
+    except Exception:
+        logger.error(
+            "entitlements.enforcement_unreadable tenant=%s — no limit is being enforced for this tenant",
+            tenant_id,
+            exc_info=True,
+        )
+        return frozenset()
+    return frozenset(str(row[0]) for row in result.fetchall())
+
+
+async def assert_within_limit(
+    db: AsyncSession,
+    tenant_id: uuid.UUID,
+    tenant_limits: dict | None,
+    key: str,
+) -> None:
+    """Refuse the caller if *key* is enforced for this tenant and exhausted.
+
+    Returns silently in every other case: the key is not opted in, no
+    ceiling is configured, there is room left, or the usage could not be
+    measured. Only the first of those is a policy decision; the rest are
+    the absence of one.
+
+    `classify` decides exhaustion, so the number a caller is refused on is
+    the same one the console's headroom bar drew. Two definitions of "full"
+    is how a customer gets refused by a screen that says they have room.
+    """
+    if key not in LIMIT_KEYS_BY_NAME:
+        raise KeyError(f"unknown limit key: {key!r}")
+    if key not in await enforced_keys(db, tenant_id):
+        return
+
+    limit = limit_for(tenant_limits, key)
+    if limit is None:
+        return
+
+    try:
+        used = (await measure_usage(db, tenant_id)).get(key, 0)
+    except Exception:
+        # Deliberately not a refusal. See the note above the class.
+        logger.error(
+            "entitlements.usage_unmeasurable tenant=%s key=%s — allowing the request rather than "
+            "refusing on evidence that could not be read",
+            tenant_id,
+            key,
+            exc_info=True,
+        )
+        return
+
+    if classify(used, limit) == "exhausted":
+        logger.warning(
+            "entitlements.refused tenant=%s key=%s used=%d limit=%d",
+            tenant_id,
+            key,
+            used,
+            limit,
+        )
+        raise LimitExceeded(key, LIMIT_KEYS_BY_NAME[key].label, used, limit)

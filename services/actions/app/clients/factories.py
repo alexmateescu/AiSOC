@@ -29,7 +29,9 @@ from app.clients.cortex_xdr_client import CortexXdrClient
 from app.clients.crowdstrike_rtr import CrowdStrikeRTRClient
 from app.clients.defender_client import DefenderClient
 from app.clients.fortigate_client import FortiGateClient
+from app.clients.gmail_client import GmailClient
 from app.clients.google_workspace_client import GoogleWorkspaceClient
+from app.clients.m365_mail_client import M365MailClient
 from app.clients.okta_client import OktaClient
 from app.clients.panos_client import PanOsClient
 from app.clients.sentinelone_client import SentinelOneClient
@@ -190,6 +192,43 @@ def _s1_client(params: dict) -> SentinelOneClient | None:
     return SentinelOneClient(console_url=console_url, api_token=api_token)
 
 
+def _m365_mail_client(params: dict) -> M365MailClient | None:
+    """Mailbox client from the same three fields the Entra client reads.
+
+    Deliberately the same credential names: one Azure app registration with
+    both the directory and the mail permissions covers identity response and
+    mailbox remediation, and asking an operator to register a second app to
+    purge a phishing message is friction with no security benefit.
+    """
+    tenant_id = params.get("azure_tenant_id")
+    client_id = params.get("azure_client_id")
+    client_secret = params.get("azure_client_secret")
+    if not (tenant_id and client_id and client_secret):
+        return None
+    return M365MailClient(tenant_id=tenant_id, client_id=client_id, client_secret=client_secret)
+
+
+def _gmail_client(params: dict) -> GmailClient | None:
+    """Gmail client from the Workspace service-account key.
+
+    ``gws_subject_email`` is optional here and required on the Workspace
+    client, because Gmail impersonates the mailbox being acted on rather than
+    a fixed admin — the subject is per call. It is still read so a deployment
+    that configures only a report mailbox has a default.
+    """
+    key = params.get("gws_service_account_key")
+    if not key:
+        return None
+    try:
+        return GmailClient(service_account_key=key, subject_email=str(params.get("gws_subject_email") or ""))
+    except ValueError:
+        # A malformed key is a configuration error, and the caller's
+        # "credentials not configured" branch is the right place for it to
+        # surface: both mean "we did not reach the vendor", and raising here
+        # would turn it into an executor crash instead.
+        return None
+
+
 __all__ = [
     "_aws_client",
     "_cloudflare_client",
@@ -198,7 +237,9 @@ __all__ = [
     "_cs_client",
     "_entra_client",
     "_fortigate_client",
+    "_gmail_client",
     "_gws_client",
+    "_m365_mail_client",
     "_mde_client",
     "_okta_client",
     "_panos_client",

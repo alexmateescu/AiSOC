@@ -29,6 +29,8 @@ from fastapi import FastAPI, Request
 
 from app._health import install_health_routes
 from app.callbacks import callback_max_age_seconds, handle_card_action
+from app.notify import router as notify_router
+from app.war_room import router as war_room_router
 
 app = FastAPI(
     title="AiSOC Teams Bot",
@@ -37,6 +39,14 @@ app = FastAPI(
 )
 
 # Phase 2.6 — k8s liveness + readiness probes (see app/_health.py).
+app.include_router(notify_router)
+# Depth 9.4. Creating a Teams channel needs Microsoft Graph, not the
+# incoming webhook this service posts cards through — so the route
+# refuses with the specific missing settings named rather than falling
+# back to one shared channel, which would put the next incident's
+# traffic in the last one's thread.
+app.include_router(war_room_router)
+
 _mark_ready, _mark_not_ready = install_health_routes(app, service_name="aisoc-teams-bot")
 app.state.mark_ready = _mark_ready
 app.state.mark_not_ready = _mark_not_ready

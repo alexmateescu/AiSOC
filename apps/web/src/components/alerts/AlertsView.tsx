@@ -1,9 +1,10 @@
 'use client';
 
 import { useState, useCallback } from 'react';
-import useSWR from 'swr';
+import useSWR, { useSWRConfig } from 'swr';
 import Link from 'next/link';
-import { alertsApi, type Alert, type AlertFilters, type ConfidenceLabel } from '@/lib/api';
+import { BulkTriageBar } from './BulkTriageBar';
+import { alertsApi, type Alert, type AlertFacets, type AlertFilters, type ConfidenceLabel } from '@/lib/api';
 import { clsx } from 'clsx';
 import { formatDistanceToNow } from 'date-fns';
 import { EntityRiskQueue } from './EntityRiskQueue';
@@ -90,6 +91,30 @@ const MOCK_ALERTS: Alert[] = Array.from({ length: 25 }, (_, i): Alert => {
     confidenceScore: Math.round(confScore * 100),
   };
 });
+
+/**
+ * The aggregate the API would return for a set of alerts.
+ *
+ * Only reachable through `demoFallback`, where `MOCK_ALERTS` is the entire
+ * result set rather than a page of one — so this is the same question the
+ * server answers, not the page-derived count the stat strip used to show.
+ */
+function demoFacets(rows: Alert[]): AlertFacets {
+  const bySeverity: Record<string, number> = {};
+  const byStatus: Record<string, number> = {};
+  for (const row of rows) {
+    bySeverity[row.severity] = (bySeverity[row.severity] ?? 0) + 1;
+    byStatus[row.status] = (byStatus[row.status] ?? 0) + 1;
+  }
+  // Mirrors `app/services/alert_status.py`: anything not explicitly finished
+  // is still someone's problem.
+  const RESOLVED = new Set(['resolved', 'closed']);
+  return {
+    bySeverity,
+    byStatus,
+    unresolved: rows.filter((r) => !RESOLVED.has(r.status)).length,
+  };
+}
 
 // Wave 1 — Detection confidence chip rendered inline in the alert grid so an
 // analyst can spot low-confidence alerts at a glance without clicking through.
@@ -199,10 +224,14 @@ function AlertRow({
   alert,
   selected,
   onSelect,
+  checked,
+  onToggleChecked,
 }: {
   alert: Alert;
   selected: boolean;
   onSelect: (id: string) => void;
+  checked: boolean;
+  onToggleChecked: (id: string) => void;
 }) {
   return (
     <Link
@@ -223,6 +252,24 @@ function AlertRow({
           : 'border-l-transparent hover:bg-gray-800/20',
       )}
     >
+      {/*
+        Depth 9.3. The row is a Link, so the checkbox has to stop the event
+        before it reaches it — otherwise ticking a box navigates to the
+        alert, which is the single most irritating way to break a bulk
+        selection.
+      */}
+      <input
+        type="checkbox"
+        checked={checked}
+        aria-label={`Select ${alert.title}`}
+        onClick={(e) => e.stopPropagation()}
+        onChange={(e) => {
+          e.stopPropagation();
+          onToggleChecked(alert.id);
+        }}
+        className="accent-blue-500 shrink-0"
+      />
+
       <SeverityDot severity={alert.severity} />
 
       <div className="flex-1 min-w-0">
@@ -260,11 +307,19 @@ function AlertRow({
 // ─── Main View ────────────────────────────────────────────────────────────────
 
 export function AlertsView() {
-  const [filters, setFilters] = useState<AlertFilters>({ page: 1, pageSize: 25 });
-  // Default to the entity-centric queue — that's the whole point of Wave 1's
-  // RBA work. Analysts can flip back to the raw alert grid for legacy
-  // workflows or when triaging a specific alert ID.
-  const [viewMode, setViewMode] = useState<ViewMode>('entities');
+  // `sort: 'priority'` because the API defaults to reverse-chronological for
+  // its SDK clients, and in a console that is the wrong default: a noisy
+  // low-severity source emitting faster than an analyst pages pushes a
+  // critical off page one and keeps it there.
+  const [filters, setFilters] = useState<AlertFilters>({
+    page: 1,
+    pageSize: 25,
+    sort: 'priority',
+    status: 'new',
+  });
+  // Default to the raw alerts grid (operator preference 2026-10-28): triage
+  // starts from alerts; the entity-centric RBA queue stays one click away.
+  const [viewMode, setViewMode] = useState<ViewMode>('alerts');
 
   const { data, error, isLoading } = useSWR(
     ['alerts', filters],
@@ -275,6 +330,11 @@ export function AlertsView() {
         total: MOCK_ALERTS.length,
         page: 1,
         pageSize: 25,
+        // In the hosted demo the mock set *is* the whole result set — there
+        // is no server behind it — so counting it here is the same aggregate
+        // the API computes, not a page-derived figure. `demoFallback` keeps
+        // the whole object out of a real deployment.
+        facets: demoFacets(MOCK_ALERTS),
       }),
       refreshInterval: 30000,
     }
@@ -287,9 +347,11 @@ export function AlertsView() {
   const alerts = data?.alerts || [];
   const total = data?.total || 0;
 
-  const critCount = alerts.filter((a) => a.severity === 'critical').length;
-  const highCount = alerts.filter((a) => a.severity === 'high').length;
-  const newCount = alerts.filter((a) => a.status === 'new').length;
+  // These used to be `alerts.filter(...)` over `data.alerts`, which is one
+  // page of `pageSize` rows, rendered beside a server-side `total` in the
+  // hundreds — so the tiles were capped at 25 and moved when the analyst
+  // paged. `facets` is the same aggregate the server computes for `total`.
+  const facets = data?.facets;
 
   return (
     <div className="space-y-4">
@@ -359,9 +421,7 @@ export function AlertsView() {
         <AlertsTable
           alerts={alerts}
           total={total}
-          critCount={critCount}
-          highCount={highCount}
-          newCount={newCount}
+          facets={facets}
           filters={filters}
           isLoading={isLoading}
           error={error}
@@ -377,9 +437,7 @@ export function AlertsView() {
 function AlertsTable({
   alerts,
   total,
-  critCount,
-  highCount,
-  newCount,
+  facets,
   filters,
   isLoading,
   error,
@@ -387,9 +445,7 @@ function AlertsTable({
 }: {
   alerts: Alert[];
   total: number;
-  critCount: number;
-  highCount: number;
-  newCount: number;
+  facets?: AlertFacets;
   filters: AlertFilters;
   isLoading: boolean;
   error: unknown;
@@ -400,16 +456,34 @@ function AlertsTable({
   // Switching to the entities tab unmounts this state cleanly, which is
   // what we want — the rail is alert-scoped, not entity-scoped.
   const [selectedAlertId, setSelectedAlertId] = useState<string | null>(null);
+  // Depth 9.3 — bulk selection, separate from the rail's single selection.
+  // A Set rather than an array so toggling is O(1) and the "select all on
+  // this page" header checkbox does not have to scan.
+  const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set());
+  const { mutate } = useSWRConfig();
+
+  const toggleChecked = useCallback((id: string) => {
+    setCheckedIds((previous) => {
+      const next = new Set(previous);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
 
   return (
     <div className="space-y-4">
       {/* Stats strip (full width) */}
-      <div className="grid grid-cols-4 gap-3">
+      <div className="grid grid-cols-4 gap-3" role="group" aria-label="Alert counts">
         {[
           { label: 'Total', value: total, color: 'text-gray-200' },
-          { label: 'Critical', value: critCount, color: 'text-red-400' },
-          { label: 'High', value: highCount, color: 'text-orange-400' },
-          { label: 'Unresolved', value: newCount, color: 'text-purple-400' },
+          // A key the server omitted from the map means it counted and found
+          // none, so `?? 0` is a real zero. No facets at all means nobody
+          // counted, and the em-dash says so rather than publishing the
+          // page-derived figure that was the original defect.
+          { label: 'Critical', value: facets ? (facets.bySeverity.critical ?? 0) : '—', color: 'text-red-400' },
+          { label: 'High', value: facets ? (facets.bySeverity.high ?? 0) : '—', color: 'text-orange-400' },
+          { label: 'Unresolved', value: facets ? facets.unresolved : '—', color: 'text-purple-400' },
         ].map((stat) => (
           <div key={stat.label} className="bg-gray-900/60 border border-gray-800/60 rounded-xl px-4 py-3">
             <p className="text-xs text-gray-500">{stat.label}</p>
@@ -438,6 +512,15 @@ function AlertsTable({
 
       <FiltersBar filters={filters} onChange={onFilterChange} total={total} />
 
+      <BulkTriageBar
+        selectedIds={[...checkedIds]}
+        onClearSelection={() => setCheckedIds(new Set())}
+        // Revalidate rather than patching rows locally: the server decided
+        // what changed and an optimistic update would show a state it may
+        // not have written.
+        onApplied={() => void mutate((key) => Array.isArray(key) && key[0] === 'alerts')}
+      />
+
       {/*
         v1.5 W6 — two-pane layout. On wide screens the queue takes the left
         seven cols and the Investigation Rail takes the right five; on narrow
@@ -455,6 +538,9 @@ function AlertsTable({
             selectedAlertId={selectedAlertId}
             onSelect={setSelectedAlertId}
             onFilterChange={onFilterChange}
+            checkedIds={checkedIds}
+            onToggleChecked={toggleChecked}
+            onSetChecked={setCheckedIds}
           />
           <AlertsPagination
             alerts={alerts}
@@ -486,6 +572,9 @@ function AlertsTableGrid({
   selectedAlertId,
   onSelect,
   onFilterChange,
+  checkedIds,
+  onToggleChecked,
+  onSetChecked,
 }: {
   alerts: Alert[];
   isLoading: boolean;
@@ -494,11 +583,35 @@ function AlertsTableGrid({
   selectedAlertId: string | null;
   onSelect: (id: string) => void;
   onFilterChange: (f: AlertFilters) => void;
+  checkedIds: Set<string>;
+  onToggleChecked: (id: string) => void;
+  onSetChecked: (next: Set<string>) => void;
 }) {
+  const pageIds = alerts.map((a) => a.id);
+  const allOnPageChecked = pageIds.length > 0 && pageIds.every((id) => checkedIds.has(id));
+
   return (
     <div className="bg-gray-900/60 border border-gray-800/60 rounded-xl overflow-hidden">
-      <div className="flex items-center px-4 py-2 border-b border-gray-800/60 bg-gray-900/80">
-        <span className="text-xs text-gray-500 flex-1 pl-2">ALERT</span>
+      <div className="flex items-center gap-4 px-4 py-2 border-b border-gray-800/60 bg-gray-900/80">
+        {/*
+          Selects this page only, never "everything matching the filter".
+          A control that silently selects rows the analyst cannot see is the
+          shape that turns a bulk action into an incident.
+        */}
+        <input
+          type="checkbox"
+          aria-label="Select all alerts on this page"
+          checked={allOnPageChecked}
+          disabled={pageIds.length === 0}
+          onChange={(e) => {
+            const next = new Set(checkedIds);
+            if (e.target.checked) pageIds.forEach((id) => next.add(id));
+            else pageIds.forEach((id) => next.delete(id));
+            onSetChecked(next);
+          }}
+          className="accent-blue-500"
+        />
+        <span className="text-xs text-gray-500 flex-1">ALERT</span>
         <span className="text-xs text-gray-500 w-20">SEVERITY</span>
         <span className="text-xs text-gray-500 w-24">STATUS</span>
         <span className="text-xs text-gray-500 w-24 text-right">TIME</span>
@@ -553,6 +666,8 @@ function AlertsTableGrid({
               alert={alert}
               selected={selectedAlertId === alert.id}
               onSelect={onSelect}
+              checked={checkedIds.has(alert.id)}
+              onToggleChecked={onToggleChecked}
             />
           ))}
         </div>

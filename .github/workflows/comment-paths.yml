@@ -91,3 +91,13 @@ jobs:
 
       - name: Every repository path named in a comment exists
         run: python3 scripts/check_comment_paths.py
+
+      # Same job, because it is the same question asked the other way round:
+      # that gate checks a path in a comment resolves inside the repository,
+      # this one checks no path escapes it. Unconditional on push, so a
+      # machine path cannot land through a file type the filters above miss.
+      - name: Prove the machine-path gate still detects what it claims to
+        run: python3 scripts/check_machine_paths.py --self-test
+
+      - name: No tracked file names one computer's filesystem
+        run: python3 scripts/check_machine_paths.py

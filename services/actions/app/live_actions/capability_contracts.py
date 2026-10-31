@@ -122,6 +122,27 @@ CAPABILITY_CONTRACTS: dict[str, CapabilityContract] = {
             "passes was lifted out of attacker-influenced alert text."
         ),
     ),
+    "osquery_live_query": CapabilityContract(
+        impact=ActionImpact.READ_ONLY,
+        approval=ApprovalRequirement.AUTOMATIC,
+        reversal=Reversal.NOT_APPLICABLE,
+        required_permission=_READ,
+        has_verification_probe=False,
+        verification_gap=(
+            "A read leaves nothing behind to read back, the same gap "
+            "search_siem and lookup_endpoint_telemetry record. The rows the "
+            "fleet returned are the response; asking again would be a second "
+            "query, not a confirmation of the first."
+        ),
+        note=(
+            "Runs one of a closed set of allowlisted osquery templates across "
+            "a fleet. READ_ONLY is a statement about the SQL, which the "
+            "caller cannot write: app.clients.osquery_allowlist owns every "
+            "template and renders the parameters. A verb that accepted query "
+            "text would not be read-only at this tier, because osquery can "
+            "read any file the agent can."
+        ),
+    ),
     "search_siem": CapabilityContract(
         impact=ActionImpact.READ_ONLY,
         approval=ApprovalRequirement.AUTOMATIC,
@@ -684,7 +705,182 @@ CAPABILITY_CONTRACTS: dict[str, CapabilityContract] = {
         ),
         note=("A message cannot be unsent, but paging the wrong channel is embarrassment rather than impact."),
     ),
+    # ── Mailbox remediation ───────────────────────────────────────────────
+    #
+    # These are the only verbs in the vocabulary whose impact genuinely is
+    # not a constant: purging one copy of a message out of one mailbox and
+    # purging it out of a thousand are different acts. The constant below is
+    # the floor, and `scaled_impact` raises it from the recipient count —
+    # see that function for why the scaling lives outside the table.
+    "search_mailboxes": CapabilityContract(
+        impact=ActionImpact.READ_ONLY,
+        approval=ApprovalRequirement.AUTOMATIC,
+        reversal=Reversal.NOT_APPLICABLE,
+        required_permission=_INVESTIGATE,
+        has_verification_probe=False,
+        verification_gap=("A read leaves nothing behind to read back, the same gap search_siem and lookup_cloud_audit record."),
+        note=(
+            "Find the copies of one reported message across mailboxes, by "
+            "internet message id, sender, subject or receipt window. Every "
+            "other verb here depends on it: a purge needs a per-mailbox "
+            "message id and only this maps one message onto the mailboxes "
+            "holding it."
+        ),
+    ),
+    "purge_email": CapabilityContract(
+        impact=ActionImpact.MODERATE,
+        approval=ApprovalRequirement.ANALYST,
+        reversal=Reversal.PLATFORM,
+        reverse_capability="restore_email",
+        required_permission=_CONTAIN,
+        has_verification_probe=True,
+        note=(
+            "Soft-delete one copy of a message from one mailbox: a move to "
+            "recoverableitemsdeletions on Microsoft, a move to Trash on "
+            "Gmail. Never a hard delete, which has no reverse. MODERATE is "
+            "the single-recipient floor and scaled_impact raises it with the "
+            "campaign's size; ANALYST rather than AUTOMATIC because a wrong "
+            "purge removes a message the recipient may have needed and the "
+            "restore, while real, is not instantaneous."
+        ),
+    ),
+    "restore_email": CapabilityContract(
+        impact=ActionImpact.LOW,
+        approval=ApprovalRequirement.AUTOMATIC,
+        reversal=Reversal.PLATFORM,
+        reverse_capability="purge_email",
+        required_permission=_CONTAIN,
+        has_verification_probe=True,
+        note=(
+            "Put a soft-deleted message back. The declared rollback for "
+            "purge_email, and the reason that verb may be dispatched at all: "
+            "a reverse that resolves to nothing is the defect "
+            "KNOWN_ORPHANS exists to catch, and it would be at its worst on "
+            "the most disruptive verb in the product. LOW and automatic "
+            "because undoing a containment must never be harder than "
+            "applying it."
+        ),
+    ),
+    "block_sender": CapabilityContract(
+        impact=ActionImpact.LOW,
+        approval=ApprovalRequirement.ANALYST,
+        reversal=Reversal.PLATFORM,
+        reverse_capability="unblock_sender",
+        required_permission=_CONTAIN,
+        has_verification_probe=True,
+        note=(
+            "Stop future mail from one sender reaching one mailbox: an inbox "
+            "message rule on Microsoft, a filter on Gmail. Per-mailbox, not "
+            "tenant-wide — neither vendor exposes its organisation-level "
+            "block list through the API this platform speaks, and declaring "
+            "the broader verb would have an analyst believe the organisation "
+            "is covered when one mailbox is."
+        ),
+    ),
+    "unblock_sender": CapabilityContract(
+        impact=ActionImpact.LOW,
+        approval=ApprovalRequirement.AUTOMATIC,
+        reversal=Reversal.PLATFORM,
+        reverse_capability="block_sender",
+        required_permission=_CONTAIN,
+        has_verification_probe=True,
+        note="Remove the rule or filter block_sender created. Its declared reverse.",
+    ),
 }
+
+
+#: Recipient counts at which ``purge_email`` stops being the verb its base
+#: contract describes. Ascending, and read as "at least this many".
+#:
+#: The numbers are a judgement and are stated rather than hidden in an `if`
+#: so a deployment reviewing its own posture can read them:
+#:
+#: * **1–4** stays MODERATE. One analyst clearing a message from a handful of
+#:   mailboxes is routine phishing work.
+#: * **5+** is HIGH. It is no longer one person's mail; a mistake now
+#:   disrupts a team and several people notice at once.
+#: * **25+** is SEVERE, which ``NEVER_AUTONOMOUS`` makes mandatory-human at
+#:   any confidence and any autonomy tier. A purge at that scale is an
+#:   organisation-visible event, and the gap-closure plan names exactly this
+#:   case: a 25-recipient campaign must yield one proposal that requires
+#:   approval.
+RECIPIENT_IMPACT_LADDER: tuple[tuple[int, ActionImpact], ...] = (
+    (25, ActionImpact.SEVERE),
+    (5, ActionImpact.HIGH),
+)
+
+#: Capabilities whose impact scales with how many mailboxes they touch.
+#: ``restore_email`` is deliberately absent: putting a thousand messages back
+#: is not disruptive in the way taking them away is, and making the rollback
+#: harder to authorise than the action is how a containment becomes permanent.
+_RECIPIENT_SCALED: frozenset[str] = frozenset({"purge_email", "block_sender"})
+
+#: Parameter keys a caller may use to declare the blast radius. Several
+#: because the count arrives from three places — a campaign proposal knows it
+#: up front, a fan-out executor counts its own targets, and a single-mailbox
+#: dispatch has one.
+_RECIPIENT_COUNT_KEYS: tuple[str, ...] = ("recipient_count", "mailbox_count", "affected_recipients")
+
+
+def recipient_count_from(params: dict | None) -> int:
+    """How many mailboxes an action says it will touch. Unknown reads as one.
+
+    Unknown is **not** treated as zero and not treated as large. Zero would
+    let a caller omit the field to dodge the ladder, which is the same shape
+    as "missing confidence is not high confidence". Large would route every
+    single-mailbox purge to a mandatory human and train people to approve
+    without reading. One is the honest floor: a dispatch with no count is a
+    dispatch against the one mailbox in ``target``.
+    """
+    if not params:
+        return 1
+    for key in _RECIPIENT_COUNT_KEYS:
+        raw = params.get(key)
+        if raw is None:
+            continue
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            continue
+        return max(1, value)
+    recipients = params.get("recipients")
+    if isinstance(recipients, (list, tuple, set)):
+        return max(1, len(recipients))
+    return 1
+
+
+def scaled_impact(capability: str, params: dict | None) -> ActionImpact:
+    """The impact this dispatch actually carries, given its blast radius.
+
+    Why this is a function and not more rows in the table: the contract
+    belongs to the *verb*, and ``purge_email`` is one verb. Splitting it into
+    ``purge_email_small`` and ``purge_email_large`` would hand a caller the
+    choice of which contract to be graded under, which is the opposite of
+    what a contract is for. The verb stays one entry and the dispatch
+    declares its size.
+
+    **It only ever raises.** A ladder entry below the contract's own floor is
+    ignored, so no parameter a caller supplies can make an action cheaper
+    than its contract says it is — the same one-way property the approval
+    matrix has.
+    """
+    contract = CAPABILITY_CONTRACTS.get(capability)
+    base = contract.impact if contract else ActionImpact.IRREVERSIBLE
+    if capability not in _RECIPIENT_SCALED:
+        return base
+    count = recipient_count_from(params)
+    order = (
+        ActionImpact.READ_ONLY,
+        ActionImpact.LOW,
+        ActionImpact.MODERATE,
+        ActionImpact.HIGH,
+        ActionImpact.SEVERE,
+        ActionImpact.IRREVERSIBLE,
+    )
+    for threshold, impact in RECIPIENT_IMPACT_LADDER:
+        if count >= threshold:
+            return impact if order.index(impact) > order.index(base) else base
+    return base
 
 
 #: Legacy ``ActionType`` value -> capability name, for the cases where the

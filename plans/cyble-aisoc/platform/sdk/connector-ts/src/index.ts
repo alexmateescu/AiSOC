@@ -40,7 +40,7 @@
  *     reach a connector handler.
  */
 
-import { z, type ZodTypeAny, type ZodType } from 'zod';
+import { z, type ZodTypeAny, type ZodType } from 'zod/v3';
 
 // ─── Types ─────────────────────────────────────────────────────────
 

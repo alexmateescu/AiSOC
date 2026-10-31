@@ -61,6 +61,10 @@ const VALID_PARAMS: Record<StepType, Record<string, unknown>> = {
   run_script: { host: 'web-prod-04', script_name: 'collect-persistence' },
   search_siem: { query: 'index=proxy dest_ip=203.0.113.10' },
   create_notable_event: { title: 'Credential access on web-prod-04' },
+  wait: { until: 'timer', seconds: 300 },
+  parallel: { join: 'all' },
+  loop: { over: 'sessions' },
+  verify_user: { user: 'jane.doe@example.com', channel: 'slack' },
 };
 
 /**
@@ -75,11 +79,19 @@ const VALID_PARAMS: Record<StepType, Record<string, unknown>> = {
 const TARGET_KEY: Record<StepType, string | null> = {
   enrich: null,
   investigate: null,
-  notify: null,
+  // Depth 5.1 made `notify` a governed verb. Its target is the channel:
+  // `engine._notify_params` pins it into `vendor_id` rather than letting the
+  // executor infer it, for the same reason the SIEM arms pin
+  // `alert_vendor` — otherwise whichever destination happens to have
+  // credentials first decides where a page goes.
+  notify: 'channel',
   close_case: null,
   http: null,
   condition: null,
-  osquery_live_query: null,
+  // Governed by depth 5.1 alongside `notify`. The fleet it asks is the
+  // target: `engine._osquery_params` sends `target_hosts`, falling back to
+  // the run's resolved target when the step names none.
+  osquery_live_query: 'target_hosts',
   approval: null,
   block_ip: 'ip_field', // pre-existing convention
   isolate_host: 'host_field', // pre-existing convention
@@ -95,6 +107,16 @@ const TARGET_KEY: Record<StepType, string | null> = {
   force_mfa: 'user',
   search_siem: 'query',
   create_notable_event: 'title',
+  // Control flow acts on child steps, not on a host or a principal, so
+  // there is no scalar target for `_resolve_target` to look for.
+  wait: null,
+  parallel: null,
+  loop: null,
+  // Depth 5.4. Resolved by `engine._first_present(_VERIFY_SUBJECT_KEYS, ...)`
+  // rather than by `_resolve_target`: a verification is a question, not an
+  // action on an estate, so it is deliberately absent from `_TARGET_KEYS`
+  // — being in that table would make the engine grade it on `executed`.
+  verify_user: 'user',
 };
 
 /**

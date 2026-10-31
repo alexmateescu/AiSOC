@@ -186,7 +186,24 @@ jobs:
       # records the runs it was derived from, so the number cannot be edited
       # apart from its evidence.
       - name: The measured groundedness floor
-        run: python3 scripts/check_live_agent_floor.py --report live-agent-eval.wet.json
+        env:
+          # The model the committed floor was derived against, from
+          # services/agents/tests/eval_data/live_agent_floor.json. The matrix
+          # deliberately also grades the shipped default model (parity 3.2),
+          # and the checker's designed mechanism for that comparison is
+          # --allow-model: the wrong-model refusal is waived, the comparison
+          # is printed rather than assumed, and the 0.40 floor still applies.
+          # Without it the non-floor leg was born failing — both scheduled
+          # runs since the matrix landed failed it with the same message
+          # while its mean (0.7862) cleared the floor comfortably.
+          FLOOR_MODEL: qwen2.5:0.5b
+        run: |
+          set -euo pipefail
+          if [ "${OLLAMA_MODEL}" = "${FLOOR_MODEL}" ]; then
+            python3 scripts/check_live_agent_floor.py --report live-agent-eval.wet.json
+          else
+            python3 scripts/check_live_agent_floor.py --report live-agent-eval.wet.json --allow-model
+          fi
 
       - name: Summarise
         if: always()
@@ -261,7 +278,7 @@ jobs:
 
       - name: Upload report
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: live-agent-eval-${{ github.run_id }}
           path: |

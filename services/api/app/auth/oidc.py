@@ -441,6 +441,11 @@ async def oidc_callback(
             email_verified=_claim_is_true(merged.get("email_verified")),
             name=merged.get("name"),
             groups=groups,
+            # RFC 8176 `amr`. Where the provider states it already
+            # performed multi-factor authentication, the console does not
+            # ask the same person for the same assurance twice. A provider
+            # that says nothing has not said yes.
+            authn_methods=[str(m) for m in (merged.get("amr") or []) if m],
         )
     except SsoProvisioningError as exc:
         # A specific reason, not a generic failure. "No SSO connection is
@@ -457,9 +462,14 @@ async def oidc_callback(
     target = state_data.get("redirect", "/")
     safe_target = _safe_redirect(target)
     redirect_url = f"/login?next={quote(safe_target, safe='')}"
-    separator = "&" if "#" in redirect_url else "#"
+    # `_session_fragment` answers with a challenge rather than a session
+    # when the tenant's policy requires a second factor of the role this
+    # sign-in resolved to. Shared with the SAML callback so the two doors
+    # cannot disagree about one policy.
+    from app.auth.saml import _session_fragment  # noqa: PLC0415
+
     response = RedirectResponse(
-        url=f"{redirect_url}{separator}access_token={session['access_token']}&refresh_token={session['refresh_token']}",
+        url=f"{redirect_url}{_session_fragment(session)}",
         status_code=302,
     )
     response.delete_cookie("oidc_state")

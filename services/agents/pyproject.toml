@@ -10,7 +10,7 @@ python = "^3.11"
 # Floor 0.117: below it a `-> None` handler under PEP 563 trips FastAPI's
 # "204 must not have a response body" assert at import. One range for
 # every service — see services/api/pyproject.toml for the measurement.
-fastapi = ">=0.117,<0.142"
+fastapi = ">=0.117,<0.162"
 uvicorn = {extras = ["standard"], version = ">=0.27,<0.55"}
 pydantic = "^2.5.0"
 pydantic-settings = "^2.1.0"
@@ -59,7 +59,17 @@ structlog = ">=24.1,<27.0"
 prometheus-client = ">=0.19,<0.27"
 python-dateutil = "^2.8.2"
 aiokafka = ">=0.10,<0.15"
-qdrant-client = {extras = ["fastembed"], version = "^1.9.0"}
+# No `fastembed` extra. This service computes its embeddings through the
+# OpenAI client and talks to Qdrant with explicit PointStruct upserts and
+# vector search (app/tools/mitre_full.py) — nothing here calls the
+# fastembed-backed convenience API (client.add / models.Document), so the
+# extra only shipped an unused ONNX stack. It also pinned the whole service
+# to a vulnerable Pillow: every fastembed release through 0.9.0 caps
+# `pillow <13.0`, and the 2026-10 Pillow advisory set (28 CVEs at last count,
+# published in waves across 2026-10-21, one critical) is fixed only in
+# 13.0.0. Dropping the unused extra is what lets this lock carry the patched
+# Pillow.
+qdrant-client = "^1.9.0"
 markdown = "^3.5"
 # `<70` held this at 69.0, which carries PYSEC-2026-3940 (fixed in 70.0).
 weasyprint = {version = ">=62,<71", optional = true}
@@ -85,7 +95,7 @@ weasyprint = {version = ">=62,<71", optional = true}
 opentelemetry-sdk = ">=1.37,<2"
 opentelemetry-instrumentation-fastapi = ">=0.58b0,<0.70"
 opentelemetry-instrumentation-httpx = ">=0.58b0,<0.70"
-asyncpg = ">=0.29,<0.32"
+asyncpg = ">=0.29,<0.33"
 sqlalchemy = {extras = ["asyncio"], version = "^2.0.25"}
 apscheduler = "^3.10.4"
 pyyaml = "^6.0.1"

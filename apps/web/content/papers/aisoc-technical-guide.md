@@ -2,8 +2,8 @@
 title: "AiSOC Technical Guide"
 subtitle: "Install, operate and integrate — on a workstation and on a server"
 author: "AiSOC project"
-version: "v1.0"
-date: "2026-10-03"
+version: "v1.1"
+date: "2026-10-28"
 license: "MIT (same as the AiSOC project)"
 abstract: |
   A complete operator's guide to AiSOC: installing it on a laptop and on a
@@ -57,7 +57,7 @@ connector / ingest API
         ├──────────► graph writer ──► Neo4j       (entity graph)
         │
         ▼
-    fusion  ──────── 2,603 executable detection rules, your tenant's tuning,
+    fusion  ──────── 2,530 executable detection rules, your tenant's tuning,
         │            correlation into alerts
         ▼
    Postgres ──────── the alert, the case, the audit chain
@@ -233,10 +233,25 @@ is not zero, and publishing it as zero would claim instant resolution.*
 
 ### Windows
 
-`install.ps1` handles Windows 10 and 11 through `winget`. Run it from an
-elevated PowerShell. It creates the administrator and runs the smoke test, the
-same as the Unix path — an earlier version handed off to a demo stack and
-printed "AiSOC is up and running" without doing either.
+`install.ps1` handles Windows 10 and 11 through `winget`. Run it as your
+normal user, **not** from an elevated PowerShell — the installer's own help
+says so, and `winget` elevates per package as needed. The one exception is
+WSL2: when it is missing, the installer stops, names the elevated
+`wsl --install` and the reboot it needs, and picks up where it left off when
+you re-run it. Git, Docker Desktop, Node, pnpm and Python 3 are the
+prerequisites it installs; Python is on that list because three steps of the
+install are Python programs.
+
+It generates `.env`'s fifteen secrets with the same generator `make up` uses
+and resolves port conflicts the same way — both repaired in v20.2.0, when a
+fresh Windows install could not boot at all: the template it used to copy
+ships `ENVIRONMENT=production` with its secrets empty, which is exactly the
+configuration the API refuses to start on, and a Postgres already holding
+5432 ended the install with advice to hand-edit `docker-compose.yml`. A
+`windows-latest` CI job now proves every generated secret lands non-empty.
+It creates the administrator and runs the smoke test, the same as the Unix
+path — an earlier version handed off to a demo stack and printed "AiSOC is
+up and running" without doing either.
 
 ---
 
@@ -368,17 +383,16 @@ table, on an endpoint with no authentication at all.
 
 ### Pull
 
-![The connector catalogue](apps/web/public/screenshots/connector-wizard.png)
+![The connector surface with nothing connected](apps/web/public/screenshots/connector-wizard.png)
 
-*The connector wizard, reporting **84 connector types available** — generated
-from the registry, not hand-typed.*
+*An honest empty state: nothing is invented to fill the page, and the counters
+read zero rather than being hidden. `Universal capture (push)` is offered
+alongside the catalogue, so a vendor with no connector of its own can still
+POST JSON, send email, or speak CEF/HEC.*
 
-Settings → Connectors → Add connector. Credentials are encrypted at rest with
-Fernet before they touch the database.
-
-![The connector surface with nothing connected](apps/web/public/screenshots/connectors.png)
-
-*An honest empty state. Nothing is invented to fill the page.*
+Settings → Connectors → Add connector opens the catalogue, whose type count is
+generated from the registry rather than hand-typed. Credentials are encrypted
+at rest with Fernet before they touch the database.
 
 Connecting a source is meant to be the only manual step: the scheduler polls
 on a five-minute default, events flow to ingest, fusion promotes what matters,
@@ -410,8 +424,9 @@ useful head start", not "a finished migration".
 
 ![The alert queue](apps/web/public/screenshots/alerts-queue.png)
 
-*Twelve alerts the pipeline produced from pushed telemetry, each attributed to
-the connector that fed it.*
+*Five alerts the pipeline produced from pushed telemetry, each attributed to
+the connector that fed it — here `aisoc_sample`, the labelled synthetic set the
+setup wizard pushes through the same ingest endpoint a real connector uses.*
 
 Alerts are ordered by a priority score: severity multiplied by asset
 criticality, identity privilege and known-exploited-vulnerability exposure.
@@ -437,7 +452,7 @@ is not there.*
 ![A real local-model triage verdict](apps/web/public/screenshots/ai-triage-verdict.png)
 
 *A verdict from the bundled local `llama3.2:3b-instruct-q4_K_M`: true
-positive, confidence 80/100, groundedness **not assessed**, and the model's
+positive, confidence 85/100, groundedness **not assessed**, and the model's
 own rationale verbatim. No hosted provider was configured.*
 
 What the agent does and does not do:
@@ -472,6 +487,17 @@ tenant in **Settings → Deployment & AI**, or from the first-run wizard. The ke
 is encrypted at rest with the credential vault and never returned by the API;
 reads report only `has_api_key`.
 
+For `custom` — any OpenAI-compatible endpoint, which is how a gateway or
+aggregator is used without a named integration — the model id no longer has
+to be typed by hand: **List models from endpoint** asks the endpoint's
+`/models` route and offers the chat-capable entries as choices
+(`POST /api/v1/llm/credentials/models`, an externally contributed feature).
+The stored key is sent only to the stored base URL — a form pointing at a
+changed URL makes a keyless request rather than sending the saved credential
+somewhere it was never configured for — and the typed id remains available
+when an endpoint publishes no list. Discovery filters a dropdown; whether a
+model actually answers is still the Test button's job.
+
 **Test it before you rely on it.** The *Test* button places one real one-token
 completion and reports what happened:
 
@@ -497,9 +523,9 @@ attribute to a credential precisely because it is silent.
 
 ![The CISA KEV catalogue](apps/web/public/screenshots/threat-intel-kev.png)
 
-*1,725 real Known Exploited Vulnerabilities entries, fetched from the public
-CISA catalogue. Not synthetic, not ours, unmodified — and the page
-distinguishes the catalogue size from the page it is showing.*
+*1,754 real Known Exploited Vulnerabilities entries, fetched from the public
+CISA catalogue at capture time. Not synthetic, not ours, unmodified — and the
+page distinguishes the catalogue size from the hundred rows it is showing.*
 
 ### Hunting
 
@@ -514,7 +540,11 @@ Hunting needs the `full` profile, because it reads the ClickHouse lake.
 
 ![The entity graph](apps/web/public/screenshots/attack-graph.png)
 
-*The graph over real ingested telemetry, with Neo4j running.*
+*The graph over real ingested telemetry, with Neo4j running. Dated honestly:
+this one is a v10.0.0 capture, kept because it is the only populated view
+recorded so far and the page needs the `full` profile to produce one. Every
+other figure in this guide is from v20.1.0, so the console chrome here is a
+release behind — the graph itself is unchanged.*
 
 ![The same page in CORE](apps/web/public/screenshots/attack-graph-core-degraded.png)
 
@@ -526,11 +556,14 @@ much of the product as the populated view.*
 
 ![The playbook library](apps/web/public/screenshots/playbooks.png)
 
-![The step palette](apps/web/public/screenshots/playbook-editor.png)
+![The playbook editor](apps/web/public/screenshots/playbook-editor.png)
 
-*Twenty-one tiles from a twenty-two-member vocabulary. `approval` is withheld
-where the engine has no durable pause — a step that cannot suspend should not
-be offered.*
+*A shipped pack opened in the editor: nine steps, left as an ordered list and
+right as the graph that runs. Step 6 is `Wait for human approval`, which is
+worth pointing at — `approval` was once withheld from the palette for having
+no durable pause, on the principle that a step which cannot suspend should not
+be offered. It suspends now, so it is offered, and a playbook can stop here
+until a person says otherwise.*
 
 ### The case lifecycle
 

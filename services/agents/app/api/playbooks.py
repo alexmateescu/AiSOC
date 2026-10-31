@@ -13,10 +13,12 @@ Endpoints:
 
 from __future__ import annotations
 
+import html
 import logging
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from app.playbook import (
@@ -25,7 +27,10 @@ from app.playbook import (
     PlaybookRun,
     PlaybookStore,
     draft_from_nl,
+    verification,
 )
+from app.playbook import engine as engine_module
+from app.playbook import pause as playbook_pause
 from app.security.tenant_scope import require_console_or_service_auth
 
 logger = logging.getLogger("aisoc.api.playbooks")
@@ -34,6 +39,23 @@ logger = logging.getLogger("aisoc.api.playbooks")
 #: either that session or a trusted service declaring the tenant it acts
 #: for — a bearer-token-only scheme would lock the browser out.
 router = APIRouter(prefix="/api/v1/playbooks", tags=["playbooks"], dependencies=[Depends(require_console_or_service_auth)])
+
+#: A second router with no auth dependency, for the one route that cannot
+#: have one. See `resume_wait` at the bottom of this file for why, and note
+#: that it is a separate router rather than an exemption on the one above:
+#: an `Annotated[..., Depends(...)]`-less route inside an authenticated
+#: router reads as authenticated to everyone who skims it, and this repo has
+#: already shipped eleven routes whose authorization looked present and
+#: never ran.
+waits_router = APIRouter(prefix="/api/v1/playbook-waits", tags=["playbooks"])
+
+#: And a third, for the verification answer. Same reasoning as
+#: ``waits_router`` and one addition: the person clicking is the *subject* of
+#: an alert, not an operator, so they hold no session by construction and
+#: never will. The credential is the token plus a signature over the answer
+#: and the stage — see ``app.playbook.verification`` for why the token alone
+#: is not enough.
+verifications_router = APIRouter(prefix="/api/v1/playbook-verifications", tags=["playbooks"])
 
 # In-memory run store for Pillar-2 (swap for Redis/DB in production)
 _runs: dict[str, PlaybookRun] = {}
@@ -205,3 +227,117 @@ async def _execute_and_update(playbook: Playbook, context: dict[str, Any], dry_r
     # Preserve the pre-allocated run_id
     pr.run_id = run_id
     _runs[run_id] = pr
+
+
+# ---------------------------------------------------------------------------
+# Wait callbacks
+# ---------------------------------------------------------------------------
+
+
+@waits_router.post("/{resume_token}/resume", summary="Resume a playbook run waiting on a callback", status_code=202)
+async def resume_wait(resume_token: str, background_tasks: BackgroundTasks) -> dict[str, Any]:
+    """Wake a run suspended at a ``wait`` step with ``until: "callback"``.
+
+    Deliberately on its own router with **no** auth dependency, and the
+    reason is the shape of the thing: a callback comes from whatever the
+    playbook was waiting for — a vendor webhook, a scanner finishing, a
+    ticket closing — none of which holds an AiSOC session or a service
+    token. The token in the path is the credential. It is 32 random bytes,
+    it is unique-indexed so a guess has one target, it is minted separately
+    from the pause id (which appears in run records an analyst can read),
+    and it is single-use: resuming resolves the pause, so a second delivery
+    of the same callback matches no waiting row.
+
+    Returns 202 and resumes in the background. A vendor's webhook sender
+    wants a fast 2xx, and holding the connection open for the remainder of
+    a playbook is how a sender decides the delivery failed and retries it.
+    """
+    if not await playbook_pause.find_wait_by_token(resume_token=resume_token):
+        # One answer for "no such token" and "already resumed", on purpose.
+        # Distinguishing them would turn this route into an oracle for
+        # whether a token was ever valid.
+        raise HTTPException(status_code=404, detail="no run is waiting on this token")
+
+    background_tasks.add_task(_resume_wait_in_background, resume_token)
+    return {"status": "resuming"}
+
+
+async def _resume_wait_in_background(resume_token: str) -> None:
+    run = await engine_module.resume_wait(resume_token=resume_token)
+    if run is None:
+        # Not an error: another delivery of the same callback, or the
+        # sweeper's timer, got there first.
+        logger.info("playbook wait callback matched no waiting run (already resumed)")
+        return
+    _runs[run.run_id] = run
+
+
+# ---------------------------------------------------------------------------
+# Verification answers
+# ---------------------------------------------------------------------------
+
+
+@verifications_router.get(
+    "/{resume_token}/{answer}",
+    summary="Record a verification answer and resume the run",
+    response_class=HTMLResponse,
+)
+async def answer_verification(resume_token: str, answer: str, sig: str = Query("", max_length=128)) -> HTMLResponse:
+    """The link in the chat message. A GET, because it is clicked.
+
+    Answers HTML rather than JSON: it lands in whatever browser the chat
+    client opens, in front of a person who is not an operator and should
+    see a sentence rather than a payload.
+
+    One refusal for every way this can fail — unknown token, wrong
+    signature, stale stage, already answered. Distinguishing them would
+    turn the route into an oracle for whether a token was ever valid, and
+    the person clicking cannot act on the difference anyway.
+
+    The run resumes **inline** rather than in a background task, unlike the
+    wait callback next door. A vendor's webhook sender wants a fast 2xx and
+    retries on a slow one; a person wants to be told their answer was
+    recorded, and the containment that follows is the thing they are
+    waiting to hear about.
+    """
+    if answer not in verification.ANSWERS:
+        return HTMLResponse(_verification_html(_VERIFY_REFUSED_TITLE, _VERIFY_REFUSED_BODY, ok=False), status_code=400)
+
+    run = await engine_module.resume_verification(resume_token=resume_token, answer=answer, signature=sig)
+    if run is None:
+        return HTMLResponse(_verification_html(_VERIFY_REFUSED_TITLE, _VERIFY_REFUSED_BODY, ok=False), status_code=400)
+
+    _runs[run.run_id] = run
+    return HTMLResponse(
+        _verification_html(
+            "Thanks — that's recorded",
+            "Your security team has your answer and the alert has been updated. You do not need to do anything else.",
+            ok=True,
+        ),
+        status_code=200,
+    )
+
+
+_VERIFY_REFUSED_TITLE = "We couldn't record that"
+_VERIFY_REFUSED_BODY = (
+    "This link is no longer valid — it may have expired, already been used, or been replaced by a newer request. "
+    "Contact your security team if you still need to respond."
+)
+
+
+def _verification_html(title: str, body: str, *, ok: bool) -> str:
+    """A plain acknowledgement page.
+
+    No framework and no external asset: this is served to a person's
+    browser from a service that is not the console, and a page that fetches
+    anything would fail differently on every corporate network.
+    """
+    colour = "#0f766e" if ok else "#b91c1c"
+    return (
+        "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        f"<title>{html.escape(title)}</title></head>"
+        '<body style="font-family:Arial,sans-serif;max-width:34rem;margin:4rem auto;padding:0 1rem;line-height:1.6">'
+        f"<h1 style='color:{colour};font-size:1.3rem'>{html.escape(title)}</h1>"
+        f"<p>{html.escape(body)}</p></body></html>"
+    )

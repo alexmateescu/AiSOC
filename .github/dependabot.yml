@@ -187,6 +187,15 @@ updates:
       - dependency-name: "react-native"
       - dependency-name: "react"
       - dependency-name: "react-dom"
+      # These two are Expo-table-managed exactly like `expo-*` — they move
+      # with the SDK via `npx expo install --fix`, and `mobile.yml`'s compat
+      # gate greps `expo install --check` for precisely these two names and
+      # fails the build on any off-table version. A proposed
+      # `react-native-screens ~4.16 -> ~4.30` was folded in by hand (#1426)
+      # and reddened the iOS link and the Android gate on `main` for a day —
+      # the hold belongs here, where the proposal originates.
+      - dependency-name: "react-native-screens"
+      - dependency-name: "react-native-safe-area-context"
       # Hold `typescript` on v6, for the same measured reason as the `/` and
       # `/services/realtime` entries above. This directory's CI gate is
       # `tsc --noEmit`, so a TypeScript 7 pull request reds it exactly the way

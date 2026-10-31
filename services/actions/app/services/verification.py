@@ -30,7 +30,10 @@ from typing import Any
 
 import structlog
 
-from app.clients.factories import _entra_client, _mde_client, _okta_client
+from app.clients.factories import _entra_client, _gmail_client, _m365_mail_client, _mde_client, _okta_client
+from app.clients.gmail_client import GmailClient
+from app.clients.m365_mail_client import RECOVERABLE_ITEMS
+from app.core.config import get_settings
 from app.executors.endpoint import AV_SCAN_ACTION, INVESTIGATION_PACKAGE_ACTION, _cs_client
 from app.executors.siem import _ack_vendor, _qradar_client, _splunk_client
 from app.models.action import ActionType
@@ -448,6 +451,118 @@ async def _probe_suppress_alert(target: str, params: dict[str, Any]) -> bool | N
     return await _read_back_finding_state(target, params, expect_closed=True)
 
 
+async def _mailbox_client(params: dict[str, Any]) -> Any | None:
+    """Whichever mail client the credentials in ``params`` describe.
+
+    The two vendors are tried in a fixed order and an explicit
+    ``alert_vendor`` pin wins — but a pin is honoured **only** when that
+    vendor's credentials are actually present. Honouring a pin without
+    checking is how a dry run called a customer's Splunk, and the same shape
+    here would probe the wrong tenant's mail.
+    """
+    pin = str(params.get("alert_vendor") or params.get("vendor") or "").strip().lower()
+    m365 = _m365_mail_client(params)
+    gmail = _gmail_client(params)
+    if pin in {"m365", "microsoft", "microsoft365", "office365"} and m365 is not None:
+        return m365
+    if pin in {"google_workspace", "gmail", "google"} and gmail is not None:
+        return gmail
+    return m365 or gmail
+
+
+async def _probe_purge_email(target: str, params: dict[str, Any]) -> bool | None:
+    """Re-query the mailbox and confirm the message is no longer in it.
+
+    This is the read-back the plan's contract clause names: "verification
+    re-queries the mailboxes". It is also the one probe in this module whose
+    confirming answer is an **absence**, which is worth stating because the
+    polarity is easy to invert: ``True`` here means "the effect is present",
+    and for a purge the effect is the message being gone.
+
+    Both vendors' searches are scoped to the user-visible store on Microsoft
+    and include Trash on Gmail, so the Gmail arm checks the label rather than
+    the existence. A trashed Gmail message is still findable; a trashed
+    message that still carries ``INBOX`` was not purged.
+
+    Returns ``None`` — indeterminate, never a confirmation — when the feature
+    is off, credentials are absent, or no message id was recorded.
+    """
+    if not get_settings().AISOC_FEATURE_MAILBOX_REMEDIATION:
+        return None
+    client = await _mailbox_client(params)
+    if client is None:
+        return None
+    internet_id = str(params.get("internet_message_id") or "")
+    message_id = str(params.get("purged_message_id") or params.get("message_id") or "")
+    if not (internet_id or message_id):
+        return None
+    try:
+        if isinstance(client, GmailClient):
+            if not message_id:
+                return None
+            message = await client.get_message(target, message_id)
+            labels = {str(label).upper() for label in (message.get("labelIds") or [])}
+            # TRASH is the purge's effect; the absence of INBOX alone is not,
+            # because a message the user had already archived never had it.
+            return "TRASH" in labels
+        if not internet_id:
+            return None
+        remaining = await client.search_messages(target, internet_message_id=internet_id, limit=5)
+        return len(remaining) == 0
+    except Exception as exc:  # noqa: BLE001 - an unreadable mailbox is indeterminate
+        logger.warning("verification.mailbox_probe_error", target=target, error=str(exc)[:300])
+        return None
+
+
+async def _probe_restore_email(target: str, params: dict[str, Any]) -> bool | None:
+    """Confirm the message is back where a user can see it."""
+    if not get_settings().AISOC_FEATURE_MAILBOX_REMEDIATION:
+        return None
+    client = await _mailbox_client(params)
+    if client is None:
+        return None
+    message_id = str(params.get("restored_message_id") or params.get("restore_message_id") or params.get("message_id") or "")
+    if not message_id:
+        return None
+    try:
+        if isinstance(client, GmailClient):
+            message = await client.get_message(target, message_id)
+            return "TRASH" not in {str(label).upper() for label in (message.get("labelIds") or [])}
+        message = await client.get_message(target, message_id, with_headers=False)
+        folder = str(message.get("parentFolderId") or "")
+        # Graph answers with the folder the message now sits in. A restore
+        # that landed back in recoverable items did not happen, whatever the
+        # move returned.
+        return bool(folder) and RECOVERABLE_ITEMS not in folder.lower()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("verification.mailbox_probe_error", target=target, error=str(exc)[:300])
+        return None
+
+
+async def _probe_block_sender(target: str, params: dict[str, Any]) -> bool | None:
+    """Confirm the rule or filter exists in the mailbox it was created in."""
+    if not get_settings().AISOC_FEATURE_MAILBOX_REMEDIATION:
+        return None
+    client = await _mailbox_client(params)
+    if client is None:
+        return None
+    rule_id = str(params.get("rule_id") or params.get("filter_id") or "")
+    if not rule_id:
+        return None
+    try:
+        existing = await (client.list_filters(target) if isinstance(client, GmailClient) else client.list_inbox_rules(target))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("verification.mailbox_probe_error", target=target, error=str(exc)[:300])
+        return None
+    return any(str(entry.get("id") or "") == rule_id for entry in existing)
+
+
+async def _probe_unblock_sender(target: str, params: dict[str, Any]) -> bool | None:
+    """The inverse read: the rule must be gone."""
+    present = await _probe_block_sender(target, params)
+    return None if present is None else not present
+
+
 _DEFAULT_PROBES: dict[ActionType, Probe] = {
     ActionType.ISOLATE_HOST: _probe_isolate,
     ActionType.BLOCK_IP: _probe_block_ip,
@@ -463,6 +578,14 @@ _DEFAULT_PROBES: dict[ActionType, Probe] = {
     ActionType.KILL_PROCESS: _probe_kill_process,
     ActionType.QUARANTINE_FILE: _probe_quarantine_file,
     ActionType.RUN_AV_SCAN: _probe_run_av_scan,
+    # Depth 7.1. "Verification re-queries the mailboxes" is a clause in the
+    # contract the plan specifies, not a nice-to-have: a purge reported from
+    # an accepted move, across twenty-five mailboxes, is twenty-five
+    # unverified claims that the message is gone.
+    ActionType.PURGE_EMAIL: _probe_purge_email,
+    ActionType.RESTORE_EMAIL: _probe_restore_email,
+    ActionType.BLOCK_SENDER: _probe_block_sender,
+    ActionType.UNBLOCK_SENDER: _probe_unblock_sender,
 }
 
 

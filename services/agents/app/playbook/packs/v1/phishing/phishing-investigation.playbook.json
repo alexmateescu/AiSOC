@@ -1,7 +1,7 @@
 {
   "id": "phishing-investigation-v1",
   "name": "Phishing: Email Investigation & Remediation",
-  "description": "Triggered by a phishing alert from an email gateway or a user report. Extracts IOCs, blocks the sender domain, and resets credentials that may have been compromised. The retraction step requires EMAIL_GATEWAY_URL, which no compose file or .env.example sets, so on a default deployment the message is NOT retracted and the step is skipped.",
+  "description": "Triggered by a phishing alert from an email gateway or a user report. Extracts IOCs, blocks the sender domain, and resets credentials that may have been compromised. The retraction step here still requires EMAIL_GATEWAY_URL, which no compose file or .env.example sets, so on a default deployment the message is NOT retracted and the step is skipped. Depth 7.1 added a real mailbox purge, and it is not this step: report the message to POST /phishing/reports and purge the campaign through POST /phishing/campaigns/{id}/purge, which dispatches purge_email once per recipient under the capability contract, verifies each mailbox and can be reversed. That path needs AISOC_FEATURE_MAILBOX_REMEDIATION and a Microsoft 365 or Google Workspace connector; it is not reachable as a playbook step because the engine has no purge_email step type.",
   "version": "1.0.0",
   "author": "Beenu - beenu@cyble.com",
   "tags": [
@@ -76,7 +76,7 @@
     },
     {
       "id": "retract",
-      "name": "Retract the message via the tenant's email gateway (needs EMAIL_GATEWAY_URL; no-op when unset)",
+      "name": "Retract the message via the tenant's email gateway (needs EMAIL_GATEWAY_URL; no-op when unset — the real mailbox purge is POST /phishing/campaigns/{id}/purge, not this step)",
       "type": "http",
       "params": {
         "url": "${EMAIL_GATEWAY_URL}/v1/messages/retract",

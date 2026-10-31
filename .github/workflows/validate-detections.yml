@@ -94,6 +94,55 @@ jobs:
       - name: Verify exported windowed ruleset is current
         run: python3 scripts/export_windowed_ruleset.py --check
 
+      # Re-exporting any of the three artefacts above without re-syncing the
+      # copy inside the API's Docker build context would leave the rule
+      # catalogue describing a corpus the engine no longer runs. Wired here as
+      # well as in ci.yml because this is the workflow a corpus change
+      # triggers.
+      - name: Verify the API's packaged copy of the corpus is current
+        run: python3 scripts/sync_packaged_detection_rulesets.py --check
+
+      # 74 rules named a sliding-window counter no source emits, so each read
+      # None on its first clause and could never fire while still counting
+      # toward the published executable total. Every one is now either
+      # translated into a `wd-*` rule — threshold and window derived from the
+      # original's own clauses, not re-chosen — or refused with a reason. This
+      # re-derives each translation and compares it with what is committed, so
+      # a rounder threshold or a dropped selector clause fails here rather
+      # than shipping as a different detection under the original's name.
+      - name: Verify every windowed det-* rule is translated or refused
+        run: python3 scripts/check_windowed_translation.py --check
+
+      # The gate above is only worth the violations it can catch. This injects
+      # one per rule it enforces and requires each to be caught, and requires
+      # a refusal over a tree with no rules in it.
+      - name: Prove the windowed-translation gate is not vacuous
+        run: python3 scripts/check_windowed_translation.py --self-test
+
+      # The Sigma compiler translated rule documents and had never looked at a
+      # `correlation:` block. The two facts hid each other: there was no
+      # importer, and the 3,132 imported documents contain no correlation for
+      # it to have failed on. This compiles every correlation document into
+      # the windowed engine or refuses it with a reason, and fails a rule
+      # whose selector or group-by names a field nothing emits — with no
+      # ceiling, because the corpus is new and starts clean.
+      - name: Verify Sigma correlations compile into the windowed engine
+        run: python3 scripts/check_sigma_correlations.py --check
+
+      - name: Prove the Sigma-correlation gate is not vacuous
+        run: python3 scripts/check_sigma_correlations.py --self-test
+
+      # Depth plan 3.3 built two enrichment inputs and retired what still
+      # could not fire. Deleting a rule and fixing a rule move the
+      # unreachable ratchet by the same amount, so this makes them
+      # different: every retired rule names a real spec and a reason, and a
+      # rule whose fields the platform *can* now resolve may not be retired.
+      - name: Verify every rule that cannot fire carries a reason
+        run: python3 scripts/check_enrichment_decisions.py --check
+
+      - name: Prove the enrichment-decision gate is not vacuous
+        run: python3 scripts/check_enrichment_decisions.py --self-test
+
       # Recompiles every imported Sigma rule AND re-proves it: each shipped
       # rule is replayed, as a vendor-shaped event, through its connector's
       # real normalize() and the real engine. A rule that stops firing — because
@@ -107,6 +156,19 @@ jobs:
       # requires every rule depending on them to stop firing.
       - name: Prove the fireability gate is not vacuous
         run: python3 scripts/compile_sigma_ruleset.py --prove-gate
+
+      # Issue #1545: ten of twelve GitHub rules could not fire on what the
+      # GitHub connector actually emits — unprefixed event_type values, audit
+      # actions that do not exist in GitHub's vocabulary, fields no GitHub
+      # telemetry carries. Fixture replay cannot catch the class (fixtures
+      # are synthesized from the rule), so this replays real-shaped audit
+      # entries through the real connector and the real engine, the same way
+      # the Sigma fireability proof does.
+      - name: Verify GitHub rules fire on real connector output
+        run: python3 scripts/check_github_rule_alignment.py --check
+
+      - name: Prove the GitHub-alignment gate is not vacuous
+        run: python3 scripts/check_github_rule_alignment.py --self-test
 
       - name: Count rules by severity
         if: always()

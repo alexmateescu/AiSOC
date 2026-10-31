@@ -20,7 +20,7 @@
 # are reconciled from configuration snapshots and carry `snapshot_id` and a
 # `valid_from`/`valid_to` window instead.
 
-version: v1.1
+version: v1.3
 
 # ---------------------------------------------------------------------------
 # Node labels
@@ -51,6 +51,12 @@ node_labels:
       - { name: department,    type: string,   required: false }
       - { name: manager_id,    type: string,   required: false }
       - { name: status,        type: string,   required: false }
+      # v1.2 activity projection. actor_kind is written on every event,
+      # including as `unknown`, because the absence of the property and a
+      # source that declined to say are different facts.
+      - { name: actor_kind,        type: string, required: false }
+      - { name: actor_kind_source, type: string, required: false }
+      - { name: on_behalf_of,      type: string, required: false }
 
   - label: ServiceAccount
     description: >-
@@ -62,6 +68,10 @@ node_labels:
       - { name: kind,          type: string,   required: false }
       - { name: owner_user_id, type: string,   required: false }
       - { name: created_at,    type: datetime, required: false }
+      # v1.2 activity projection — see the User label for the rule.
+      - { name: actor_kind,        type: string, required: false }
+      - { name: actor_kind_source, type: string, required: false }
+      - { name: on_behalf_of,      type: string, required: false }
 
   - label: Role
     description: >-
@@ -187,6 +197,18 @@ node_labels:
       - { name: port,        type: int,      required: false }
       - { name: direction,   type: string,   required: false }
       - { name: observed_at, type: datetime, required: false }
+      # v1.2 activity projection, written on the source side only: the
+      # geography and ASN describe where the action came from, and putting
+      # them on the destination would attribute the caller's country to the
+      # thing they reached. reputation_known separates a clean verdict from
+      # an enrichment service that did not answer.
+      - { name: country_code,     type: string, required: false }
+      - { name: asn,              type: int,    required: false }
+      - { name: as_org,           type: string, required: false }
+      - { name: reputation,       type: float,  required: false }
+      - { name: reputation_known, type: bool,   required: false }
+      - { name: client_family,    type: string, required: false }
+      - { name: client_category,  type: string, required: false }
 
   - label: SaaSApp
     description: >-
@@ -335,6 +357,56 @@ node_labels:
       - { name: store,         type: string,   required: false }
       - { name: last_rotated,  type: datetime, required: false }
       - { name: rotation_days, type: int,      required: false }
+
+  # ── v1.2: session depth (depth plan 2.4) ───────────────────────────────────
+  - label: Session
+    description: >-
+      One session as the vendor understands it, or the closest the vendor lets
+      us get. The node exists so a traversal can ask what else one session
+      touched; the authoritative row is in Postgres, because ADR-0010 measured
+      Neo4j at 42.2% of the CORE profile's remaining memory and kept the graph
+      in `full`. `id` is the same deterministic uuid the Postgres row and the
+      ClickHouse column carry, so the three join without coordinating.
+    properties:
+      - { name: id,                type: string,   required: true  }
+      - { name: tenant_id,         type: string,   required: true  }
+      # As the vendor spells it, never a hash: an analyst pastes this into the
+      # vendor's own console, and a value that exists nowhere else cannot be
+      # looked up anywhere.
+      - { name: session_key,       type: string,   required: true  }
+      # vendor_session | vendor_credential | vendor_flow | derived. A property
+      # rather than four labels, because the kinds are a strength ordering and
+      # a query naming each one it wants would silently miss a fifth.
+      - { name: key_kind,          type: string,   required: true  }
+      - { name: key_source,        type: string,   required: false }
+      - { name: source,            type: string,   required: true  }
+      - { name: principal,         type: string,   required: false }
+      - { name: originating_human, type: string,   required: false }
+      - { name: first_seen_at,     type: datetime, required: true  }
+      - { name: last_seen_at,      type: datetime, required: true  }
+      - { name: ended_at,          type: datetime, required: false }
+      - { name: event_count,       type: int,      required: false }
+  # ── v1.3: the AI estate ────────────────────────────────────────────────────
+  - label: AIAsset
+    description: >-
+      One observed AI asset: an AI application, a coding agent, an MCP server,
+      an IDE extension, a model-provider key or an OAuth grant to an AI app.
+      One label with a `kind` property rather than six labels, because every
+      question asked of this data is asked across the kinds — what does this
+      person run, what runs on this laptop — and six labels would make each
+      of those a six-way union. Tenant-scoped: an agent is somebody's.
+      Written by `extractAIEstate` from `ai-runtime` / `ai-finding` telemetry
+      and from process activity naming a known agent binary. The durable
+      record is `aisoc_ai_assets` in Postgres; this is the projection an
+      investigation traverses.
+    properties:
+      - { name: id,           type: string, required: true  }
+      - { name: tenant_id,    type: string, required: true  }
+      - { name: kind,         type: string, required: true  }
+      - { name: external_id,  type: string, required: true  }
+      - { name: display_name, type: string, required: false }
+      - { name: vendor,       type: string, required: false }
+      - { name: model,        type: string, required: false }
 
   # ── v1.1: threat depth ─────────────────────────────────────────────────────
   # Malware, Campaign, ThreatActor, Technique and Tactic are *global*
@@ -694,6 +766,75 @@ relationships:
     properties:
       - { name: snapshot_id, type: string, required: true  }
       - { name: role,        type: string, required: false }
+
+  # ── v1.2: session depth (depth plan 2.4) ───────────────────────────────────
+  - name: OPENED_SESSION
+    source_label: Identity
+    target_label: Session
+    event_edge: true
+    description: >-
+      "What else did this principal do", without scanning every event the
+      principal ever produced.
+    properties:
+      - { name: ts,              type: datetime, required: true }
+      - { name: source_event_id, type: string,   required: true }
+      - { name: snapshot_id,     type: string,   required: true }
+
+  # ── v1.3: the AI estate ────────────────────────────────────────────────────
+  # Two new types rather than a second pair of endpoints on OWNED_BY and
+  # RUNS: each relationship here declares one source label and one target
+  # label, so reusing them would make this file assert something untrue of
+  # the edges the extractor actually writes.
+  - name: OPERATES
+    source_label: User
+    target_label: AIAsset
+    event_edge: true
+    description: >-
+      The person an AI asset acted for. Absent rather than guessed when the
+      source did not say: an unlinked agent is the finding, not a blank.
+    properties:
+      - { name: ts,              type: datetime, required: true }
+      - { name: source_event_id, type: string,   required: true }
+      - { name: snapshot_id,     type: string,   required: true }
+
+  - name: ISSUED_SESSION
+    source_label: Session
+    target_label: Session
+    event_edge: true
+    description: >-
+      The assumed-role chain. This edge exists on the issuing STS call and
+      nowhere else: a chained session's own events name only the role it
+      assumed, so without it the person behind the second hop is unrecoverable
+      once the issuing record ages out of the lake. `link_source` records which
+      field established it, because a chain built from a caller-chosen
+      roleSessionName is weaker evidence than one built from sourceIdentity.
+    properties:
+      - { name: ts,              type: datetime, required: true  }
+      - { name: source_event_id, type: string,   required: true  }
+      - { name: snapshot_id,     type: string,   required: true }
+      - { name: link_source,     type: string,   required: false }
+
+  - name: SESSION_RAISED
+    source_label: Session
+    target_label: Alert
+    event_edge: true
+    description: What the session is accused of.
+    properties:
+      - { name: ts,              type: datetime, required: true }
+      - { name: source_event_id, type: string,   required: true }
+      - { name: snapshot_id,     type: string,   required: true }
+
+  - name: HOSTS
+    source_label: Endpoint
+    target_label: AIAsset
+    event_edge: true
+    description: >-
+      The device an AI asset ran on. This is the edge containment reads:
+      without it a kill-switch has nowhere to act.
+    properties:
+      - { name: ts,              type: datetime, required: true }
+      - { name: source_event_id, type: string,   required: true }
+      - { name: snapshot_id,     type: string,   required: true }
 
   # ── v1.1: threat depth ─────────────────────────────────────────────────────
   - name: OBSERVED_IOC

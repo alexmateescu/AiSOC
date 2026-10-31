@@ -13,6 +13,7 @@ import (
 	"github.com/beenuar/aisoc/services/ingest/internal/graph_ws"
 	"github.com/beenuar/aisoc/services/ingest/internal/handler"
 	"github.com/beenuar/aisoc/services/ingest/internal/inbox"
+	"github.com/beenuar/aisoc/services/ingest/internal/otlp"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
@@ -67,7 +68,10 @@ type Server struct {
 // update fan-out). Nil disables the /v1/graph_ws/stream route, which
 // is the expected default until an operator opts in via
 // AISOC_GRAPH_WS_ENABLED=true.
-func New(cfg *config.Config, h *handler.Handler, inboxHandler *inbox.Handler, graphWSServer *graph_ws.Server) *Server {
+// otlpReceiver is the optional depth-4.2 OTLP logs endpoint. Nil leaves
+// POST /v1/logs unmounted, which is the default until an operator sets
+// AISOC_OTLP_LOGS_ENABLED=true.
+func New(cfg *config.Config, h *handler.Handler, inboxHandler *inbox.Handler, graphWSServer *graph_ws.Server, otlpReceiver *otlp.Receiver) *Server {
 	r := chi.NewRouter()
 
 	// Middleware
@@ -154,6 +158,14 @@ func New(cfg *config.Config, h *handler.Handler, inboxHandler *inbox.Handler, gr
 		// internal client can't subscribe to every tenant by accident.
 		if graphWSServer != nil {
 			r.Handle("/graph_ws/stream", graphWSServer.Handler())
+		}
+
+		// Depth plan 4.2 — OTLP logs. The path is fixed by the OTLP/HTTP
+		// specification: an exporter configured with an endpoint appends
+		// /v1/logs itself, so this cannot be mounted anywhere else and
+		// still be reachable by a stock collector.
+		if otlpReceiver != nil {
+			r.Post("/logs", otlpReceiver.ServeLogs)
 		}
 	})
 

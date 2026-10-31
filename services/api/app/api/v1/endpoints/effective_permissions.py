@@ -59,6 +59,7 @@ from app.security.credential_vault import get_vault
 from app.services.effective_permissions.base import ResolverError
 from app.services.effective_permissions.posture_loader import (
     PROVIDER_CONNECTOR,
+    CollectedSnapshot,
     HttpResourceConfigFetcher,
     collect_snapshot,
 )
@@ -67,6 +68,7 @@ from app.services.effective_permissions.service import (
     cache_result_into_neo4j,
     resolve_effective_permissions,
 )
+from app.services.posture_store import save_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +79,46 @@ _INLINE_SNAPSHOT_FLAG = "AISOC_ALLOW_INLINE_SNAPSHOT"
 # Phase C2 — live posture collection via the connectors service. Off by default
 # so a deployment without connectors keeps the prior 412 "no snapshot" behaviour.
 _LIVE_POSTURE_FLAG = "AISOC_EFFECTIVE_PERMISSIONS_LIVE"
+
+
+async def _record_snapshot(
+    db: AsyncSession,
+    tenant_id: Any,
+    provider: str,
+    connector_type: str,
+    connector_instance_id: Any,
+    collected: CollectedSnapshot,
+) -> None:
+    """Persist a collected posture as a version, best-effort.
+
+    Deliberately swallowing: a tenant asking "what can this identity do"
+    should get their answer even if the archive write fails. The failure is
+    logged at ``warning`` with the provider named, because a store that has
+    silently stopped accepting versions looks exactly like a tenant who has
+    not collected yet, and the point-in-time read would then answer ``None``
+    for a reason no reader could distinguish from the honest one.
+    """
+    try:
+        await save_snapshot(
+            db,
+            tenant_id=tenant_id,
+            provider=provider,
+            connector_id=connector_type,
+            connector_instance_id=connector_instance_id,
+            snapshot=collected.snapshot,
+            partial=collected.partial,
+            collection_notes=list(collected.notes),
+        )
+        await db.commit()
+    except Exception as exc:  # noqa: BLE001 — archiving must not fail the read
+        await db.rollback()
+        logger.warning(
+            "effective_permissions.snapshot_not_recorded provider=%s: %s",
+            # Caller-influenced; sanitised inline because the taint tracker
+            # does not follow a helper (the py/log-injection house pattern).
+            str(provider).replace("\r", "").replace("\n", " ")[:64],
+            str(exc).replace("\r", "").replace("\n", " ")[:200],
+        )
 
 
 async def _maybe_live_snapshot(db: AsyncSession, tenant_id: Any, provider: str, principal_id: str) -> dict[str, Any] | None:
@@ -106,8 +148,19 @@ async def _maybe_live_snapshot(db: AsyncSession, tenant_id: Any, provider: str, 
             return None
         auth = get_vault().decrypt_dict(row.auth_config or {})
         fetcher = HttpResourceConfigFetcher(settings.CONNECTORS_SERVICE_URL, auth, row.connector_config or {})
-        snapshot = await collect_snapshot(provider, principal_id, fetcher=fetcher)
-        return snapshot or None
+        collected = await collect_snapshot(provider, principal_id, fetcher=fetcher)
+        if not collected:
+            return None
+        # Record the version. The resolver below answers from the snapshot in
+        # hand, but an alert is triaged minutes to days after the event it
+        # describes, and "what could this identity do **when it acted**" can
+        # only be answered from a version that was stored while it was true.
+        # Okta is excluded because its snapshot is assembled per principal
+        # rather than per estate — storing one would make the live row mean
+        # "the posture of whoever was looked up last".
+        if provider != "okta":
+            await _record_snapshot(db, tenant_id, provider, connector_type, row.id, collected)
+        return collected.snapshot
     except Exception as exc:  # noqa: BLE001 — live collection is best-effort
         logger.warning("effective_permissions.live_snapshot_failed: %s", str(exc).replace("\n", " ")[:200])
         return None

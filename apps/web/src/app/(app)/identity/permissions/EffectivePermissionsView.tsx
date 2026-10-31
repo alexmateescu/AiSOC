@@ -90,7 +90,7 @@ type ResolverResult = {
 };
 
 export type ResolverResultPayload = ResolverResult;
-type SupportedProvider = 'aws' | 'azure' | 'gcp' | 'okta' | 'gws';
+type SupportedProvider = 'aws' | 'azure' | 'gcp' | 'okta' | 'gws' | 'github';
 
 const SUPPORTED_PROVIDERS: SupportedProvider[] = [
   'aws',
@@ -98,6 +98,7 @@ const SUPPORTED_PROVIDERS: SupportedProvider[] = [
   'gcp',
   'okta',
   'gws',
+  'github',
 ];
 
 function isSupportedProvider(p: string | null): p is SupportedProvider {
@@ -110,6 +111,7 @@ const PROVIDER_LABEL: Record<SupportedProvider, string> = {
   gcp: 'GCP',
   okta: 'Okta',
   gws: 'Workspace',
+  github: 'GitHub',
 };
 
 const MAX_RENDERED_DECISIONS = 250;

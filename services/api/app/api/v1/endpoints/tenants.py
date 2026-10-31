@@ -9,6 +9,7 @@ from pydantic import BaseModel, EmailStr
 from sqlalchemy import select, text, update
 
 from app.api.v1.deps import AuthUser, DBSession, require_permission
+from app.api.v1.limits import refuse_if_over_limit
 from app.core import role_grants
 from app.core.role_grants import RoleGrantDenied, authorize_role_change, authorize_role_grant
 from app.core.security import get_password_hash
@@ -229,6 +230,11 @@ async def create_user(
         )
     except RoleGrantDenied as exc:
         raise _refuse(exc) from exc
+
+    # After the role grant is authorized and before any row is read. An
+    # unauthorized caller is refused for being unauthorized, not told how
+    # full somebody else's tenant is.
+    await refuse_if_over_limit(db, current_user.tenant_id, "seats")
 
     # Check email uniqueness
     existing = await db.execute(select(User).where(User.email == request.email))

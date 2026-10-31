@@ -87,12 +87,130 @@ class LakeMigration:
 _V1_BASELINE = ("CREATE DATABASE IF NOT EXISTS aisoc",)
 
 
+# ── 002: the activity projection ───────────────────────────────────────────
+#
+# Depth plan 2.2. Ingest now answers five questions on every event — who
+# acted, what kind of actor they were, what they did, to which resource, from
+# where, with what outcome — and the lake has to carry the answers as columns
+# rather than only inside `ocsf_json`, or a hunt for "every action by a
+# non-human actor from a new ASN" is a full scan of a ZSTD blob.
+#
+# `actor_kind` is a LowCardinality(String) and not an Enum: an Enum would
+# make adding a kind a schema migration on a table with months of data, and
+# the closed set lives in Go (`activity.ActorKinds`) where the gate can read
+# it. The bloom filters mirror the ones 001_init.sql already puts on the
+# high-cardinality hunt needles.
+_V2_ACTIVITY_PROJECTION = (
+    "ALTER TABLE aisoc.raw_events ADD COLUMN IF NOT EXISTS actor_kind LowCardinality(String) DEFAULT ''",
+    "ALTER TABLE aisoc.raw_events ADD COLUMN IF NOT EXISTS actor_kind_source String DEFAULT ''",
+    "ALTER TABLE aisoc.raw_events ADD COLUMN IF NOT EXISTS actor_id String DEFAULT ''",
+    "ALTER TABLE aisoc.raw_events ADD COLUMN IF NOT EXISTS actor_on_behalf_of String DEFAULT ''",
+    "ALTER TABLE aisoc.raw_events ADD COLUMN IF NOT EXISTS action String DEFAULT ''",
+    "ALTER TABLE aisoc.raw_events ADD COLUMN IF NOT EXISTS resource_type String DEFAULT ''",
+    "ALTER TABLE aisoc.raw_events ADD COLUMN IF NOT EXISTS resource_id String DEFAULT ''",
+    "ALTER TABLE aisoc.raw_events ADD COLUMN IF NOT EXISTS resource_owner String DEFAULT ''",
+    "ALTER TABLE aisoc.raw_events ADD COLUMN IF NOT EXISTS src_country_code LowCardinality(String) DEFAULT ''",
+    "ALTER TABLE aisoc.raw_events ADD COLUMN IF NOT EXISTS src_asn UInt32 DEFAULT 0",
+    "ALTER TABLE aisoc.raw_events ADD COLUMN IF NOT EXISTS src_as_org String DEFAULT ''",
+    "ALTER TABLE aisoc.raw_events ADD COLUMN IF NOT EXISTS src_reputation Float32 DEFAULT 0",
+    "ALTER TABLE aisoc.raw_events ADD COLUMN IF NOT EXISTS src_reputation_known UInt8 DEFAULT 0",
+    "ALTER TABLE aisoc.raw_events ADD COLUMN IF NOT EXISTS client_family LowCardinality(String) DEFAULT ''",
+    "ALTER TABLE aisoc.raw_events ADD COLUMN IF NOT EXISTS client_version String DEFAULT ''",
+    "ALTER TABLE aisoc.raw_events ADD COLUMN IF NOT EXISTS client_category LowCardinality(String) DEFAULT ''",
+    # The raw string is kept beside the parse because a user agent is
+    # attacker-controlled and every parser is a lossy summary of it. A tool
+    # renamed to "Mozilla/5.0" is itself the finding, and only the raw
+    # column can show it.
+    "ALTER TABLE aisoc.raw_events ADD COLUMN IF NOT EXISTS client_raw String DEFAULT ''",
+    "ALTER TABLE aisoc.raw_events ADD COLUMN IF NOT EXISTS outcome LowCardinality(String) DEFAULT ''",
+    "ALTER TABLE aisoc.raw_events ADD INDEX IF NOT EXISTS idx_action action TYPE bloom_filter(0.01) GRANULARITY 4",
+    "ALTER TABLE aisoc.raw_events ADD INDEX IF NOT EXISTS idx_resource_id resource_id TYPE bloom_filter(0.01) GRANULARITY 4",
+)
+
+# ── 003: the retention ceiling ─────────────────────────────────────────────
+#
+# Depth plan 4.3. `001_init.sql` wrote `TTL ... + INTERVAL 90 DAY` into the
+# table, and ClickHouse enforces that during merges with no reference to any
+# per-tenant setting — so a tenant who chose 400 days lost every event at day
+# 90, with nothing erroring and the console still showing 400.
+#
+# The init file now writes the ceiling instead, and this is the half an
+# *existing* deployment applies: that file runs only in the container
+# entrypoint on a fresh volume, so a TTL changed there alone lands on new
+# installs and silently not on the ones that already hold data — which are
+# precisely the ones with retention to lose.
+#
+# `MODIFY TTL` rewrites the table's TTL expression and schedules a
+# re-evaluation of existing parts. It does not resurrect rows already
+# deleted under the old 90-day TTL; nothing can. An operator upgrading a
+# deployment that has been running longer than 90 days keeps what it has and
+# starts accumulating toward the new ceiling from here.
+_V3_RETENTION_CEILING = ("ALTER TABLE aisoc.raw_events MODIFY TTL toDateTime(event_time) + INTERVAL 400 DAY",)
+
+# ── 004: sessions per principal ────────────────────────────────────────────
+#
+# Depth plan 2.4. The lake is the third store that has to agree on a session,
+# beside the `sessions` table (migration 102) and the Neo4j Session node, and
+# all three carry the same deterministic uuid so a hunt can join them without
+# any of them having coordinated at write time.
+#
+# `session_key_kind` is a column and not a derivable detail: a query counting
+# events per session means something different for a vendor session than for
+# a principal+address+client grouping this product derived, and a hunter who
+# cannot see which they have will mix the two in one result set.
+#
+# A bloom filter on `session_id` rather than on `session_key`: the id is what
+# a join uses, and the key is high-cardinality free text that is read after
+# the id has already narrowed the scan.
+_V4_SESSIONS = (
+    "ALTER TABLE aisoc.raw_events ADD COLUMN IF NOT EXISTS session_id String DEFAULT ''",
+    "ALTER TABLE aisoc.raw_events ADD COLUMN IF NOT EXISTS session_key String DEFAULT ''",
+    "ALTER TABLE aisoc.raw_events ADD COLUMN IF NOT EXISTS session_key_kind LowCardinality(String) DEFAULT ''",
+    "ALTER TABLE aisoc.raw_events ADD COLUMN IF NOT EXISTS session_originating_human String DEFAULT ''",
+    "ALTER TABLE aisoc.raw_events ADD INDEX IF NOT EXISTS idx_session_id session_id TYPE bloom_filter(0.01) GRANULARITY 4",
+)
+
+
 MIGRATIONS: tuple[LakeMigration, ...] = (
     LakeMigration(
         id="001_baseline",
         description=("Records the 001_init.sql baseline as applied. Creates nothing an existing deployment does not already have."),
         statements=_V1_BASELINE,
         tags=("baseline",),
+    ),
+    LakeMigration(
+        id="002_activity_projection",
+        description=(
+            "Adds the activity projection columns (actor kind and identity, normalized action, resource, "
+            "source geography/ASN/reputation, parsed client, outcome) to aisoc.raw_events."
+        ),
+        statements=_V2_ACTIVITY_PROJECTION,
+        # Every statement is an ALTER on an existing table, which is exactly
+        # the case that needs ON CLUSTER on a multi-replica deployment. The
+        # repo names no cluster topology, so this is recorded rather than
+        # guessed, and the runner logs it on the way past.
+        needs_cluster_ddl=True,
+        tags=("activity-projection", "depth-2.2"),
+    ),
+    LakeMigration(
+        id="003_retention_ceiling",
+        description=(
+            "Raises the aisoc.raw_events TTL from 90 days to the 400-day ceiling a tenant may choose, so the "
+            "lake stops deleting before the per-tenant window the purge worker enforces."
+        ),
+        statements=_V3_RETENTION_CEILING,
+        needs_cluster_ddl=True,
+        tags=("retention", "depth-4.3"),
+    ),
+    LakeMigration(
+        id="004_sessions",
+        description=(
+            "Adds the session columns (deterministic id shared with Postgres and the graph, the vendor's own "
+            "key, how strong the grouping is, and the originating human) to aisoc.raw_events."
+        ),
+        statements=_V4_SESSIONS,
+        needs_cluster_ddl=True,
+        tags=("sessions", "depth-2.4"),
     ),
 )
 

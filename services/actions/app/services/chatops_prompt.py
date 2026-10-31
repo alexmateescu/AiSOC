@@ -26,6 +26,7 @@ import httpx
 import structlog
 
 from app.security.credential_vault import CredentialVaultError, get_vault
+from app.services.branding_lookup import DEFAULT_PRODUCT_NAME
 
 logger = structlog.get_logger()
 
@@ -65,6 +66,7 @@ async def send_slack_prompt(
     buttons: list[ChatOpsButton],
     bot_token: str | None = None,
     channel: str | None = None,
+    product_name: str = DEFAULT_PRODUCT_NAME,
     timeout: float = 10.0,
 ) -> dict[str, Any]:
     """Post the interactive prompt into Slack.
@@ -92,7 +94,7 @@ async def send_slack_prompt(
     elements = [{k: v for k, v in el.items() if v is not None} for el in elements]
 
     payload: dict[str, Any] = {
-        "text": f"AiSOC verification: {question}",
+        "text": f"{product_name} verification: {question}",
         "blocks": [
             {"type": "section", "text": {"type": "mrkdwn", "text": f"*{question}*"}},
             {"type": "context", "elements": [{"type": "mrkdwn", "text": context}]},
@@ -115,6 +117,7 @@ async def send_teams_prompt(
     question: str,
     context: str,
     buttons: list[ChatOpsButton],
+    product_name: str = DEFAULT_PRODUCT_NAME,
     timeout: float = 10.0,
 ) -> dict[str, Any]:
     """Post the interactive prompt into Microsoft Teams via Connector Card."""
@@ -125,9 +128,9 @@ async def send_teams_prompt(
     payload = {
         "@type": "MessageCard",
         "@context": "https://schema.org/extensions",
-        "summary": f"AiSOC verification: {question}",
+        "summary": f"{product_name} verification: {question}",
         "themeColor": "0078D4",
-        "title": "AiSOC verification",
+        "title": f"{product_name} verification",
         "text": f"**{question}**\n\n{context}",
         "potentialAction": [
             {

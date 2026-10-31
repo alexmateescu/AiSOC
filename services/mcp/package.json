@@ -2,6 +2,7 @@
   "name": "@aisoc/mcp",
   "version": "0.1.0",
   "description": "MCP server that exposes AiSOC (alerts, cases, agent investigations, the decision ledger) to Claude Desktop, Cursor, Cody, Continue, and any MCP-aware agent.",
+  "mcpName": "io.github.beenuar/aisoc",
   "keywords": [
     "aisoc",
     "mcp",
@@ -51,14 +52,14 @@
     "prepublishOnly": "npm run typecheck && npm run build"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.31.0",
+    "@modelcontextprotocol/sdk": "^1.32.0",
     "zod": "^4.6.5"
   },
   "devDependencies": {
-    "@types/node": "^26.6.4",
+    "@types/node": "^26.6.5",
     "tsx": "^4.23.15",
     "typescript": "^6.0.3",
-    "vitest": "^4.1.11"
+    "vitest": "^4.1.12"
   },
   "engines": {
     "node": ">=18.17"

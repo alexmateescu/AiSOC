@@ -11,15 +11,29 @@ Dependencies (optional):
   - python3-saml (onelogin/python3-saml) if available
   - Refuses with 501 when not installed, rather than inventing an identity
 
+Where the identity provider comes from (fix pass 4.1)
+-----------------------------------------------------
+The **connection row**, not the environment. `aisoc_sso_connections`
+carries `metadata_url` and `metadata_xml` per connection; both were
+written by `POST /sso-connections` and read by nothing, so an
+administrator could configure an IdP in the console and the deployment
+would go on trusting whatever `SAML_IDP_*` said — which on a stock install
+is nothing, so every assertion was refused. See
+`app/auth/saml_metadata.py`.
+
+The `SAML_IDP_*` variables below remain as a fallback for deployments that
+configured SAML before connections were readable. A connection wins over
+them whenever one resolves.
+
 Configuration (env vars):
-  SAML_IDP_ENTITY_ID       IdP Entity ID (issuer)
-  SAML_IDP_SSO_URL         IdP SSO redirect URL
-  SAML_IDP_SLO_URL         IdP SLO URL (optional)
-  SAML_IDP_CERT            IdP X.509 certificate (PEM, single line base64 or multi-line)
   SAML_SP_ENTITY_ID        SP Entity ID (defaults to ACS URL)
   SAML_SP_ACS_URL          Assertion Consumer Service URL
   SAML_SP_PRIVATE_KEY      SP private key PEM (optional, for signed requests)
   SAML_SP_CERT             SP certificate PEM (optional)
+  SAML_IDP_ENTITY_ID       Fallback IdP Entity ID (issuer)
+  SAML_IDP_SSO_URL         Fallback IdP SSO redirect URL
+  SAML_IDP_SLO_URL         Fallback IdP SLO URL (optional)
+  SAML_IDP_CERT            Fallback IdP X.509 certificate (PEM or single-line base64)
   JWT_SECRET               Secret used to sign issued JWTs
   JWT_ALGORITHM            HS256 (default)
   JWT_EXPIRE_MINUTES       Token lifetime (default: 480 = 8h)
@@ -32,12 +46,21 @@ import os
 import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from urllib.parse import quote
 
 import jwt as _jwt
 from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import RedirectResponse, Response
 
 from app.api.v1.deps import DBSession
+from app.auth.saml_metadata import (
+    SamlTrustError,
+    environment_idp_is_configured,
+    environment_idp_settings,
+    idp_settings_for_connection,
+    issuer_from_saml_response,
+    resolve_saml_connection,
+)
 from app.auth.sso_provisioning import SsoProvisioningError, complete_sso_login
 
 logger = logging.getLogger(__name__)
@@ -88,20 +111,45 @@ def _issue_jwt(claims: dict[str, Any]) -> str:
 # ─── SAML settings builder ────────────────────────────────────────────────────
 
 
-def _saml_settings() -> dict[str, Any]:
+def _saml_settings(idp: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The python3-saml settings for this service provider.
+
+    The SP half is deployment-wide: one service, one ACS URL, one
+    certificate. The **IdP half is per connection** and is passed in —
+    `idp=None` falls back to `SAML_IDP_*`, which is how a pre-4.1
+    deployment was configured and the only thing that used to be possible.
+    """
     sp_acs = os.getenv("SAML_SP_ACS_URL", "http://localhost:8000/auth/saml/acs")
     sp_entity = os.getenv("SAML_SP_ENTITY_ID", sp_acs)
     sp_key = os.getenv("SAML_SP_PRIVATE_KEY", "")
     sp_cert = os.getenv("SAML_SP_CERT", "")
 
-    idp_entity = os.getenv("SAML_IDP_ENTITY_ID", "")
-    idp_sso = os.getenv("SAML_IDP_SSO_URL", "")
-    idp_slo = os.getenv("SAML_IDP_SLO_URL", "")
-    idp_cert = os.getenv("SAML_IDP_CERT", "").replace("\\n", "\n")
-
     return {
         "strict": True,
         "debug": os.getenv("SAML_DEBUG", "false").lower() == "true",
+        "security": {
+            # Keycloak's built-in "role list" mapper is on by default and
+            # emits **one `<Attribute Name="Role">` element per role**, so
+            # a stock Keycloak sends six of them before anybody adds a
+            # mapper. python3-saml defaults `allowRepeatAttributeName` to
+            # False and raises `Found an Attribute element with duplicated
+            # Name` out of `process_response()` — past every `except` this
+            # handler has, so the ACS answered an unhandled 500 and **no
+            # Keycloak user could complete a SAML sign-in at all**.
+            #
+            # Repeated `<Attribute>` elements are legal SAML 2.0 and this
+            # merges their values rather than refusing the assertion. It is
+            # not a relaxation of trust: `process_response()` calls
+            # `response.is_valid()` — signature, conditions and audience —
+            # and only reads attributes once that has passed, so an
+            # attacker cannot add an element without invalidating the
+            # signature that admitted it.
+            #
+            # Found by depth 8.1's containerised-IdP probe. The
+            # self-authored provider in `tests/isolation/test_sso_live.py`
+            # emits one attribute per name, so it could not have found it.
+            "allowRepeatAttributeName": True,
+        },
         "sp": {
             "entityId": sp_entity,
             "assertionConsumerService": {
@@ -115,49 +163,63 @@ def _saml_settings() -> dict[str, Any]:
             "privateKey": sp_key,
             "x509cert": sp_cert,
         },
-        "idp": {
-            "entityId": idp_entity,
-            "singleSignOnService": {
-                "url": idp_sso,
-                "binding": "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect",
-            },
-            "singleLogoutService": {
-                "url": idp_slo,
-                "binding": "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect",
-            },
-            "x509cert": idp_cert,
-        },
+        "idp": idp if idp is not None else environment_idp_settings(),
     }
+
+
+async def _resolve_idp(db: DBSession, *, issuer: str | None) -> tuple[dict[str, Any], str]:
+    """The IdP settings block and the issuer that keys its connection.
+
+    Returns `(idp_settings, issuer)`. The issuer returned is the one the
+    **connection** declares, never the one an assertion claimed: the
+    assertion's issuer only selected which connection to look at, and
+    `complete_sso_login` resolves the tenant from the row this returns the
+    key of.
+    """
+    connection = await resolve_saml_connection(db, issuer=issuer)
+    if connection is not None:
+        return await idp_settings_for_connection(connection), str(connection["issuer"])
+
+    if environment_idp_is_configured():
+        env = environment_idp_settings()
+        logger.info("saml.trust_from_environment no connection row matched; using SAML_IDP_* ")
+        return env, str(env["entityId"])
+
+    raise SamlTrustError(
+        "no enabled SAML connection is configured for this deployment. Create one with "
+        "POST /api/v1/sso-connections carrying the identity provider's metadata_url or metadata_xml."
+    )
 
 
 # ─── Routes ───────────────────────────────────────────────────────────────────
 
 
-def _idp_entity_id() -> str:
-    """The IdP entity id, which keys the SSO connection row.
-
-    Read from the configured settings rather than from the assertion: the
-    assertion is the thing being authenticated and cannot be the thing that
-    decides which tenant it provisions into.
-    """
-    try:
-        settings_dict = _saml_settings()
-        idp = settings_dict.get("idp") or {}
-        return str(idp.get("entityId") or os.getenv("SAML_IDP_ENTITY_ID", "") or "")
-    except Exception:  # noqa: BLE001
-        return os.getenv("SAML_IDP_ENTITY_ID", "")
-
-
 @router.get("/login")
-async def saml_login(request: Request, redirect: str = "/") -> Response:
-    """Initiate SAML SSO — redirect to IdP."""
+async def saml_login(request: Request, db: DBSession, redirect: str = "/", issuer: str | None = None) -> Response:
+    """Initiate SAML SSO — redirect to the IdP this connection names.
+
+    `issuer` is optional and the console does not send one: a deployment
+    with a single enabled SAML connection has an unambiguous answer. It
+    exists so a deployment with several can link one button per provider.
+    """
+    from app.auth.oidc import _require_sso_enabled  # noqa: PLC0415
+
+    _require_sso_enabled()
     try:
         from onelogin.saml2.auth import OneLogin_Saml2_Auth  # type: ignore[import]
 
+        idp, _issuer = await _resolve_idp(db, issuer=issuer)
         req = await _build_saml_request(request)
-        auth = OneLogin_Saml2_Auth(req, _saml_settings())
+        auth = OneLogin_Saml2_Auth(req, _saml_settings(idp))
         login_url: str = auth.login(return_to=redirect)
         return RedirectResponse(url=login_url)
+    except SamlTrustError as exc:
+        # A configuration problem, named. "SAML error: Invalid dict
+        # settings: idp_sso_url_invalid" sent an operator to read
+        # python3-saml's source; this sends them to the connection they
+        # thought they had configured.
+        logger.warning("saml.login_unconfigured reason=%s", str(exc).replace("\r", "").replace("\n", " ")[:300])
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
     except ImportError as exc:
         # 501, not a page that looks like a login. This branch used to render
         # a stub and the one below it used to mint a token, and since
@@ -183,7 +245,14 @@ async def saml_acs(request: Request, db: DBSession) -> Response:
         from onelogin.saml2.auth import OneLogin_Saml2_Auth  # type: ignore[import]
 
         req = await _build_saml_request(request)
-        auth = OneLogin_Saml2_Auth(req, _saml_settings())
+        # The issuer the response names picks which connection's
+        # certificate to verify against. It confers nothing: an assertion
+        # naming an issuer whose private key the sender does not hold fails
+        # `process_response()` two lines below, and the tenant comes from
+        # the connection row either way.
+        claimed_issuer = issuer_from_saml_response(str(req.get("post_data", {}).get("SAMLResponse") or ""))
+        idp, connection_issuer = await _resolve_idp(db, issuer=claimed_issuer)
+        auth = OneLogin_Saml2_Auth(req, _saml_settings(idp))
         auth.process_response()
         errors = auth.get_errors()
 
@@ -209,10 +278,13 @@ async def saml_acs(request: Request, db: DBSession) -> Response:
             session = await complete_sso_login(
                 db,
                 provider="saml",
-                # The IdP entity id, which is what the connection is keyed
-                # on. The tenant comes from that row, never from the
-                # assertion.
-                issuer=_idp_entity_id(),
+                # The entity id the *connection* declares, not the one the
+                # assertion claimed. They are equal on the path that got
+                # here — the signature verified against that connection's
+                # certificate — and passing the connection's value means a
+                # future change to selection cannot turn the assertion into
+                # the thing that chooses the tenant.
+                issuer=connection_issuer,
                 email=str(_first(attrs.get("email") or attrs.get(email_claim, [name_id]))),
                 subject=str(name_id or ""),
                 name=_first(attrs.get("displayName") or attrs.get(name_claim, [])),
@@ -229,12 +301,32 @@ async def saml_acs(request: Request, db: DBSession) -> Response:
         except SsoProvisioningError as exc:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
 
+        # Land on the login page, not on the RelayState destination, and
+        # carry the refresh token too. Both halves were defects:
+        #
+        # `handleUnauthorized` in `apps/web/src/lib/api.ts` builds its
+        # bounce target from `pathname + search`, so an auth guard on
+        # `/alerts` redirects to `/login?next=/alerts` and **drops the
+        # fragment** — taking the only copy of the token with it. The OIDC
+        # callback already lands on /login for exactly this reason; this
+        # one did not, so a SAML sign-in could not complete in the console
+        # however valid the assertion.
+        #
+        # And the console's fragment consumer persists `refresh_token`
+        # alongside the access token; omitting it logged the user out
+        # silently when the access token expired.
         relay_state = _safe_redirect(str((await request.form()).get("RelayState", "/")))
-        separator = "&" if "#" in relay_state else "#"
+        redirect_url = f"/login?next={quote(relay_state, safe='')}"
         # In the fragment, which browsers do not send to the server and
         # which does not land in an access log or a Referer header.
-        return RedirectResponse(url=f"{relay_state}{separator}access_token={session['access_token']}", status_code=302)
+        return RedirectResponse(
+            url=f"{redirect_url}{_session_fragment(session)}",
+            status_code=302,
+        )
 
+    except SamlTrustError as exc:
+        logger.warning("saml.acs_unconfigured reason=%s", str(exc).replace("\r", "").replace("\n", " ")[:300])
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
     except ImportError as exc:
         # This issued a signed session for a principal called
         # `stub-saml-user` that no identity provider had ever seen, from an
@@ -272,22 +364,36 @@ async def saml_metadata() -> Response:
 
 
 @router.get("/logout")
-async def saml_logout(request: Request) -> Response:
-    """Initiate SAML SLO."""
+async def saml_logout(request: Request, db: DBSession, issuer: str | None = None) -> Response:
+    """Initiate SAML SLO, at the SingleLogoutService the connection names.
+
+    Resolved the same way `/login` is. A deployment whose IdP comes from a
+    connection has no `SAML_IDP_SLO_URL`, so this used to build a logout
+    request against an empty endpoint and 500 on the way out of a session.
+    An SLO that cannot be initiated is a local logout, not an error.
+    """
     try:
         from onelogin.saml2.auth import OneLogin_Saml2_Auth  # type: ignore[import]
 
+        idp, _issuer = await _resolve_idp(db, issuer=issuer)
         req = await _build_saml_request(request)
-        auth = OneLogin_Saml2_Auth(req, _saml_settings())
+        auth = OneLogin_Saml2_Auth(req, _saml_settings(idp))
         name_id = request.cookies.get("saml_name_id", "")
         logout_url: str = auth.logout(name_id=name_id)
         response = RedirectResponse(url=logout_url)
         response.delete_cookie("aisoc_token")
         response.delete_cookie("saml_name_id")
         return response
-    except ImportError:
+    except Exception:  # noqa: BLE001
+        # Every failure here ends the same way, so they are not
+        # distinguished: python3-saml missing, no connection configured, or
+        # an IdP that publishes no SingleLogoutService. The session is
+        # already being discarded locally, and refusing to do that because
+        # the provider cannot be told would leave the user signed in.
+        logger.info("saml.slo_unavailable falling back to local logout")
         response = RedirectResponse(url="/login")
         response.delete_cookie("aisoc_token")
+        response.delete_cookie("saml_name_id")
         return response
 
 
@@ -296,6 +402,28 @@ async def saml_logout(request: Request) -> Response:
 
 def _first(lst: list[str]) -> str:
     return lst[0] if lst else ""
+
+
+def _session_fragment(session: dict[str, Any]) -> str:
+    """The URL fragment a completed callback lands on.
+
+    Two outcomes, and the difference is whether a session exists at all.
+    When the tenant's policy requires a second factor of this role and
+    the provider did not assert one, `complete_sso_login` returns a
+    challenge and **no tokens** — so there is nothing to put in the
+    fragment but the challenge, and the console's sign-in page asks for
+    the factor before anybody is signed in.
+
+    Reading `access_token` unconditionally, as this did before depth 8.1,
+    would raise `KeyError` inside the handler on exactly the deployments
+    that enforce MFA. Shared with the OIDC callback so the two cannot
+    answer differently.
+    """
+    if session.get("mfa_required") or session.get("mfa_enrollment_required"):
+        methods = ",".join(str(m) for m in (session.get("methods") or []))
+        key = "mfa_required" if session.get("mfa_required") else "mfa_enrollment_required"
+        return f"#{key}=1&mfa_token={quote(str(session['mfa_token']), safe='')}&methods={quote(methods, safe='')}"
+    return f"#access_token={session['access_token']}&refresh_token={session['refresh_token']}"
 
 
 async def _build_saml_request(request: Request) -> dict[str, Any]:

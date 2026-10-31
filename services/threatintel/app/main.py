@@ -10,6 +10,7 @@ AiSOC — open-source AI Security Operations Center (MIT License)
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from functools import partial
@@ -31,6 +32,7 @@ from app.api.actor_attribution import router as actor_attribution_router
 from app.api.indicators import router as indicators_router
 from app.clients.cisa_kev import CisaKevClient
 from app.clients.misp import MispClient
+from app.clients.opencti import OpenCtiClient
 from app.clients.otx import OtxClient
 from app.clients.taxii import TaxiiClient
 from app.config import settings
@@ -38,6 +40,7 @@ from app.core.kafka_security import kafka_client_kwargs
 from app.feeds.handlers import (
     handle_cisa_kev_feed,
     handle_misp_feed,
+    handle_opencti_feed,
     handle_otx_feed,
     handle_taxii_feed,
 )
@@ -204,6 +207,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         else None
     )
 
+    opencti_client = (
+        OpenCtiClient(
+            url=settings.OPENCTI_URL,
+            token=settings.OPENCTI_TOKEN,
+            verify_ssl=settings.OPENCTI_VERIFY_SSL,
+        )
+        if settings.OPENCTI_URL and settings.OPENCTI_TOKEN
+        else None
+    )
+
     kev_client = CisaKevClient()
 
     # ── Scheduler ─────────────────────────────────────────────────────────────
@@ -243,6 +256,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             feed_name="otx",
             handler=partial(handle_otx_feed, client=otx_client, pipeline=pipeline),
             interval_seconds=settings.OTX_POLL_INTERVAL,
+        )
+
+    # OpenCTI (typically an internal deployment — the air-gap helper
+    # permits RFC1918/internal hosts and skips public URLs unless
+    # explicitly allowlisted, same contract as the other feeds).
+    if opencti_client and _airgap_check_feed_url("opencti", settings.OPENCTI_URL):
+        scheduler.register(
+            feed_name="opencti",
+            handler=partial(handle_opencti_feed, client=opencti_client, pipeline=pipeline),
+            interval_seconds=settings.OPENCTI_POLL_INTERVAL,
         )
 
     # CISA KEV (always enabled — no key required) — public CISA URL, so
@@ -318,17 +341,37 @@ app.include_router(indicators_router)
 
 @app.get("/health")
 async def health() -> dict:
-    """Health and status endpoint."""
+    """Health and status endpoint, naming every dependency it checked.
+
+    ``vector_store`` is the Qdrant similarity leg (#1446): a **degrade**
+    dependency — IOC ingestion continues without it and enrichment responses
+    say the similarity leg was skipped — so its loss flips the key while the
+    status stays ``ok``. The chaos store-outage grader reads exactly this
+    key; before it existed, Qdrant being down was invisible here, which is
+    indistinguishable from a healthy idle store. Each probe is hard-capped
+    well inside the grader's 4-second read budget, because a probe that
+    waits out a full connect timeout turns "down and we say so" into "down
+    and we say nothing".
+    """
     try:
-        redis: aioredis.Redis = app.state.redis
-        await redis.ping()
+        async with asyncio.timeout(1.5):
+            redis: aioredis.Redis = app.state.redis
+            await redis.ping()
         redis_ok = True
     except Exception:
         redis_ok = False
 
+    try:
+        async with asyncio.timeout(1.5):
+            await app.state.qdrant_client.get_collections()
+        vector_ok = True
+    except Exception:
+        vector_ok = False
+
     return {
         "status": "ok",
         "redis": redis_ok,
+        "vector_store": vector_ok,
         "scheduler": app.state.scheduler._scheduler.running if hasattr(app.state, "scheduler") else False,
         "airgap": airgap_status(),
     }

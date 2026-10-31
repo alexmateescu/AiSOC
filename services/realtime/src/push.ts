@@ -25,6 +25,7 @@ import type { Logger } from 'pino';
 import type { Request, Response } from 'express';
 import webpush from 'web-push';
 import crypto from 'crypto';
+import { nativePlatformOf, sendNative } from './native-push.js';
 
 export interface SubscriptionPayload {
   endpoint: string;
@@ -325,6 +326,52 @@ export class PushManager {
     notification: PushNotification,
   ): Promise<{ delivered: boolean; removed: boolean }> {
     if (!this.enabled) return { delivered: false, removed: false };
+
+    // Depth 9.6. A native device token is not a URL, and `web-push` signs a
+    // VAPID JWT and POSTs to one — so before this split a subscription saved
+    // by `apps/mobile` was accepted, counted, and failed on every send. That
+    // is the worst of the three states, because the subscription count looked
+    // healthy while no responder's phone ever rang.
+    const nativePlatform = nativePlatformOf(record.keys);
+    if (nativePlatform) {
+      const outcome = await sendNative(
+        { endpoint: record.endpoint, platform: nativePlatform },
+        {
+          title: notification.title,
+          body: notification.body,
+          tag: notification.tag,
+          critical: notification.severity === 'critical',
+          data: {
+            ...(notification.url ? { url: notification.url } : {}),
+            ...(notification.alert_id ? { alert_id: notification.alert_id } : {}),
+            ...(notification.case_id ? { case_id: notification.case_id } : {}),
+            ...(notification.approval_id ? { approval_id: notification.approval_id } : {}),
+          },
+        },
+      );
+      if (outcome.kind === 'delivered') {
+        record.last_seen_at = this.now().toISOString();
+        await this.redis.set(key('sub', record.id), JSON.stringify(record), 'EX', SUB_TTL_SECONDS);
+        return { delivered: true, removed: false };
+      }
+      if (outcome.kind === 'unregistered') {
+        await this.removeSubscriptionById(record.tenant_id, record.id);
+        this.log.info({ id: record.id, reason: outcome.reason }, 'pruned dead native push token');
+        return { delivered: false, removed: true };
+      }
+      if (outcome.kind === 'not_configured') {
+        // Logged at warn, not debug: a deployment that stores native tokens
+        // and cannot send to them is a responder who believes they are
+        // covered and is not.
+        this.log.warn(
+          { id: record.id, platform: nativePlatform, missing: outcome.missing },
+          'native push is not configured; nothing was sent',
+        );
+        return { delivered: false, removed: false };
+      }
+      this.log.warn({ id: record.id, reason: outcome.reason }, 'native push delivery failed');
+      return { delivered: false, removed: false };
+    }
 
     const payload = JSON.stringify(this.buildPayload(notification));
     try {

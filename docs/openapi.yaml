@@ -25,6 +25,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/TokenResponse'
+        '202':
+          description: The password was accepted and a second factor is outstanding.
+            The body carries `mfa_token` plus either `mfa_required` (complete it at
+            `POST /auth/mfa/verify`) or `mfa_enrollment_required` (the tenant requires
+            a factor this account has not enrolled; enrol at `POST /auth/mfa/enroll/begin`).
+            No session is issued.
+          content:
+            application/json:
+              example:
+                mfa_required: true
+                mfa_token: eyJ…
+                methods:
+                - totp
+                - recovery_code
         '422':
           description: Validation Error
           content:
@@ -120,6 +134,340 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/UserMeResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+      security:
+      - HTTPBearer: []
+  /api/v1/auth/mfa/status:
+    get:
+      tags:
+      - auth
+      - mfa
+      summary: Mfa Status
+      description: Whether this user holds a second factor, and whether they must.
+      operationId: mfa_status_api_v1_auth_mfa_status_get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MfaStatus'
+      security:
+      - HTTPBearer: []
+  /api/v1/auth/mfa/enroll/begin:
+    post:
+      tags:
+      - auth
+      - mfa
+      summary: Enroll Begin
+      description: 'Mint a secret and return it once, with the URI an app scans.
+
+
+        Re-enrolling replaces an *unconfirmed* row and refuses a confirmed one:
+
+        silently rotating a working factor would turn a mis-click into a
+
+        lockout, and `DELETE /auth/mfa` is the deliberate way to remove one.'
+      operationId: enroll_begin_api_v1_auth_mfa_enroll_begin_post
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EnrollBegin'
+      security:
+      - HTTPBearer: []
+  /api/v1/auth/mfa/enroll/confirm:
+    post:
+      tags:
+      - auth
+      - mfa
+      summary: Enroll Confirm
+      description: 'Prove the secret arrived, then hand over the recovery codes.
+
+
+        Confirmation is what makes the row a credential. Without it, an
+
+        enrolment begun on a device that never received the QR code would lock
+
+        the user out at their next sign-in.'
+      operationId: enroll_confirm_api_v1_auth_mfa_enroll_confirm_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConfirmRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EnrollConfirmed'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+      security:
+      - HTTPBearer: []
+  /api/v1/auth/mfa/verify:
+    post:
+      tags:
+      - auth
+      - mfa
+      summary: Verify
+      description: Complete a sign-in that `POST /auth/login` answered with 202.
+      operationId: verify_api_v1_auth_mfa_verify_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VerifyRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionTokens'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/auth/mfa/webauthn/challenge:
+    post:
+      tags:
+      - auth
+      - mfa
+      summary: Webauthn Challenge
+      description: 'Assertion options for a user part-way through a sign-in.
+
+
+        The user is taken from the signed `mfa_token`, never from the body:
+
+        an endpoint that let a caller name whose credentials to list would
+
+        answer "does this address hold a passkey" to anybody who asked.'
+      operationId: webauthn_challenge_api_v1_auth_mfa_webauthn_challenge_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WebAuthnChallengeRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+                title: Response Webauthn Challenge Api V1 Auth Mfa Webauthn Challenge
+                  Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/auth/mfa/webauthn/verify:
+    post:
+      tags:
+      - auth
+      - mfa
+      summary: Webauthn Verify
+      description: 'Complete a sign-in with a security key or passkey.
+
+
+        The credential must belong to the user the challenge names. Without
+
+        that check anybody holding **any** enrolled authenticator could
+
+        discharge **anybody''s** challenge, which is the whole control.'
+      operationId: webauthn_verify_api_v1_auth_mfa_webauthn_verify_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WebAuthnVerifyRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionTokens'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/auth/mfa:
+    delete:
+      tags:
+      - auth
+      - mfa
+      summary: Disable
+      description: 'Remove your own second factor, proving you still hold it.
+
+
+        A current code is required. Without it, a stolen session could strip
+
+        the factor it was supposed to be protected by, which makes the factor
+
+        worth exactly as much as the session.'
+      operationId: disable_api_v1_auth_mfa_delete
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DisableRequest'
+        required: true
+      responses:
+        '204':
+          description: Successful Response
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+      security:
+      - HTTPBearer: []
+  /api/v1/auth/mfa/reset/{user_id}:
+    post:
+      tags:
+      - auth
+      - mfa
+      summary: Reset
+      description: "Remove somebody else's second factor. The lost-phone path.\n\n\
+        Three constraints, each of which is the reason an administrative reset\nis\
+        \ normally the weakest link in an MFA deployment:\n\n* the target must be\
+        \ in the caller's own tenant, resolved from the\n  authenticated principal\
+        \ and never from the request;\n* a `reason` is required and lands in the audit\
+        \ row, because \"an admin\n  reset it\" without one is not an answer to \"\
+        who removed this and why\";\n* an administrator may not reset **their own**\
+        \ factor here. That would\n  be a self-disable with no code, bypassing `DELETE\
+        \ /auth/mfa`."
+      operationId: reset_api_v1_auth_mfa_reset__user_id__post
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: user_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: User Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResetRequest'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties:
+                  type: string
+                title: Response Reset Api V1 Auth Mfa Reset  User Id  Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/auth/mfa/policy:
+    get:
+      tags:
+      - auth
+      - mfa
+      summary: Get Policy
+      description: 'Readable by any member: a user is entitled to know what their
+        own
+
+        tenant requires of them.'
+      operationId: get_policy_api_v1_auth_mfa_policy_get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MfaPolicy'
+      security:
+      - HTTPBearer: []
+    put:
+      tags:
+      - auth
+      - mfa
+      summary: Put Policy
+      description: 'Require, or stop requiring, a second factor across this tenant.
+
+
+        The tenant is the caller''s, never a parameter. A row is written only
+
+        when an administrator asks for one, so a tenant that has never visited
+
+        this endpoint has no row and is not enforced.
+
+
+        `require_for_roles` names roles that must hold a factor even when the
+
+        tenant-wide switch is off. Every name is checked against the role
+
+        vocabulary before it is stored: a typo would otherwise be accepted,
+
+        match nobody''s role, and leave an administrator looking at a policy
+
+        page that says a role is enforced while it is not — the quiet
+
+        direction, and the one worth refusing loudly.
+
+
+        The vocabulary comes from `role_grants.known_roles()` rather than from
+
+        `ROLE_PERMISSIONS` directly. This route decides nothing about
+
+        permissions and must not be able to: a route that reads the static map
+
+        is how a second permission model gets rebuilt, which
+
+        `scripts/check_one_permission_model.py` exists to prevent.'
+      operationId: put_policy_api_v1_auth_mfa_policy_put
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MfaPolicy'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MfaPolicy'
         '422':
           description: Validation Error
           content:
@@ -354,7 +702,29 @@ paths:
 
         match either filter — that''s intentional; analysts who care about
 
-        confidence should only see alerts that actually carry the signal.'
+        confidence should only see alerts that actually carry the signal.
+
+
+        `sort` is `newest` (created_at descending) or `priority` (severity
+
+        descending, then created_at descending). It defaults to `newest`: this
+
+        endpoint has generated SDK clients and "page one is the newest rows" is
+
+        part of what they were built against, so changing the order silently
+
+        would alter what every existing caller reads *without* altering the
+
+        schema — which `openapi-breaking.yml` cannot detect. The console asks for
+
+        `priority`, because a noisy low-severity source emitting faster than an
+
+        analyst pages pushes a critical off page one and keeps it there.
+
+
+        `limit` is an accepted spelling of `page_size`. Supplying both with
+
+        different values is a 400.'
       operationId: list_alerts_api_v1_alerts_get
       security:
       - HTTPBearer: []
@@ -376,6 +746,20 @@ paths:
           minimum: 1
           default: 25
           title: Page Size
+      - name: limit
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: integer
+            maximum: 200
+            minimum: 1
+          - type: 'null'
+          description: Alias for `page_size`, bounded identically. Supplying both
+            with different values is a 400.
+          title: Limit
+        description: Alias for `page_size`, bounded identically. Supplying both with
+          different values is a 400.
       - name: severity
         in: query
         required: false
@@ -433,6 +817,16 @@ paths:
           - type: string
           - type: 'null'
           title: Confidence Label
+      - name: sort
+        in: query
+        required: false
+        schema:
+          enum:
+          - newest
+          - priority
+          type: string
+          default: newest
+          title: Sort
       responses:
         '200':
           description: Successful Response
@@ -580,7 +974,12 @@ paths:
       tags:
       - alerts
       summary: Update Alert
-      description: Update alert status, priority, tags, assignment, or case link.
+      description: 'Update alert status, priority, tags, assignment, or case link.
+
+
+        Emits an `alerts:update` audit event carrying a before/after payload for
+
+        the fields this call changed.'
       operationId: update_alert_api_v1_alerts__alert_id__patch
       security:
       - HTTPBearer: []
@@ -1766,6 +2165,343 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/case-depth/alerts/merge:
+    post:
+      tags:
+      - case-depth
+      summary: Merge Alerts Route
+      description: Fold duplicate alerts into one. Every row survives.
+      operationId: merge_alerts_route_api_v1_case_depth_alerts_merge_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MergeRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MergeResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+      security:
+      - HTTPBearer: []
+  /api/v1/case-depth/cases/merge:
+    post:
+      tags:
+      - case-depth
+      summary: Merge Cases Route
+      description: Fold duplicate cases into one. Alerts follow; both rows survive.
+      operationId: merge_cases_route_api_v1_case_depth_cases_merge_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MergeRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MergeResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+      security:
+      - HTTPBearer: []
+  /api/v1/case-depth/alerts/bulk-triage:
+    post:
+      tags:
+      - case-depth
+      summary: Bulk Triage Route
+      description: 'Apply one triage decision to many alerts, with a preflight count.
+
+
+        A match larger than ``max_count`` is a **409 carrying the real figure**
+
+        and nothing is written — the same contract ``POST /alerts/bulk-close``
+
+        uses, deliberately, because a second bulk path with weaker guarantees is
+
+        how the weaker one becomes the one everybody reaches for.'
+      operationId: bulk_triage_route_api_v1_case_depth_alerts_bulk_triage_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BulkTriageRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BulkTriageResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+      security:
+      - HTTPBearer: []
+  /api/v1/case-depth/custom-fields:
+    get:
+      tags:
+      - case-depth
+      summary: List Custom Fields
+      operationId: list_custom_fields_api_v1_case_depth_custom_fields_get
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: include_inactive
+        in: query
+        required: false
+        schema:
+          type: boolean
+          default: false
+          title: Include Inactive
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/CustomFieldOut'
+                title: Response List Custom Fields Api V1 Case Depth Custom Fields
+                  Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+    post:
+      tags:
+      - case-depth
+      summary: Create Custom Field
+      operationId: create_custom_field_api_v1_case_depth_custom_fields_post
+      security:
+      - HTTPBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CustomFieldIn'
+      responses:
+        '201':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CustomFieldOut'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/case-depth/custom-fields/{field_id}:
+    patch:
+      tags:
+      - case-depth
+      summary: Update Custom Field
+      operationId: update_custom_field_api_v1_case_depth_custom_fields__field_id__patch
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: field_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Field Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CustomFieldPatch'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CustomFieldOut'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+    delete:
+      tags:
+      - case-depth
+      summary: Retire Custom Field
+      description: 'Retire, never delete: values already written stay readable and
+        attributable.'
+      operationId: retire_custom_field_api_v1_case_depth_custom_fields__field_id__delete
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: field_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Field Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CustomFieldOut'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/case-depth/cases/{case_id}/custom-values:
+    get:
+      tags:
+      - case-depth
+      summary: Get Custom Values
+      description: 'Every active field, with this case''s value or an empty one.
+
+
+        Returns the *fields*, not the stored rows, so a field defined after the
+
+        case was created still renders — the alternative is a form that silently
+
+        omits whatever was added last week.'
+      operationId: get_custom_values_api_v1_case_depth_cases__case_id__custom_values_get
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: case_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Case Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/CustomValueOut'
+                title: Response Get Custom Values Api V1 Case Depth Cases  Case Id  Custom
+                  Values Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+    put:
+      tags:
+      - case-depth
+      summary: Set Custom Values
+      operationId: set_custom_values_api_v1_case_depth_cases__case_id__custom_values_put
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: case_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Case Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CustomValuesIn'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/CustomValueOut'
+                title: Response Set Custom Values Api V1 Case Depth Cases  Case Id  Custom
+                  Values Put
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/case-depth/workload:
+    get:
+      tags:
+      - case-depth
+      summary: Workload
+      description: 'Per-analyst open, closed, overdue and mean time to close.
+
+
+        Every number is counted by this request over rows it selected. An analyst
+
+        who has closed nothing gets ``mean_hours_to_close: null`` and the console
+
+        renders that as "no data" — never ``0.0``, which reads as "instant".'
+      operationId: workload_api_v1_case_depth_workload_get
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: days
+        in: query
+        required: false
+        schema:
+          type: integer
+          maximum: 365
+          minimum: 1
+          default: 30
+          title: Days
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Workload Api V1 Case Depth Workload Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /api/v1/cases/{case_id}/attack-chain:
     get:
       tags:
@@ -2881,19 +3617,141 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/usage/organization/export.csv:
+    get:
+      tags:
+      - usage
+      summary: Export Organization Month
+      description: 'A month of usage for every tenant the caller''s organisation manages.
+
+
+        The per-tenant export names an organisation in its header and covers
+
+        one tenant, which left a provider with forty customers making forty
+
+        requests and adding up the columns by hand.
+
+
+        The tenant list is whatever `resolve_portfolio_scope` returns for this
+
+        principal, and nothing here widens it. A member scoped to three of a
+
+        forty-tenant portfolio exports three, and a principal who belongs to no
+
+        organisation is refused rather than silently handed their own tenant —
+
+        an export that quietly changes scope is worse than one that fails.'
+      operationId: export_organization_month_api_v1_usage_organization_export_csv_get
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: month
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: YYYY-MM; defaults to the current month
+          title: Month
+        description: YYYY-MM; defaults to the current month
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/usage/enforcement:
+    get:
+      tags:
+      - usage
+      summary: Get Enforcement
+      description: The limit keys this tenant enforces. Absence of a row means none.
+      operationId: get_enforcement_api_v1_usage_enforcement_get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EnforcementPolicy'
+      security:
+      - HTTPBearer: []
+    put:
+      tags:
+      - usage
+      summary: Put Enforcement
+      description: 'Turn enforcement on or off, per limit key, for the caller''s tenant.
+
+
+        The tenant is the caller''s and never a parameter: a route that let one
+
+        authenticated user switch enforcement on for somebody else''s tenant
+
+        would be a denial of service against them, delivered as a setting.
+
+
+        Every name is checked against `LIMIT_KEYS` before it is stored. A typo
+
+        would otherwise be accepted, match no key, enforce nothing, and leave
+
+        an operator reading a page that says a limit is enforced while it is
+
+        not — which is the quiet direction and the one worth refusing loudly.'
+      operationId: put_enforcement_api_v1_usage_enforcement_put
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EnforcementPolicy'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EnforcementPolicy'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+      security:
+      - HTTPBearer: []
   /api/v1/rules:
     get:
       tags:
       - detection_rules
       summary: List Rules
-      description: 'List detection rules for the tenant.
+      description: 'List the tenant''s effective detection rules.
 
 
-        Returns the tenant''s own rules, plus optionally platform-wide built-in
+        Three sources, merged: the compiled corpus the fusion engine loads, the
 
-        rules and rules sourced from MSSP-assigned rule packs (with excluded
+        tenant''s own rules, and rules from MSSP-assigned packs (with excluded
 
-        overrides removed).'
+        overrides removed). Before #1273 only the last two were read, and since
+
+        nothing in production has ever written a built-in row, a default install
+
+        answered with an empty list while the engine ran 2,609 rules.
+
+
+        ``X-Total-Count`` carries the number matching the filters, which is not
+
+        the number returned: the response stays a bare array so existing callers
+
+        are unaffected, and the page bound exists because serialising the whole
+
+        library is several megabytes.'
       operationId: list_rules_api_v1_rules_get
       security:
       - HTTPBearer: []
@@ -2928,6 +3786,54 @@ paths:
           type: boolean
           default: true
           title: Include Packs
+      - name: search
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+            maxLength: 200
+          - type: 'null'
+          description: Case-insensitive match on name, id, category, tags and techniques.
+          title: Search
+        description: Case-insensitive match on name, id, category, tags and techniques.
+      - name: severity
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Severity
+      - name: mitre
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: MITRE ATT&CK technique id, e.g. T1059.001
+          title: Mitre
+        description: MITRE ATT&CK technique id, e.g. T1059.001
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          maximum: 2000
+          minimum: 1
+          description: Maximum rules returned. The full library is several MB.
+          default: 200
+          title: Limit
+        description: Maximum rules returned. The full library is several MB.
+      - name: offset
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 0
+          default: 0
+          title: Offset
       responses:
         '200':
           description: Successful Response
@@ -2976,7 +3882,8 @@ paths:
       tags:
       - detection_rules
       summary: Get Rule
-      description: Get a detection rule by ID.
+      description: Get a detection rule by ID, stored row first and compiled corpus
+        second.
       operationId: get_rule_api_v1_rules__rule_id__get
       security:
       - HTTPBearer: []
@@ -3005,7 +3912,20 @@ paths:
       tags:
       - detection_rules
       summary: Update Rule
-      description: Update a detection rule (only tenant-owned rules).
+      description: 'Update a tenant-owned rule, or record a tuning decision on a built-in.
+
+
+        A built-in materialises its tenant row on first write, under the rule''s
+
+        own id and carrying ``provenance.source_id`` — the key fusion''s tenant
+
+        overlay joins on — so a status change here reaches the engine within one
+
+        overlay reload. ``rule_body`` is refused on a built-in: the engine loads
+
+        the compiled artefact, so a stored edit would be displayed as applied and
+
+        never run.'
       operationId: update_rule_api_v1_rules__rule_id__patch
       security:
       - HTTPBearer: []
@@ -3179,9 +4099,94 @@ paths:
       tags:
       - detection_rules
       summary: List Rules Compat
-      description: List detection rules visible to the current tenant (built-ins +
-        tenant-owned).
+      description: 'The tenant''s effective rule library: the compiled corpus plus
+        its tuning.
+
+
+        This used to read ``detection_rules`` alone and therefore answered with an
+
+        empty list on every install, while fusion loaded and fired 2,609 rules
+
+        (#1273). The filters and the page bound are not cosmetic: the whole
+
+        library serialised is several megabytes, so an unbounded list would have
+
+        traded an empty page for an unusable one.'
       operationId: list_rules_compat_api_v1_detection_rules_get
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: search
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+            maxLength: 200
+          - type: 'null'
+          title: Search
+      - name: severity
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Severity
+      - name: category
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Category
+      - name: mitre
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: MITRE ATT&CK technique id, e.g. T1059.001
+          title: Mitre
+        description: MITRE ATT&CK technique id, e.g. T1059.001
+      - name: enabled
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Enabled
+      - name: source
+        in: query
+        required: false
+        schema:
+          enum:
+          - all
+          - builtin
+          - custom
+          type: string
+          default: all
+          title: Source
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          maximum: 1000
+          minimum: 1
+          default: 100
+          title: Limit
+      - name: offset
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 0
+          default: 0
+          title: Offset
       responses:
         '200':
           description: Successful Response
@@ -3189,20 +4194,26 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ListResponse'
-      security:
-      - HTTPBearer: []
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
     post:
       tags:
       - detection_rules
       summary: Create Rule Compat
       description: Create a tenant-owned detection rule using the frontend shape.
       operationId: create_rule_compat_api_v1_detection_rules_post
+      security:
+      - HTTPBearer: []
       requestBody:
+        required: true
         content:
           application/json:
             schema:
               $ref: '#/components/schemas/CreateBody'
-        required: true
       responses:
         '201':
           description: Successful Response
@@ -3216,14 +4227,21 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
-      security:
-      - HTTPBearer: []
   /api/v1/detection/rules/{rule_id}:
     get:
       tags:
       - detection_rules
       summary: Get Rule Compat
-      description: Fetch a single rule by ID in the frontend shape.
+      description: 'Fetch a single rule by ID in the frontend shape.
+
+
+        Resolves a stored row first and the compiled catalogue second, so a
+
+        built-in''s detail page opens without a row having to exist for it. The
+
+        read never creates one: a GET that materialised would put 2,609 rows per
+
+        tenant in a table meant to hold decisions.'
       operationId: get_rule_compat_api_v1_detection_rules__rule_id__get
       security:
       - HTTPBearer: []
@@ -3252,7 +4270,27 @@ paths:
       tags:
       - detection_rules
       summary: Update Rule Compat
-      description: Update a tenant-owned rule using the frontend shape.
+      description: 'Update a tenant-owned rule, or record a tuning decision on a built-in.
+
+
+        A built-in has no row until this point. The first write creates one under
+
+        the rule''s own id, carrying ``provenance.source_id`` — the key fusion''s
+
+        tenant overlay joins on — so disabling a rule in the console stops the
+
+        engine firing it rather than setting a flag nothing reads. Before #1273
+
+        this route answered 404 for every rule the engine was actually running.
+
+
+        The compiled logic itself is not editable here: ``rule_body``,
+
+        ``language`` and ``mitre`` are refused on a built-in rather than silently
+
+        stored, because the engine loads the artefact and would ignore the edit
+
+        while the console displayed it as applied.'
       operationId: update_rule_compat_api_v1_detection_rules__rule_id__patch
       security:
       - HTTPBearer: []
@@ -3355,7 +4393,18 @@ paths:
 
         from *alerts* — this one is what an analyst opens before a tuning
 
-        sprint to answer "which techniques is my rule library blind to?".'
+        sprint to answer "which techniques is my rule library blind to?".
+
+
+        Reads the whole effective library, built-ins included. It previously read
+
+        the ``detection_rules`` table alone and therefore drew an empty heatmap
+
+        over a product shipping ATT&CK mappings for 2,609 loaded rules — the
+
+        strongest possible version of the "blind to everything" answer, and
+
+        wrong.'
       operationId: get_detection_coverage_api_v1_detection_coverage_get
       responses:
         '200':
@@ -3371,14 +4420,25 @@ paths:
       tags:
       - detection_rules
       summary: Bulk Toggle Rules
-      description: 'Enable or disable many tenant-owned rules in one round-trip.
+      description: 'Enable or disable many rules in one round-trip, built-ins included.
 
 
-        Built-in / cross-tenant rules are silently skipped (returned in
+        Built-ins used to be "silently skipped", which on a default install meant
 
-        ``skipped``) so an MSSP analyst toggling a whole category from the UI
+        every rule in the library was skipped: there were no other rules. A
 
-        doesn''t get a 403 just because one of the rules is platform-provided.'
+        built-in now materialises a tenant tuning row on first toggle, exactly as
+
+        the single-rule PATCH does, so selecting a noisy category and turning it
+
+        off reaches the engine.
+
+
+        Ids that match nothing at all are still reported in ``skipped``, because
+
+        an operator who selected forty rules and had one quietly dropped would
+
+        have no way to find out which.'
       operationId: bulk_toggle_rules_api_v1_detection_rules_bulk_toggle_post
       requestBody:
         content:
@@ -3415,7 +4475,12 @@ paths:
 
         on the Detections page so analysts have a single queue to work
 
-        instead of paginating the full library hunting for noise.'
+        instead of paginating the full library hunting for noise.
+
+
+        Built-ins are counted in ``summary.unscored`` rather than judged: none of
+
+        the three heuristics has an input for them.'
       operationId: get_detection_drift_api_v1_detection_drift_get
       responses:
         '200':
@@ -3447,7 +4512,16 @@ paths:
 
         the current confidence/FP-rate columns set by the rule engine and
 
-        operator review on every match.'
+        operator review on every match.
+
+
+        Rules with no recorded confidence are reported as ``summary.unscored``
+
+        and left out of every average, so the histogram describes the rules an
+
+        operator has actually scored rather than being flattened by a library of
+
+        placeholders.'
       operationId: get_detection_confidence_api_v1_detection_confidence_get
       responses:
         '200':
@@ -5186,6 +6260,67 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/playbook-steps/references:
+    post:
+      tags:
+      - playbooks
+      summary: Resolve the named integrations a playbook http step addresses
+      description: 'Return the enabled references this tenant has for the names asked
+        for.
+
+
+        A name that is absent or disabled is simply not in the response. The
+
+        engine reports which ones it needed and did not get; answering with an
+
+        empty string instead would substitute nothing into
+
+        ``${IDP_BASE_URL}/sessions`` and hand httpx a scheme-relative path.
+
+
+        Secret halves (bearer headers, webhook URLs) are returned to the agents
+
+        service, which is an authenticated internal peer holding the service
+
+        token, and are used for exactly one request. The engine records header
+
+        *names* in the run result, never values — the run record is readable by
+
+        anyone with access to the case.'
+      operationId: resolve_playbook_references_api_v1_playbook_steps_references_post
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: x-aisoc-service-token
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Aisoc-Service-Token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReferenceLookupRequest'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Resolve Playbook References Api V1 Playbook Steps
+                  References Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /api/v1/plugins:
     get:
       tags:
@@ -6391,6 +7526,460 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/mcp/tool-calls/authorize:
+    post:
+      tags:
+      - mcp
+      summary: Authorize Tool Call
+      description: 'Decide one tool call and record the decision.
+
+
+        No ``require_permission`` dependency: the permission a call needs depends
+
+        on the tool, and :func:`app.services.mcp_access.authorize` resolves it
+
+        from the catalogue and checks it through the principal''s own path. A
+
+        blanket dependency here would be a second, coarser authority in front of
+
+        the specific one.'
+      operationId: authorize_tool_call_api_v1_mcp_tool_calls_authorize_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/McpAuthorizeRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/McpAuthorizeResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+      security:
+      - HTTPBearer: []
+  /api/v1/mcp/tool-calls/{call_id}/complete:
+    post:
+      tags:
+      - mcp
+      summary: Complete Tool Call
+      description: 'Record how a call that was allowed turned out.
+
+
+        Authorized against the call being reported on, not by a blanket
+
+        permission. There is no single permission every MCP caller holds — a key
+
+        minted for ``alerts:read`` is a legitimate caller — so a blanket
+
+        dependency here would either be wider than the call it describes or
+
+        exclude the callers it exists for.
+
+
+        Instead this resolves the ``mcp:tool_call`` row the authorize step wrote
+
+        for this id in this tenant, and requires the principal to still hold the
+
+        permission *that call* needed. Two consequences, both wanted: a caller
+
+        cannot write an outcome for a call nobody authorized here, and a key
+
+        whose scopes were narrowed between the call and the report is refused
+
+        rather than quietly accepted.'
+      operationId: complete_tool_call_api_v1_mcp_tool_calls__call_id__complete_post
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: call_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Call Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/McpCompleteRequest'
+      responses:
+        '204':
+          description: Successful Response
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/mcp/tools:
+    get:
+      tags:
+      - mcp
+      summary: List Tools
+      operationId: list_tools_api_v1_mcp_tools_get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                items:
+                  $ref: '#/components/schemas/McpToolStateModel'
+                type: array
+                title: Response List Tools Api V1 Mcp Tools Get
+      security:
+      - HTTPBearer: []
+  /api/v1/mcp/tools/{tool_name}:
+    put:
+      tags:
+      - mcp
+      summary: Set Tool Grant
+      operationId: set_tool_grant_api_v1_mcp_tools__tool_name__put
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: tool_name
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Tool Name
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/McpToolGrantRequest'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/McpToolStateModel'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/mcp/approvals:
+    get:
+      tags:
+      - mcp
+      summary: List Approvals
+      operationId: list_approvals_api_v1_mcp_approvals_get
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: state
+        in: query
+        required: false
+        schema:
+          type: string
+          default: pending
+          title: State
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/McpApprovalModel'
+                title: Response List Approvals Api V1 Mcp Approvals Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/mcp/approvals/{approval_id}/decide:
+    post:
+      tags:
+      - mcp
+      summary: Decide Approval
+      operationId: decide_approval_api_v1_mcp_approvals__approval_id__decide_post
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: approval_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Approval Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/McpApprovalDecisionRequest'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/McpApprovalModel'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/memory/items:
+    post:
+      tags:
+      - semantic-memory
+      summary: Ingest Item
+      operationId: ingest_item_api_v1_memory_items_post
+      security:
+      - HTTPBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MemoryItemIn'
+      responses:
+        '201':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MemoryIngestResult'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+    get:
+      tags:
+      - semantic-memory
+      summary: List Items
+      operationId: list_items_api_v1_memory_items_get
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: kind
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Kind
+      - name: state
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: State
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          maximum: 500
+          minimum: 1
+          default: 100
+          title: Limit
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/MemoryItemOut'
+                title: Response List Items Api V1 Memory Items Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/memory/items/{item_id}:
+    delete:
+      tags:
+      - semantic-memory
+      summary: Retire Item
+      description: Retire, never hard-delete. 'What did the agent know' must stay
+        answerable.
+      operationId: retire_item_api_v1_memory_items__item_id__delete
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: item_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Item Id
+      - name: reason
+        in: query
+        required: false
+        schema:
+          type: string
+          default: ''
+          title: Reason
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MemoryItemOut'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/memory/recall:
+    post:
+      tags:
+      - semantic-memory
+      summary: Recall
+      description: 'Vector recall over this tenant''s memory. Every hit carries its
+        provenance.
+
+
+        ``knowledge_base:read`` is the right permission and it already exists:
+
+        ``POST /kb/query`` uses it for the full-text half of the same corpus,
+
+        and every role that triages holds it. Reusing it rather than minting a
+
+        ``memory:read`` keeps one answer to "may this principal search what the
+
+        organisation knows" — two permissions over one corpus is two answers
+
+        that can disagree, and the disagreement surfaces on the day somebody
+
+        narrows a role.'
+      operationId: recall_api_v1_memory_recall_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MemoryRecallIn'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                items:
+                  $ref: '#/components/schemas/MemoryRecallHit'
+                type: array
+                title: Response Recall Api V1 Memory Recall Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+      security:
+      - HTTPBearer: []
+  /api/v1/memory/conflicts:
+    get:
+      tags:
+      - semantic-memory
+      summary: List Conflicts
+      operationId: list_conflicts_api_v1_memory_conflicts_get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                items:
+                  $ref: '#/components/schemas/MemoryConflictOut'
+                type: array
+                title: Response List Conflicts Api V1 Memory Conflicts Get
+      security:
+      - HTTPBearer: []
+  /api/v1/memory/conflicts/{item_id}/resolve:
+    post:
+      tags:
+      - semantic-memory
+      summary: Resolve Conflict
+      description: Settle a conflict by naming which side survives. The other is retired.
+      operationId: resolve_conflict_api_v1_memory_conflicts__item_id__resolve_post
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: item_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Item Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MemoryConflictResolution'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MemoryConflictOut'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/memory/status:
+    get:
+      tags:
+      - semantic-memory
+      summary: Recall Status
+      description: 'Can this deployment recall at all, and over how much.
+
+
+        Every count here is computed from rows this request counted, not read
+
+        from a cached figure, and an unknown stays ``null`` rather than becoming
+
+        a confident zero.'
+      operationId: recall_status_api_v1_memory_status_get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+                title: Response Recall Status Api V1 Memory Status Get
+      security:
+      - HTTPBearer: []
   /api/v1/tenant-skills:
     get:
       tags:
@@ -7171,6 +8760,496 @@ paths:
           type: string
           format: uuid
           title: Role Id
+      responses:
+        '204':
+          description: Successful Response
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/elevation/requests:
+    post:
+      tags:
+      - elevation
+      summary: Request Elevation
+      description: 'Ask for a permission for a while. Confers nothing until approved.
+
+
+        The row is written with ``approved_by_id`` NULL, and
+
+        ``resolve_elevation`` requires that column to be set, so a request is
+
+        inert by construction rather than by a flag somebody could forget to
+
+        check.
+
+
+        The tenant and the requesting user come from the authenticated
+
+        principal. Neither is a body field: a caller that can name the subject
+
+        of an elevation can elevate somebody else, and a caller that can name
+
+        the tenant can elevate inside another one.'
+      operationId: request_elevation_api_v1_elevation_requests_post
+      security:
+      - HTTPBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ElevationRequest'
+      responses:
+        '201':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElevationOut'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+    get:
+      tags:
+      - elevation
+      summary: List Elevations
+      description: 'Every elevation in this tenant, newest first.
+
+
+        Scoped on the authenticated tenant in the ``WHERE`` clause as well as
+
+        by row-level security, because query-layer scoping is the control that
+
+        holds when a session is opened without the RLS context.'
+      operationId: list_elevations_api_v1_elevation_requests_get
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: state
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: State
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ElevationOut'
+                title: Response List Elevations Api V1 Elevation Requests Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/elevation/requests/{grant_id}/approve:
+    post:
+      tags:
+      - elevation
+      summary: Approve Elevation
+      description: "Approve a pending request, if you hold what it confers.\n\nTwo\
+        \ refusals, and they are different questions:\n\n* **separation of duties**\
+        \ — an approver who is the requester is a\n  requester, and the control would\
+        \ be a log line;\n* **no escalation through the approval door** — the approver\
+        \ must\n  already hold every permission the grant confers, checked by the\
+        \ same\n  function that guards role assignment and key scopes. Without it,\n\
+        \  ``elevation:approve`` would be a permission that confers every other\n\
+        \  permission, which is the wildcard by another name."
+      operationId: approve_elevation_api_v1_elevation_requests__grant_id__approve_post
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: grant_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Grant Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElevationOut'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/elevation/requests/{grant_id}/revoke:
+    post:
+      tags:
+      - elevation
+      summary: Revoke Elevation
+      description: 'End an elevation now, rather than at its expiry.
+
+
+        Gated on ``elevation:approve`` rather than a permission of its own:
+
+        whoever may confer this authority may take it back, and a separate
+
+        ``elevation:revoke`` that somebody forgot to grant would mean an
+
+        elevation nobody present can end.'
+      operationId: revoke_elevation_api_v1_elevation_requests__grant_id__revoke_post
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: grant_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Grant Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElevationOut'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/elevation/mine:
+    get:
+      tags:
+      - elevation
+      summary: My Elevations
+      description: 'This principal''s own elevations.
+
+
+        Gated on ``elevation:request`` rather than left identity-only: a
+
+        principal who may not request one has nothing to read here, and an
+
+        identity-only route is how "is this a valid session?" quietly becomes
+
+        the whole authorization decision.'
+      operationId: my_elevations_api_v1_elevation_mine_get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                items:
+                  $ref: '#/components/schemas/ElevationOut'
+                type: array
+                title: Response My Elevations Api V1 Elevation Mine Get
+      security:
+      - HTTPBearer: []
+  /api/v1/access-conditions/operators:
+    get:
+      tags:
+      - access-conditions
+      summary: Supported Operators
+      description: 'What this deployment can enforce, and why the rest is refused.
+
+
+        A console that offered every operator the evaluator implements would
+
+        let an operator configure a permanent, unexplained denial.'
+      operationId: supported_operators_api_v1_access_conditions_operators_get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+                title: Response Supported Operators Api V1 Access Conditions Operators
+                  Get
+      security:
+      - HTTPBearer: []
+  /api/v1/access-conditions:
+    get:
+      tags:
+      - access-conditions
+      summary: List Conditions
+      operationId: list_conditions_api_v1_access_conditions_get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                items:
+                  $ref: '#/components/schemas/ConditionOut'
+                type: array
+                title: Response List Conditions Api V1 Access Conditions Get
+      security:
+      - HTTPBearer: []
+    post:
+      tags:
+      - access-conditions
+      summary: Create Condition
+      description: 'Add a condition to this tenant.
+
+
+        The tenant comes from the authenticated principal. A condition is a
+
+        denial, so a caller able to name the tenant could refuse another
+
+        tenant''s work — the same shape as the MSSP override that let any
+
+        authenticated user delete a critical detection from any other tenant.
+
+
+        `role` is the same argument one level down, and it was unguarded.
+
+        Scoping a condition to a role is legislating over that role''s
+
+        exercise of a permission, so the rule is the one the rest of this
+
+        tree already applies to conferral, turned around: you may not
+
+        constrain authority you do not yourself hold. Without it a
+
+        `soc_analyst` holding `access_conditions:write` could store a
+
+        condition denying `admin` a permission outright, and the only
+
+        symptom an administrator would see is their own access failing for
+
+        a reason the console attributes to a rule they cannot edit.
+
+
+        Measured against `resolved_permissions`, never the static role map:
+
+        `require_permission` admitted this caller on the database-backed set,
+
+        and judging the grant against the broader static one is how six call
+
+        sites passed this gate while still escalating.'
+      operationId: create_condition_api_v1_access_conditions_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConditionIn'
+        required: true
+      responses:
+        '201':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConditionOut'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+      security:
+      - HTTPBearer: []
+  /api/v1/access-conditions/{condition_id}:
+    patch:
+      tags:
+      - access-conditions
+      summary: Set Condition Enabled
+      description: 'Turn a condition on or off without deleting it.
+
+
+        Only ``enabled`` is mutable. Editing a stored condition''s operator or
+
+        value in place would change what an audit entry referring to it meant;
+
+        a replaced rule is a new row.'
+      operationId: set_condition_enabled_api_v1_access_conditions__condition_id__patch
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: condition_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Condition Id
+      - name: enabled
+        in: query
+        required: true
+        schema:
+          type: boolean
+          title: Enabled
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConditionOut'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+    delete:
+      tags:
+      - access-conditions
+      summary: Delete Condition
+      operationId: delete_condition_api_v1_access_conditions__condition_id__delete
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: condition_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Condition Id
+      responses:
+        '204':
+          description: Successful Response
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/workload-identities:
+    get:
+      tags:
+      - workload-identities
+      summary: List Workload Identities
+      description: 'Every workload credential, with no secret material.
+
+
+        ``last_used_at`` is the column that matters operationally: it is what
+
+        tells an operator a credential they are about to revoke is dead.'
+      operationId: list_workload_identities_api_v1_workload_identities_get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                items:
+                  additionalProperties: true
+                  type: object
+                type: array
+                title: Response List Workload Identities Api V1 Workload Identities
+                  Get
+      security:
+      - HTTPBearer: []
+    post:
+      tags:
+      - workload-identities
+      summary: Create Workload Identity
+      description: Mint a credential for one internal service.
+      operationId: create_workload_identity_api_v1_workload_identities_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WorkloadIn'
+        required: true
+      responses:
+        '201':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkloadCreated'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+      security:
+      - HTTPBearer: []
+  /api/v1/workload-identities/{identity_id}/rotate:
+    post:
+      tags:
+      - workload-identities
+      summary: Rotate Workload Identity
+      description: 'Issue a new secret and keep the old one alive for a grace window.
+
+
+        Rotation in place is the whole reason the ``previous_*`` columns exist.
+
+        The only path before was create, update every caller, delete — which is
+
+        downtime, so most deployments never rotated at all, which is how one
+
+        leaked log line became permanent internal access.'
+      operationId: rotate_workload_identity_api_v1_workload_identities__identity_id__rotate_post
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: identity_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Identity Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkloadCreated'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/workload-identities/{identity_id}:
+    delete:
+      tags:
+      - workload-identities
+      summary: Revoke Workload Identity
+      description: 'Revoke immediately, including the superseded secret.
+
+
+        Clearing ``previous_hash`` is the half that is easy to miss: a
+
+        revocation that left a rotation''s grace window intact would leave the
+
+        credential working for up to a day after an operator believed they had
+
+        killed it.'
+      operationId: revoke_workload_identity_api_v1_workload_identities__identity_id__delete
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: identity_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Identity Id
       responses:
         '204':
           description: Successful Response
@@ -8713,6 +10792,67 @@ paths:
                 $ref: '#/components/schemas/HTTPValidationError'
       security:
       - HTTPBearer: []
+  /api/v1/health:
+    get:
+      tags:
+      - health
+      summary: Health Liveness
+      description: 'Liveness: the process answers HTTP. Nothing else is claimed.
+
+
+        Deliberately touches no store — a liveness probe that fails when a
+
+        dependency is down invites the orchestrator to restart a healthy
+
+        process, which converts an outage into an outage plus a restart storm.
+
+        Whether the service can do its *job* is ``/ready``''s question.'
+      operationId: health_liveness_api_v1_health_get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+                title: Response Health Liveness Api V1 Health Get
+  /api/v1/health/ready:
+    get:
+      tags:
+      - health
+      summary: Health Ready
+      description: 'Readiness: can this service do its job, named per dependency.
+
+
+        ``database`` is **block**: the API is the system of record''s front door,
+
+        so without Postgres the status code goes 503 and a load balancer should
+
+        stop sending traffic here. The body still names every dependency —
+
+        failing *with the reason* is the whole point, and the chaos grader reads
+
+        the keys out of the 503 body.
+
+
+        ``cache`` is **degrade**: Redis is a cache and every read falls through
+
+        to its source, so its loss is reported (`cache: false`) while the status
+
+        stays 200 and the service keeps serving. Failing readiness over a cache
+
+        would pull the API out of the load balancer to fix a cache.'
+      operationId: health_ready_api_v1_health_ready_get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+                title: Response Health Ready Api V1 Health Ready Get
   /api/v1/insights/soc:
     get:
       tags:
@@ -9529,6 +11669,78 @@ paths:
                 $ref: '#/components/schemas/HTTPValidationError'
       security:
       - HTTPBearer: []
+  /api/v1/kill-switch/global/engage:
+    post:
+      tags:
+      - autonomy
+      summary: Freeze autonomous closure and action dispatch for every tenant
+      description: 'Stop autonomous closure and dispatch across the whole deployment.
+
+
+        One row, upserted. The conflict target is the expression index
+
+        `aisoc_kill_switch_global_idx ON aisoc_kill_switch ((TRUE)) WHERE tenant_id
+
+        IS NULL`, which is what keeps the global switch a singleton rather than a
+
+        pile of rows a reader would have to reconcile at 3am.'
+      operationId: engage_global_api_v1_kill_switch_global_engage_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EngageRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KillSwitchState'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+      security:
+      - HTTPBearer: []
+  /api/v1/kill-switch/global/release:
+    post:
+      tags:
+      - autonomy
+      summary: Resume autonomous closure and action dispatch across every tenant
+      description: 'Release the platform-wide stop.
+
+
+        A tenant that engaged its own switch keeps it: the two scopes are
+
+        independent and neither needs the other''s agreement, so releasing globally
+
+        must not silently resume a tenant that asked to stay stopped.'
+      operationId: release_global_api_v1_kill_switch_global_release_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReleaseRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KillSwitchState'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+      security:
+      - HTTPBearer: []
   /api/v1/ledger/{run_id}/publish/preview:
     post:
       tags:
@@ -10253,6 +12465,279 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/outbound-webhooks:
+    get:
+      tags:
+      - integrations
+      summary: List Webhooks
+      operationId: list_webhooks_api_v1_outbound_webhooks_get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                items:
+                  $ref: '#/components/schemas/WebhookOut'
+                type: array
+                title: Response List Webhooks Api V1 Outbound Webhooks Get
+      security:
+      - HTTPBearer: []
+    post:
+      tags:
+      - integrations
+      summary: Create Webhook
+      description: 'Create a destination and mint its signing secret.
+
+
+        The secret is returned **once**, here, and never again — it is stored
+
+        vault-encrypted and the read projection carries only ``has_secret``.
+
+        Returning it on every read would put a live credential in every console
+
+        response and every browser cache that held one.'
+      operationId: create_webhook_api_v1_outbound_webhooks_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WebhookCreate'
+        required: true
+      responses:
+        '201':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+                title: Response Create Webhook Api V1 Outbound Webhooks Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+      security:
+      - HTTPBearer: []
+  /api/v1/outbound-webhooks/{webhook_id}:
+    patch:
+      tags:
+      - integrations
+      summary: Update Webhook
+      operationId: update_webhook_api_v1_outbound_webhooks__webhook_id__patch
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: webhook_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Webhook Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WebhookUpdate'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookOut'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+    delete:
+      tags:
+      - integrations
+      summary: Delete Webhook
+      operationId: delete_webhook_api_v1_outbound_webhooks__webhook_id__delete
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: webhook_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Webhook Id
+      responses:
+        '204':
+          description: Successful Response
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/outbound-webhooks/{webhook_id}/rotate-secret:
+    post:
+      tags:
+      - integrations
+      summary: Rotate Secret
+      operationId: rotate_secret_api_v1_outbound_webhooks__webhook_id__rotate_secret_post
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: webhook_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Webhook Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Rotate Secret Api V1 Outbound Webhooks  Webhook Id  Rotate
+                  Secret Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/outbound-webhooks/deliveries:
+    get:
+      tags:
+      - integrations
+      summary: List Deliveries
+      operationId: list_deliveries_api_v1_outbound_webhooks_deliveries_get
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: status
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+            pattern: ^(pending|delivered|failed|dead)$
+          - type: 'null'
+          title: Status
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          maximum: 500
+          minimum: 1
+          default: 100
+          title: Limit
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DeliveryOut'
+                title: Response List Deliveries Api V1 Outbound Webhooks Deliveries
+                  Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/outbound-webhooks/dead-letters:
+    get:
+      tags:
+      - integrations
+      summary: List Dead Letters
+      description: 'Deliveries that exhausted their retries or were refused outright.
+
+
+        A named route rather than ``?status=dead`` on the list above, because
+
+        this is the one an operator is told to check and a filter nobody
+
+        applies is a filter nobody sees.'
+      operationId: list_dead_letters_api_v1_outbound_webhooks_dead_letters_get
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          maximum: 500
+          minimum: 1
+          default: 100
+          title: Limit
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DeliveryOut'
+                title: Response List Dead Letters Api V1 Outbound Webhooks Dead Letters
+                  Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/outbound-webhooks/deliveries/{delivery_id}/replay:
+    post:
+      tags:
+      - integrations
+      summary: Replay Delivery
+      description: 'Send a dead letter again, with the body the first attempt sent.
+
+
+        Synchronous and single-attempt: an operator replaying by hand has just
+
+        fixed something and wants to know now whether it worked, not in thirty
+
+        seconds. The attempt counter keeps climbing, so a replay cannot be used
+
+        to loop past the ladder.'
+      operationId: replay_delivery_api_v1_outbound_webhooks_deliveries__delivery_id__replay_post
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: delivery_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Delivery Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeliveryOut'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /api/v1/passkeys/register/begin:
     post:
       tags:
@@ -10814,6 +13299,89 @@ paths:
           type: string
           format: uuid
           title: Token Id
+      responses:
+        '204':
+          description: Successful Response
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/verification-policies:
+    get:
+      tags:
+      - settings
+      summary: List Policies
+      description: Every class this tenant has opted into. Empty means none.
+      operationId: list_policies_api_v1_verification_policies_get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                items:
+                  $ref: '#/components/schemas/VerificationPolicyOut'
+                type: array
+                title: Response List Policies Api V1 Verification Policies Get
+      security:
+      - HTTPBearer: []
+    put:
+      tags:
+      - settings
+      summary: Enable Class
+      description: 'Allow automatic verification prompts for one alert class.
+
+
+        Idempotent: re-enabling an already-enabled class re-stamps who asked for
+
+        it and when, which is the record a review after a complaint needs.'
+      operationId: enable_class_api_v1_verification_policies_put
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VerificationPolicyIn'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VerificationPolicyOut'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+      security:
+      - HTTPBearer: []
+  /api/v1/verification-policies/{alert_class}:
+    delete:
+      tags:
+      - settings
+      summary: Disable Class
+      description: 'Stop automatic prompts for one class.
+
+
+        Answers 204 whether or not a row existed. A tenant revoking a grant
+
+        wants it gone; telling them it was already gone is not useful and a 404
+
+        here would read as "the revocation failed".'
+      operationId: disable_class_api_v1_verification_policies__alert_class__delete
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: alert_class
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Alert Class
       responses:
         '204':
           description: Successful Response
@@ -13036,7 +15604,22 @@ paths:
 
         overrides), the hard-coded defaults, and an ``overridden`` flag the UI
 
-        uses to render a "modified from default" badge.'
+        uses to render a "modified from default" badge.
+
+
+        Every action also carries whether it would *actually* execute without a
+
+        human, resolved from the tenant''s maturity tier and the verb''s capability
+
+        contract by ``app/services/autonomy_effective.py``. The thresholds and
+
+        that answer are different facts, and the console previously derived the
+
+        second from the first: a threshold below 1.0 was read as "auto-executes",
+
+        which on stock defaults made nineteen of nineteen actions autonomous and
+
+        put an Autopilot badge on a deployment that queues all of them.'
       operationId: get_autonomy_policy_api_v1_autonomy_policy_get
       responses:
         '200':
@@ -14177,6 +16760,225 @@ paths:
                 $ref: '#/components/schemas/HTTPValidationError'
       security:
       - HTTPBearer: []
+  /api/v1/phishing/reports:
+    post:
+      tags:
+      - phishing
+      summary: Intake a reported phishing message
+      description: 'Take a reported message from one of the three intake doors.
+
+
+        Distinct from ``/submit``, which takes an artefact an analyst typed. This
+
+        takes a *message somebody received*, so it carries the two fields the
+
+        response turns on and ``/submit`` has never had: the internet message id
+
+        that finds the copies, and the recipients that bound the purge.'
+      operationId: report_api_v1_phishing_reports_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReportRequest'
+        required: true
+      responses:
+        '201':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReportResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+      security:
+      - HTTPBearer: []
+  /api/v1/phishing/campaigns:
+    get:
+      tags:
+      - phishing
+      summary: List phishing campaigns
+      operationId: list_campaigns_api_v1_phishing_campaigns_get
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          maximum: 200
+          minimum: 1
+          default: 50
+          title: Limit
+      - name: offset
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 0
+          default: 0
+          title: Offset
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: true
+                title: Response List Campaigns Api V1 Phishing Campaigns Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/phishing/campaigns/{campaign_id}:
+    get:
+      tags:
+      - phishing
+      summary: Get a phishing campaign and its recipients
+      operationId: get_campaign_api_v1_phishing_campaigns__campaign_id__get
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: campaign_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Campaign Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Get Campaign Api V1 Phishing Campaigns  Campaign Id  Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/phishing/campaigns/{campaign_id}/purge:
+    post:
+      tags:
+      - phishing
+      summary: Propose or run a purge across a campaign's recipients
+      description: 'One proposal, one dispatch per mailbox, each graded on its own.
+
+
+        ``actions:execute`` rather than ``cases:write``: this reaches out of the
+
+        platform and removes mail, so it is gated like every other action
+
+        surface in this service rather than like a case note.
+
+
+        Deliberately **not** ``actions:contain``, which is what the capability
+
+        contract declares. That string is held by no role in ``ROLE_PERMISSIONS``
+
+        except the two wildcards, so gating the route on it would ship a route
+
+        only an administrator could reach while reading as though analysts
+
+        could. The contract''s permission is enforced at the dispatcher, where a
+
+        principal exists; here the question is who may *ask*, and
+
+        ``actions:execute`` is the permission this service already means by
+
+        that — its own comment says it "gates the dry-run preview only; a live
+
+        containment goes through the approval path", which is exactly the split
+
+        between ``execute: false`` and ``execute: true`` below.'
+      operationId: purge_campaign_api_v1_phishing_campaigns__campaign_id__purge_post
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: campaign_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Campaign Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PurgeRequest'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Purge Campaign Api V1 Phishing Campaigns  Campaign
+                  Id  Purge Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/phishing/campaigns/{campaign_id}/restore:
+    post:
+      tags:
+      - phishing
+      summary: Restore a purged campaign's messages
+      description: 'The reverse of the purge, over the mailboxes it actually executed
+        on.
+
+
+        Only rows the purge executed on are restored. Attempting a restore on a
+
+        mailbox that was previewed, failed, or never held the message would
+
+        report work that did not happen.'
+      operationId: restore_campaign_api_v1_phishing_campaigns__campaign_id__restore_post
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: campaign_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Campaign Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Restore Campaign Api V1 Phishing Campaigns  Campaign
+                  Id  Restore Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /api/v1/phishing/submissions:
     get:
       tags:
@@ -14797,6 +17599,390 @@ paths:
                 $ref: '#/components/schemas/HTTPValidationError'
       security:
       - HTTPBearer: []
+  /api/v1/taxii2/:
+    get:
+      tags:
+      - taxii
+      summary: Discovery
+      description: '``GET /taxii2/`` — what this server is and where its API roots
+        are.'
+      operationId: discovery_api_v1_taxii2__get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+      security:
+      - HTTPBearer: []
+  /api/v1/taxii2/{api_root}/:
+    get:
+      tags:
+      - taxii
+      summary: Api Root Information
+      description: '``GET /taxii2/{api-root}/`` — the limits a client must respect.'
+      operationId: api_root_information_api_v1_taxii2__api_root___get
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: api_root
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Api Root
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/taxii2/{api_root}/collections/:
+    get:
+      tags:
+      - taxii
+      summary: List Collections
+      description: '``GET /taxii2/{api-root}/collections/``.'
+      operationId: list_collections_api_v1_taxii2__api_root__collections__get
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: api_root
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Api Root
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/taxii2/{api_root}/collections/{collection_ref}/:
+    get:
+      tags:
+      - taxii
+      summary: Get Collection
+      description: '``GET /taxii2/{api-root}/collections/{id}/``.'
+      operationId: get_collection_api_v1_taxii2__api_root__collections__collection_ref___get
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: api_root
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Api Root
+      - name: collection_ref
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Collection Ref
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/taxii2/{api_root}/collections/{collection_ref}/objects/:
+    get:
+      tags:
+      - taxii
+      summary: Get Objects
+      description: '``GET /taxii2/{api-root}/collections/{id}/objects/``.'
+      operationId: get_objects_api_v1_taxii2__api_root__collections__collection_ref__objects__get
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: api_root
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Api Root
+      - name: collection_ref
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Collection Ref
+      - name: added_after
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Added After
+      - name: limit
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: integer
+            maximum: 1000
+            minimum: 1
+          - type: 'null'
+          title: Limit
+      - name: next
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Next
+      - name: match[id]
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Match[Id]
+      - name: match[type]
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Match[Type]
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+    post:
+      tags:
+      - taxii
+      summary: Refuse Write
+      description: 'Inbound TAXII writes are refused, and say why.
+
+
+        A 405 would read as "wrong verb" and send the integrator looking for
+
+        the right one. This is a deliberate posture, so it is a 403 that names
+
+        it.'
+      operationId: refuse_write_api_v1_taxii2__api_root__collections__collection_ref__objects__post
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: api_root
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Api Root
+      - name: collection_ref
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Collection Ref
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/taxii2/{api_root}/collections/{collection_ref}/manifest/:
+    get:
+      tags:
+      - taxii
+      summary: Get Manifest
+      description: '``GET /taxii2/{api-root}/collections/{id}/manifest/``.
+
+
+        The manifest is what a client polls to decide what to fetch, so it
+
+        pages by the same cursor as ``objects``. Two different orderings would
+
+        let a client hold a manifest entry it can never reach.'
+      operationId: get_manifest_api_v1_taxii2__api_root__collections__collection_ref__manifest__get
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: api_root
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Api Root
+      - name: collection_ref
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Collection Ref
+      - name: added_after
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Added After
+      - name: limit
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: integer
+            maximum: 1000
+            minimum: 1
+          - type: 'null'
+          title: Limit
+      - name: next
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Next
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/taxii/collections:
+    get:
+      tags:
+      - taxii
+      summary: List Managed Collections
+      operationId: list_managed_collections_api_v1_taxii_collections_get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                items:
+                  $ref: '#/components/schemas/CollectionOut'
+                type: array
+                title: Response List Managed Collections Api V1 Taxii Collections
+                  Get
+      security:
+      - HTTPBearer: []
+    post:
+      tags:
+      - taxii
+      summary: Create Managed Collection
+      operationId: create_managed_collection_api_v1_taxii_collections_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CollectionCreate'
+        required: true
+      responses:
+        '201':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CollectionOut'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+      security:
+      - HTTPBearer: []
+  /api/v1/taxii/collections/{collection_id}:
+    delete:
+      tags:
+      - taxii
+      summary: Delete Managed Collection
+      operationId: delete_managed_collection_api_v1_taxii_collections__collection_id__delete
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: collection_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Collection Id
+      responses:
+        '204':
+          description: Successful Response
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/taxii/unpublished-types:
+    get:
+      tags:
+      - taxii
+      summary: Unpublished Types
+      description: 'Which IOC types this server will not publish, and why.
+
+
+        An absence a tenant cannot explain reads as a bug. Published as data
+
+        rather than documented in prose so the answer cannot drift from the
+
+        table the projection actually uses.'
+      operationId: unpublished_types_api_v1_taxii_unpublished_types_get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+                title: Response Unpublished Types Api V1 Taxii Unpublished Types Get
+      security:
+      - HTTPBearer: []
   /api/v1/threat-intel/indicators:
     get:
       tags:
@@ -14873,6 +18059,22 @@ paths:
       tags:
       - threat-intel
       summary: List Iocs
+      description: '**This tenant''s own** IOCs, from Postgres `threat_intel_iocs`.
+
+
+        Not the platform''s feed intelligence, and the distinction is the whole
+
+        content of issue #1278: this route and `/indicators` sit next to each
+
+        other and read different stores. `/indicators` serves the CISA KEV
+
+        catalogue out of Qdrant — about 1,700 entries on a stock CORE install.
+
+        This table is written **only** by `POST /threat-intel/iocs`, so it is
+
+        empty until somebody submits to it, and an empty response here is not
+
+        evidence that the KEV feed failed.'
       operationId: list_iocs_api_v1_threat_intel_iocs_get
       security:
       - HTTPBearer: []
@@ -15092,6 +18294,26 @@ paths:
       tags:
       - threat-intel
       summary: List Feeds
+      description: '**Feeds this tenant has registered**, from Postgres `threat_intel_feeds`.
+
+
+        Written only by `POST /threat-intel/feeds`, so it is empty until an
+
+        operator adds one. It deliberately does **not** list the platform''s
+
+        built-in feeds: the CISA KEV poller is an in-process job in
+
+        `services/threatintel` and owns no row here, which is why a stock CORE
+
+        install sees `[]` here while `/indicators` serves the catalogue that
+
+        poller fetched (issue #1278). Listing the built-in poller here would
+
+        mean synthesising an id and a `tenant_id` for a row that does not
+
+        exist, which is the fabrication pattern this project has paid for
+
+        before; `/indicators` is where its output is observable.'
       operationId: list_feeds_api_v1_threat_intel_feeds_get
       responses:
         '200':
@@ -16198,6 +19420,155 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/hunt-reports/from-hunt/{saved_hunt_id}:
+    post:
+      tags:
+      - hunt-reports
+      summary: From Hunt
+      operationId: from_hunt_api_v1_hunt_reports_from_hunt__saved_hunt_id__post
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: saved_hunt_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Saved Hunt Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BuildRequest'
+      responses:
+        '201':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HuntReportOut'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/hunt-reports/from-retro-hunt/{sighting_id}:
+    post:
+      tags:
+      - hunt-reports
+      summary: From Retro Hunt
+      operationId: from_retro_hunt_api_v1_hunt_reports_from_retro_hunt__sighting_id__post
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: sighting_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Sighting Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BuildRequest'
+      responses:
+        '201':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HuntReportOut'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/hunt-reports:
+    get:
+      tags:
+      - hunt-reports
+      summary: List Reports
+      operationId: list_reports_api_v1_hunt_reports_get
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: case_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+            format: uuid
+          - type: 'null'
+          title: Case Id
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          maximum: 200
+          minimum: 1
+          default: 50
+          title: Limit
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/HuntReportOut'
+                title: Response List Reports Api V1 Hunt Reports Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/hunt-reports/{report_id}:
+    get:
+      tags:
+      - hunt-reports
+      summary: Get Report
+      operationId: get_report_api_v1_hunt_reports__report_id__get
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: report_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Report Id
+      - name: format
+        in: query
+        required: false
+        schema:
+          type: string
+          pattern: ^(json|html|pdf)$
+          default: json
+          title: Format
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /api/v1/retro-hunts/settings:
     get:
       tags:
@@ -16511,6 +19882,53 @@ paths:
                 $ref: '#/components/schemas/LlmCredentialTestResult'
       security:
       - HTTPBearer: []
+  /api/v1/llm/credentials/models:
+    post:
+      tags:
+      - llm
+      summary: List the chat models a custom OpenAI-compatible endpoint serves
+      description: 'Ask ``GET {base_url}/models`` and return the chat-capable entries.
+
+
+        For the ``custom`` provider, whose model was otherwise a hand-typed id.
+
+
+        `settings:write`, like `/test`: this dials an operator-supplied URL with
+
+        private addresses permitted, which is not something a read-only role
+
+        should be able to point at the network.
+
+
+        The stored key goes only to the stored base URL. A form that has changed
+
+        the base URL and left the key blank gets a keyless request, not the saved
+
+        key sent somewhere it was never configured to go; an endpoint that needs a
+
+        key then answers 401 and the detail says so.'
+      operationId: discover_llm_models_api_v1_llm_credentials_models_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LlmModelDiscoveryRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LlmModelDiscoveryResult'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+      security:
+      - HTTPBearer: []
   /api/v1/threatintel/stix/indicators:
     get:
       tags:
@@ -16660,7 +20078,27 @@ paths:
       tags:
       - Threat Intelligence
       summary: List Taxii Collections
-      description: List TAXII 2.1 collections for server compatibility.
+      description: 'Demo-only sample of TAXII collection metadata.
+
+
+        This is **not** the TAXII server. It returns a fixed sample list and is
+
+        gated behind demo mode, and it predates the real implementation added
+
+        for depth item 4.2, which lives at ``/api/v1/taxii2/`` and serves
+
+        discovery, API root, collections, objects, manifest and ``added_after``
+
+        pagination over this tenant''s own indicator store.
+
+
+        Kept rather than deleted because removing a published operation is a
+
+        breaking change to the committed OpenAPI document; said plainly here
+
+        because two surfaces both called "TAXII collections" is how a reader
+
+        concludes the product has two TAXII implementations.'
       operationId: list_taxii_collections_api_v1_threatintel_stix_taxii_collections_get
       responses:
         '200':
@@ -17316,6 +20754,186 @@ paths:
                 $ref: '#/components/schemas/HTTPValidationError'
       security:
       - HTTPBearer: []
+  /api/v1/lake/estimate:
+    post:
+      tags:
+      - lake
+      summary: Estimate Lake Sql
+      description: 'What would this query read, and where does that data live?
+
+
+        Charged at the schema rate rather than the query rate: an estimate
+
+        runs ``EXPLAIN ESTIMATE`` and two system-table reads, none of which
+
+        touch tenant data. Pricing it like a scan would train analysts to
+
+        skip the estimate, which is the opposite of the point.'
+      operationId: estimate_lake_sql_api_v1_lake_estimate_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LakeEstimateRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LakeEstimateResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+      security:
+      - HTTPBearer: []
+  /api/v1/lake/query-jobs:
+    post:
+      tags:
+      - lake
+      summary: Submit Lake Query Job
+      description: 'Submit a query that is allowed to take longer than the synchronous
+        bound.
+
+
+        The estimate is taken once, here, and stored on the job. It is never
+
+        recomputed: it is the number the analyst agreed to before the scan
+
+        started, and moving it afterwards would make the record of what they
+
+        were told untrue.'
+      operationId: submit_lake_query_job_api_v1_lake_query_jobs_post
+      security:
+      - HTTPBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LakeQueryJobRequest'
+      responses:
+        '202':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LakeQueryJobResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+    get:
+      tags:
+      - lake
+      summary: List Lake Query Jobs
+      operationId: list_lake_query_jobs_api_v1_lake_query_jobs_get
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          default: 50
+          title: Limit
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/LakeQueryJobResponse'
+                title: Response List Lake Query Jobs Api V1 Lake Query Jobs Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/lake/query-jobs/{job_id}:
+    get:
+      tags:
+      - lake
+      summary: Get Lake Query Job
+      description: 'One job''s state, with a live progress read while it is running.
+
+
+        The live read is folded into the response but is **not** written back
+
+        over a terminal state: a late progress row must not make a finished
+
+        job look like it started again.'
+      operationId: get_lake_query_job_api_v1_lake_query_jobs__job_id__get
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: job_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Job Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LakeQueryJobResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/lake/query-jobs/{job_id}/cancel:
+    post:
+      tags:
+      - lake
+      summary: Cancel Lake Query Job
+      description: 'Stop a running scan.
+
+
+        A job that has already ended answers 409 rather than being quietly
+
+        re-marked: cancelling a finished job would rewrite the record of what
+
+        happened.'
+      operationId: cancel_lake_query_job_api_v1_lake_query_jobs__job_id__cancel_post
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: job_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Job Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LakeQueryJobResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /api/v1/lake/schema:
     get:
       tags:
@@ -17552,12 +21170,345 @@ paths:
                 $ref: '#/components/schemas/RealtimeTicket'
       security:
       - HTTPBearer: []
+  /api/v1/ai-assets:
+    get:
+      tags:
+      - ai-estate
+      summary: List Ai Assets
+      description: The estate, newest sighting first.
+      operationId: list_ai_assets_api_v1_ai_assets_get
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: kind
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: Filter to one asset kind.
+          title: Kind
+        description: Filter to one asset kind.
+      - name: unlinked
+        in: query
+        required: false
+        schema:
+          type: boolean
+          description: Only assets with no person linked.
+          default: false
+          title: Unlinked
+        description: Only assets with no person linked.
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          maximum: 200
+          minimum: 1
+          default: 50
+          title: Limit
+      - name: offset
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 0
+          default: 0
+          title: Offset
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AiAssetListResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/ai-assets/{asset_id}:
+    get:
+      tags:
+      - ai-estate
+      summary: Get Ai Asset
+      operationId: get_ai_asset_api_v1_ai_assets__asset_id__get
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: asset_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Asset Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AiAssetModel'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/ai-assets/{asset_id}/sanction:
+    post:
+      tags:
+      - ai-estate
+      summary: Sanction Ai Asset
+      description: 'Approve an asset, refuse it, or put it back to undecided.
+
+
+        The risk score is recomputed here rather than left stale, through the
+
+        same `score_risk` the recorder calls, because the sanction decision is
+
+        one of its inputs: an asset that has just been refused and is still
+
+        running is a different exposure from one nobody had looked at.'
+      operationId: sanction_ai_asset_api_v1_ai_assets__asset_id__sanction_post
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: asset_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Asset Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SanctionRequest'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AiAssetModel'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/war-rooms/cases/{case_id}:
+    post:
+      tags:
+      - war-rooms
+      summary: Open For Case
+      description: 'One action: create the channel, invite, post the header, record
+        it.
+
+
+        Fails loudly. The analyst pressed a button and is entitled to know when
+
+        it did not work — a 202 "we''ll try" here would be the toast-only control
+
+        this console is not allowed to ship.'
+      operationId: open_for_case_api_v1_war_rooms_cases__case_id__post
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: case_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Case Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OpenWarRoomRequest'
+      responses:
+        '201':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WarRoomModel'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+    get:
+      tags:
+      - war-rooms
+      summary: List For Case
+      operationId: list_for_case_api_v1_war_rooms_cases__case_id__get
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: case_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Case Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/WarRoomModel'
+                title: Response List For Case Api V1 War Rooms Cases  Case Id  Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/war-rooms/{war_room_id}/sync:
+    post:
+      tags:
+      - war-rooms
+      summary: Sync
+      operationId: sync_api_v1_war_rooms__war_room_id__sync_post
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: war_room_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: War Room Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SyncResult'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/war-rooms/{war_room_id}/close:
+    post:
+      tags:
+      - war-rooms
+      summary: Close
+      description: 'Stop mirroring. The channel itself is left alone, deliberately.
+
+
+        Archiving somebody''s channel from a console button is a bigger action
+
+        than it looks: the transcript is often the incident''s own record and the
+
+        people in it did not press anything.'
+      operationId: close_api_v1_war_rooms__war_room_id__close_post
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: war_room_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: War Room Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WarRoomModel'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/war-rooms/{war_room_id}/decision:
+    post:
+      tags:
+      - war-rooms
+      summary: Channel Decision
+      description: 'A decision taken in the channel, delivered by the bot.
+
+
+        Service-token only. See the module header: the bot has verified the
+
+        vendor''s signature and this service cannot, so the token is the whole
+
+        trust relationship and ``CHANNEL_DECISIONS`` is its blast radius.'
+      operationId: channel_decision_api_v1_war_rooms__war_room_id__decision_post
+      parameters:
+      - name: war_room_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: War Room Id
+      - name: X-AiSOC-Service-Token
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Aisoc-Service-Token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChannelDecisionRequest'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Channel Decision Api V1 War Rooms  War Room Id  Decision
+                  Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /auth/saml/login:
     get:
       tags:
       - auth-saml
       summary: Saml Login
-      description: Initiate SAML SSO — redirect to IdP.
+      description: 'Initiate SAML SSO — redirect to the IdP this connection names.
+
+
+        `issuer` is optional and the console does not send one: a deployment
+
+        with a single enabled SAML connection has an unambiguous answer. It
+
+        exists so a deployment with several can link one button per provider.'
       operationId: saml_login_auth_saml_login_get
       parameters:
       - name: redirect
@@ -17567,6 +21518,14 @@ paths:
           type: string
           default: /
           title: Redirect
+      - name: issuer
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Issuer
       responses:
         '200':
           description: Successful Response
@@ -17610,14 +21569,38 @@ paths:
       tags:
       - auth-saml
       summary: Saml Logout
-      description: Initiate SAML SLO.
+      description: 'Initiate SAML SLO, at the SingleLogoutService the connection names.
+
+
+        Resolved the same way `/login` is. A deployment whose IdP comes from a
+
+        connection has no `SAML_IDP_SLO_URL`, so this used to build a logout
+
+        request against an empty endpoint and 500 on the way out of a session.
+
+        An SLO that cannot be initiated is a local logout, not an error.'
       operationId: saml_logout_auth_saml_logout_get
+      parameters:
+      - name: issuer
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Issuer
       responses:
         '200':
           description: Successful Response
           content:
             application/json:
               schema: {}
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /auth/oidc/login:
     get:
       tags:
@@ -18394,6 +22377,29 @@ components:
           - type: string
           - type: 'null'
           title: Last Reason
+        capability:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Capability
+        executable:
+          type: boolean
+          title: Executable
+          default: false
+        effective_auto_execute:
+          type: boolean
+          title: Effective Auto Execute
+          default: false
+        auto_executes_at_any_tier:
+          type: boolean
+          title: Auto Executes At Any Tier
+          default: false
+        effective_tier:
+          type: string
+          title: Effective Tier
+        effective_reason:
+          type: string
+          title: Effective Reason
       type: object
       required:
       - action
@@ -18401,6 +22407,8 @@ components:
       - thresholds
       - default_thresholds
       - overridden
+      - effective_tier
+      - effective_reason
       title: ActionPolicy
     AddAlertsRequest:
       properties:
@@ -18420,10 +22428,6 @@ components:
           type: string
           minLength: 1
           title: Body
-        is_system:
-          type: boolean
-          title: Is System
-          default: false
       type: object
       required:
       - body
@@ -18818,6 +22822,104 @@ components:
         and it is the more flattering of the two to print by accident in the
 
         abstention column and the more damning in the agreement column.'
+    AiAssetListResponse:
+      properties:
+        items:
+          items:
+            $ref: '#/components/schemas/AiAssetModel'
+          type: array
+          title: Items
+        total:
+          type: integer
+          title: Total
+        observedSources:
+          items:
+            type: string
+          type: array
+          title: Observedsources
+      type: object
+      required:
+      - items
+      - total
+      title: AiAssetListResponse
+    AiAssetModel:
+      properties:
+        id:
+          type: string
+          title: Id
+        kind:
+          type: string
+          title: Kind
+        externalId:
+          type: string
+          title: Externalid
+        displayName:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Displayname
+        vendor:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Vendor
+        discoverySource:
+          type: string
+          title: Discoverysource
+        principal:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Principal
+        device:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Device
+        effectivePermissions:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Effectivepermissions
+        attributes:
+          additionalProperties: true
+          type: object
+          title: Attributes
+        risk:
+          type: integer
+          title: Risk
+        riskReasons:
+          items:
+            type: string
+          type: array
+          title: Riskreasons
+        sanctioned:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Sanctioned
+        firstSeen:
+          type: string
+          title: Firstseen
+        lastSeen:
+          type: string
+          title: Lastseen
+        observationCount:
+          type: integer
+          title: Observationcount
+      type: object
+      required:
+      - id
+      - kind
+      - externalId
+      - discoverySource
+      - risk
+      - firstSeen
+      - lastSeen
+      - observationCount
+      title: AiAssetModel
+      description: One asset as the console sees it.
     AirgapStatus:
       properties:
         ready:
@@ -19166,6 +23268,39 @@ components:
         \ from the case timeline and the audit log.\n* ``recommended_actions`` — normalised\
         \ structured actions from\n  the ResponderAgent (or the legacy list-of-strings\
         \ shape)."
+    AlertFacetCounts:
+      properties:
+        by_severity:
+          additionalProperties:
+            type: integer
+          type: object
+          title: By Severity
+        by_status:
+          additionalProperties:
+            type: integer
+          type: object
+          title: By Status
+        unresolved:
+          type: integer
+          title: Unresolved
+          default: 0
+      type: object
+      title: AlertFacetCounts
+      description: 'Counts over the whole filtered result set, not the returned page.
+
+
+        The console''s Critical / High / Unresolved tiles used to be
+
+        `alerts.filter(...)` over the 25 rows it had loaded, rendered beside a
+
+        server-side `total` in the hundreds — so the tiles were arithmetically
+
+        capped at the page size and changed when the analyst paged.
+
+
+        Computed from the same `WHERE` clause as `total` rather than over the
+
+        whole tenant, so all four numbers on that strip describe one set of rows.'
     AlertLinkCreate:
       properties:
         alert_id:
@@ -19245,6 +23380,8 @@ components:
         pages:
           type: integer
           title: Pages
+        facets:
+          $ref: '#/components/schemas/AlertFacetCounts'
       type: object
       required:
       - items
@@ -19684,6 +23821,7 @@ components:
             format: uuid
           - type: 'null'
           title: Case Id
+      additionalProperties: false
       type: object
       title: AlertUpdateRequest
     ApiKeyOut:
@@ -20604,10 +24742,13 @@ components:
             $ref: '#/components/schemas/ActionPolicy'
           type: array
           title: Actions
+        effective:
+          $ref: '#/components/schemas/EffectiveAutonomy'
       type: object
       required:
       - tenant_id
       - actions
+      - effective
       title: AutonomyPolicyResponse
     AvailableTools:
       properties:
@@ -20889,6 +25030,16 @@ components:
           title: Footer Text
       type: object
       title: BrandingIn
+    BuildRequest:
+      properties:
+        case_id:
+          anyOf:
+          - type: string
+            format: uuid
+          - type: 'null'
+          title: Case Id
+      type: object
+      title: BuildRequest
     BuildTimelineRequest:
       properties:
         identity_kind:
@@ -20966,6 +25117,69 @@ components:
       - updated
       - skipped
       title: BulkToggleResponse
+    BulkTriageRequest:
+      properties:
+        alert_ids:
+          items:
+            type: string
+            format: uuid
+          type: array
+          maxItems: 5000
+          minItems: 1
+          title: Alert Ids
+        set_status:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Set Status
+        set_severity:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Set Severity
+        assign_to:
+          anyOf:
+          - type: string
+            format: uuid
+          - type: 'null'
+          title: Assign To
+        unassign:
+          type: boolean
+          title: Unassign
+          default: false
+        max_count:
+          type: integer
+          maximum: 5000.0
+          minimum: 1.0
+          title: Max Count
+          default: 100
+        comment:
+          type: string
+          maxLength: 500
+          title: Comment
+          default: ''
+      type: object
+      required:
+      - alert_ids
+      title: BulkTriageRequest
+    BulkTriageResponse:
+      properties:
+        matched_count:
+          type: integer
+          title: Matched Count
+        updated_count:
+          type: integer
+          title: Updated Count
+        changes:
+          additionalProperties: true
+          type: object
+          title: Changes
+      type: object
+      required:
+      - matched_count
+      - updated_count
+      - changes
+      title: BulkTriageResponse
     BundleJob:
       properties:
         job_id:
@@ -21310,6 +25524,25 @@ components:
       - tags
       - sla_due_at
       title: CaseResponse
+    ChannelDecisionRequest:
+      properties:
+        decision:
+          type: string
+          title: Decision
+        actor:
+          type: string
+          maxLength: 200
+          title: Actor
+          default: ''
+        note:
+          type: string
+          maxLength: 1000
+          title: Note
+          default: ''
+      type: object
+      required:
+      - decision
+      title: ChannelDecisionRequest
     ChildTenantOut:
       properties:
         id:
@@ -21501,6 +25734,81 @@ components:
       - outcome
       - detail
       title: CollectedControl
+    CollectionCreate:
+      properties:
+        title:
+          type: string
+          maxLength: 200
+          minLength: 1
+          title: Title
+        description:
+          type: string
+          title: Description
+          default: ''
+        alias:
+          anyOf:
+          - type: string
+            maxLength: 100
+          - type: 'null'
+          title: Alias
+        ioc_filter:
+          additionalProperties: true
+          type: object
+          title: Ioc Filter
+        is_enabled:
+          type: boolean
+          title: Is Enabled
+          default: true
+      type: object
+      required:
+      - title
+      title: CollectionCreate
+    CollectionOut:
+      properties:
+        id:
+          type: string
+          format: uuid
+          title: Id
+        title:
+          type: string
+          title: Title
+        description:
+          type: string
+          title: Description
+        alias:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Alias
+        can_read:
+          type: boolean
+          title: Can Read
+        can_write:
+          type: boolean
+          title: Can Write
+        ioc_filter:
+          additionalProperties: true
+          type: object
+          title: Ioc Filter
+        is_enabled:
+          type: boolean
+          title: Is Enabled
+        created_at:
+          type: string
+          format: date-time
+          title: Created At
+      type: object
+      required:
+      - id
+      - title
+      - description
+      - alias
+      - can_read
+      - can_write
+      - ioc_filter
+      - is_enabled
+      - created_at
+      title: CollectionOut
     CommentResponse:
       properties:
         id:
@@ -21659,6 +25967,81 @@ components:
       - controls_missing
       - generated_at
       title: CompliancePosture
+    ConditionIn:
+      properties:
+        permission:
+          type: string
+          maxLength: 200
+          minLength: 3
+          title: Permission
+        operator:
+          type: string
+          title: Operator
+        value:
+          title: Value
+        role:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Role
+        description:
+          anyOf:
+          - type: string
+            maxLength: 500
+          - type: 'null'
+          title: Description
+        enabled:
+          type: boolean
+          title: Enabled
+          default: true
+      type: object
+      required:
+      - permission
+      - operator
+      - value
+      title: ConditionIn
+    ConditionOut:
+      properties:
+        id:
+          type: string
+          format: uuid
+          title: Id
+        permission:
+          type: string
+          title: Permission
+        role:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Role
+        operator:
+          type: string
+          title: Operator
+        value:
+          title: Value
+        description:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Description
+        enabled:
+          type: boolean
+          title: Enabled
+        created_at:
+          type: string
+          format: date-time
+          title: Created At
+      type: object
+      required:
+      - id
+      - permission
+      - role
+      - operator
+      - value
+      - description
+      - enabled
+      - created_at
+      title: ConditionOut
     ConfidenceBucket:
       properties:
         label:
@@ -21785,6 +26168,10 @@ components:
         lowConfidence:
           type: integer
           title: Lowconfidence
+        unscored:
+          type: integer
+          title: Unscored
+          default: 0
       type: object
       required:
       - totalRules
@@ -21794,6 +26181,22 @@ components:
       - medianConfidence
       - lowConfidence
       title: ConfidenceSummary
+    ConfirmRequest:
+      properties:
+        mfa_token:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Mfa Token
+        code:
+          type: string
+          maxLength: 64
+          minLength: 1
+          title: Code
+      type: object
+      required:
+      - code
+      title: ConfirmRequest
     ConnectorHealthOut:
       properties:
         total:
@@ -23179,6 +27582,180 @@ components:
       - summary
       - evidence
       title: CspmScanResponse
+    CustomFieldIn:
+      properties:
+        key:
+          type: string
+          maxLength: 64
+          minLength: 1
+          pattern: ^[a-z][a-z0-9_]*$
+          title: Key
+        label:
+          type: string
+          maxLength: 120
+          minLength: 1
+          title: Label
+        field_type:
+          type: string
+          title: Field Type
+        help_text:
+          type: string
+          maxLength: 400
+          title: Help Text
+          default: ''
+        choices:
+          items:
+            type: string
+          type: array
+          maxItems: 50
+          title: Choices
+        required:
+          type: boolean
+          title: Required
+          default: false
+        position:
+          type: integer
+          maximum: 999.0
+          minimum: 0.0
+          title: Position
+          default: 0
+      type: object
+      required:
+      - key
+      - label
+      - field_type
+      title: CustomFieldIn
+    CustomFieldOut:
+      properties:
+        id:
+          type: string
+          title: Id
+        key:
+          type: string
+          title: Key
+        label:
+          type: string
+          title: Label
+        help_text:
+          type: string
+          title: Help Text
+        field_type:
+          type: string
+          title: Field Type
+        choices:
+          items:
+            type: string
+          type: array
+          title: Choices
+        required:
+          type: boolean
+          title: Required
+        position:
+          type: integer
+          title: Position
+        active:
+          type: boolean
+          title: Active
+      type: object
+      required:
+      - id
+      - key
+      - label
+      - help_text
+      - field_type
+      - choices
+      - required
+      - position
+      - active
+      title: CustomFieldOut
+    CustomFieldPatch:
+      properties:
+        label:
+          anyOf:
+          - type: string
+            maxLength: 120
+          - type: 'null'
+          title: Label
+        help_text:
+          anyOf:
+          - type: string
+            maxLength: 400
+          - type: 'null'
+          title: Help Text
+        choices:
+          anyOf:
+          - items:
+              type: string
+            type: array
+            maxItems: 50
+          - type: 'null'
+          title: Choices
+        required:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Required
+        position:
+          anyOf:
+          - type: integer
+            maximum: 999.0
+            minimum: 0.0
+          - type: 'null'
+          title: Position
+        active:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Active
+      type: object
+      title: CustomFieldPatch
+    CustomValueOut:
+      properties:
+        key:
+          type: string
+          title: Key
+        label:
+          type: string
+          title: Label
+        field_type:
+          type: string
+          title: Field Type
+        value:
+          type: string
+          title: Value
+        required:
+          type: boolean
+          title: Required
+        updated_by:
+          type: string
+          title: Updated By
+        updated_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Updated At
+      type: object
+      required:
+      - key
+      - label
+      - field_type
+      - value
+      - required
+      - updated_by
+      - updated_at
+      title: CustomValueOut
+    CustomValuesIn:
+      properties:
+        values:
+          additionalProperties:
+            type: string
+          type: object
+          title: Values
+      type: object
+      required:
+      - values
+      title: CustomValuesIn
     DashboardMetrics:
       properties:
         period:
@@ -23327,6 +27904,55 @@ components:
       - revoked_at
       - created_at
       title: DelegationOut
+    DeliveryOut:
+      properties:
+        id:
+          type: string
+          format: uuid
+          title: Id
+        webhook_id:
+          type: string
+          format: uuid
+          title: Webhook Id
+        event_type:
+          type: string
+          title: Event Type
+        status:
+          type: string
+          title: Status
+        attempts:
+          type: integer
+          title: Attempts
+        last_status_code:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Last Status Code
+        last_error:
+          type: string
+          title: Last Error
+        created_at:
+          type: string
+          format: date-time
+          title: Created At
+        delivered_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Delivered At
+      type: object
+      required:
+      - id
+      - webhook_id
+      - event_type
+      - status
+      - attempts
+      - last_status_code
+      - last_error
+      - created_at
+      - delivered_at
+      title: DeliveryOut
     DeploymentConfig:
       properties:
         mode:
@@ -23482,6 +28108,23 @@ components:
           type: string
           format: date-time
           title: Updated At
+        source_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Source Id
+        confidence_measured:
+          type: boolean
+          title: Confidence Measured
+          default: true
+        tuned:
+          type: boolean
+          title: Tuned
+          default: true
+        engine:
+          type: string
+          title: Engine
+          default: custom
       type: object
       required:
       - id
@@ -23505,6 +28148,32 @@ components:
       - created_at
       - updated_at
       title: DetectionRuleResponse
+      description: "A rule in the tenant's effective library.\n\nFour fields exist\
+        \ to keep a compiled built-in legible without inventing\ndata the compiled\
+        \ corpus does not hold:\n\n``source_id``\n    The engine's own rule id — ``det-cloud-063``,\n\
+        \    ``sigmahq-sigma-002bdb95-…`` — which is what an alert carries and\n \
+        \   therefore what an analyst searches for. ``None`` for a tenant's own\n\
+        \    rule, which the engine does not load.\n``confidence_measured``\n    ``False``\
+        \ when ``confidence`` is a placeholder rather than a\n    measurement. The\
+        \ compiled artefacts record a rule's logic, severity\n    and ATT&CK mapping\
+        \ and nothing operational, so an untuned built-in\n    has no confidence,\
+        \ no FP rate and no trigger history. The two panels\n    that average those\
+        \ columns exclude such rules and publish the count.\n``tuned``\n    Whether\
+        \ this tenant has stored any decision about the rule.\n``engine``\n    ``aisoc-engine``\
+        \ when fusion loads and evaluates this rule,\n    ``custom`` when it does\
+        \ not. Disabling the two means different\n    things and a reader has to be\
+        \ able to tell them apart."
+    DisableRequest:
+      properties:
+        code:
+          type: string
+          maxLength: 64
+          minLength: 1
+          title: Code
+      type: object
+      required:
+      - code
+      title: DisableRequest
     DiscoverResponse:
       properties:
         discovered:
@@ -23516,6 +28185,20 @@ components:
       required:
       - discovered
       title: DiscoverResponse
+    DiscoveredModelView:
+      properties:
+        id:
+          type: string
+          title: Id
+        name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Name
+      type: object
+      required:
+      - id
+      title: DiscoveredModelView
     DismissTuningRequest:
       properties:
         reason:
@@ -23694,6 +28377,10 @@ components:
         stale:
           type: integer
           title: Stale
+        unscored:
+          type: integer
+          title: Unscored
+          default: 0
       type: object
       required:
       - total
@@ -23785,6 +28472,57 @@ components:
       - valid_from
       - created_at
       title: EdgeOut
+    EffectiveAutonomy:
+      properties:
+        tier:
+          type: string
+          title: Tier
+        tier_label:
+          type: string
+          title: Tier Label
+        tier_source:
+          type: string
+          title: Tier Source
+        max_automatic_impact:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Max Automatic Impact
+        auto_executing_actions:
+          items:
+            type: string
+          type: array
+          title: Auto Executing Actions
+        high_blast_auto_executing:
+          items:
+            type: string
+          type: array
+          title: High Blast Auto Executing
+        unimplemented_actions:
+          items:
+            type: string
+          type: array
+          title: Unimplemented Actions
+        thresholds_are_advisory:
+          type: boolean
+          title: Thresholds Are Advisory
+        advisory_note:
+          type: string
+          title: Advisory Note
+      type: object
+      required:
+      - tier
+      - tier_label
+      - tier_source
+      - max_automatic_impact
+      - auto_executing_actions
+      - high_blast_auto_executing
+      - unimplemented_actions
+      - thresholds_are_advisory
+      - advisory_note
+      title: EffectiveAutonomy
+      description: The control that actually gates execution, as the console must
+        show it.
     EffectiveRuleCountOut:
       properties:
         total:
@@ -23878,6 +28616,133 @@ components:
       - override_note
       - parameter_overrides
       title: EffectiveRuleOut
+    ElevationOut:
+      properties:
+        id:
+          type: string
+          format: uuid
+          title: Id
+        user_id:
+          type: string
+          format: uuid
+          title: User Id
+        user_email:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: User Email
+        permissions:
+          items:
+            type: string
+          type: array
+          title: Permissions
+        justification:
+          type: string
+          title: Justification
+        approved_by_id:
+          anyOf:
+          - type: string
+            format: uuid
+          - type: 'null'
+          title: Approved By Id
+        granted_at:
+          type: string
+          format: date-time
+          title: Granted At
+        expires_at:
+          type: string
+          format: date-time
+          title: Expires At
+        revoked_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Revoked At
+        case_id:
+          anyOf:
+          - type: string
+            format: uuid
+          - type: 'null'
+          title: Case Id
+        alert_id:
+          anyOf:
+          - type: string
+            format: uuid
+          - type: 'null'
+          title: Alert Id
+        state:
+          type: string
+          title: State
+      type: object
+      required:
+      - id
+      - user_id
+      - permissions
+      - justification
+      - approved_by_id
+      - granted_at
+      - expires_at
+      - revoked_at
+      - case_id
+      - alert_id
+      - state
+      title: ElevationOut
+    ElevationRequest:
+      properties:
+        permissions:
+          items:
+            type: string
+          type: array
+          maxItems: 20
+          minItems: 1
+          title: Permissions
+        justification:
+          type: string
+          maxLength: 2000
+          minLength: 10
+          title: Justification
+        duration_minutes:
+          type: integer
+          maximum: 480.0
+          minimum: 5.0
+          title: Duration Minutes
+          default: 60
+        case_id:
+          anyOf:
+          - type: string
+            format: uuid
+          - type: 'null'
+          title: Case Id
+        alert_id:
+          anyOf:
+          - type: string
+            format: uuid
+          - type: 'null'
+          title: Alert Id
+      type: object
+      required:
+      - permissions
+      - justification
+      title: ElevationRequest
+    EnforcementPolicy:
+      properties:
+        enforce:
+          items:
+            type: string
+          type: array
+          title: Enforce
+      type: object
+      title: EnforcementPolicy
+      description: 'Which limit keys this tenant refuses work on, rather than only
+        reporting.
+
+
+        The whole set is sent, not a delta, so clearing a key from the console
+
+        actually clears it. A merge would leave the page able to add a
+
+        restriction and unable to remove one.'
     EngageRequest:
       properties:
         reason:
@@ -23891,6 +28756,40 @@ components:
       required:
       - reason
       title: EngageRequest
+    EnrollBegin:
+      properties:
+        secret:
+          type: string
+          title: Secret
+        otpauth_uri:
+          type: string
+          title: Otpauth Uri
+      type: object
+      required:
+      - secret
+      - otpauth_uri
+      title: EnrollBegin
+    EnrollConfirmed:
+      properties:
+        recovery_codes:
+          items:
+            type: string
+          type: array
+          title: Recovery Codes
+        access_token:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Access Token
+        refresh_token:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Refresh Token
+      type: object
+      required:
+      - recovery_codes
+      title: EnrollConfirmed
     EntityNeighborsResponse:
       properties:
         entity_id:
@@ -25243,6 +30142,23 @@ components:
           type: integer
           title: Hitcount
           default: 0
+        isBuiltin:
+          type: boolean
+          title: Isbuiltin
+          default: false
+        sourceId:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Sourceid
+        tuned:
+          type: boolean
+          title: Tuned
+          default: false
+        timestampsFromArtefact:
+          type: boolean
+          title: Timestampsfromartefact
+          default: false
       type: object
       required:
       - id
@@ -25782,6 +30698,67 @@ components:
       - timestamp
       - source
       title: HuntPreviewItem
+    HuntReportOut:
+      properties:
+        id:
+          type: string
+          title: Id
+        source_kind:
+          type: string
+          title: Source Kind
+        source_id:
+          type: string
+          title: Source Id
+        case_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Case Id
+        title:
+          type: string
+          title: Title
+        what:
+          type: string
+          title: What
+        how:
+          type: string
+          title: How
+        where:
+          type: string
+          title: Where
+        when:
+          type: string
+          title: When
+        citations:
+          items:
+            additionalProperties: true
+            type: object
+          type: array
+          title: Citations
+        match_count:
+          type: integer
+          title: Match Count
+        generated_by:
+          type: string
+          title: Generated By
+        created_at:
+          type: string
+          title: Created At
+      type: object
+      required:
+      - id
+      - source_kind
+      - source_id
+      - case_id
+      - title
+      - what
+      - how
+      - where
+      - when
+      - match_count
+      - generated_by
+      - created_at
+      title: HuntReportOut
     HuntRequest:
       properties:
         rule_ids:
@@ -26938,6 +31915,184 @@ components:
       - type
       title: LakeColumnInfo
       description: One column within a lake table.
+    LakeEstimateRequest:
+      properties:
+        sql:
+          type: string
+          maxLength: 200000
+          minLength: 1
+          title: Sql
+        row_cap:
+          anyOf:
+          - type: integer
+            maximum: 100000.0
+            minimum: 1.0
+          - type: 'null'
+          title: Row Cap
+      type: object
+      required:
+      - sql
+      title: LakeEstimateRequest
+      description: Ask what a query would read, without running it.
+    LakeEstimateResponse:
+      properties:
+        estimated_rows:
+          type: integer
+          title: Estimated Rows
+        estimated_parts:
+          type: integer
+          title: Estimated Parts
+        estimated_bytes:
+          type: integer
+          title: Estimated Bytes
+        cold_bytes:
+          type: integer
+          title: Cold Bytes
+        warm_bytes:
+          type: integer
+          title: Warm Bytes
+        touches_cold:
+          type: boolean
+          title: Touches Cold
+        tables:
+          items:
+            type: string
+          type: array
+          title: Tables
+        estimated_usd:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Estimated Usd
+        cost_basis:
+          type: string
+          title: Cost Basis
+      type: object
+      required:
+      - estimated_rows
+      - estimated_parts
+      - estimated_bytes
+      - cold_bytes
+      - warm_bytes
+      - touches_cold
+      - tables
+      - estimated_usd
+      - cost_basis
+      title: LakeEstimateResponse
+    LakeQueryJobRequest:
+      properties:
+        sql:
+          type: string
+          maxLength: 200000
+          minLength: 1
+          title: Sql
+        row_cap:
+          anyOf:
+          - type: integer
+            maximum: 100000.0
+            minimum: 1.0
+          - type: 'null'
+          title: Row Cap
+      type: object
+      required:
+      - sql
+      title: LakeQueryJobRequest
+    LakeQueryJobResponse:
+      properties:
+        id:
+          type: string
+          format: uuid
+          title: Id
+        status:
+          type: string
+          title: Status
+        referenced_tables:
+          items:
+            type: string
+          type: array
+          title: Referenced Tables
+        row_cap:
+          type: integer
+          title: Row Cap
+        estimate:
+          additionalProperties: true
+          type: object
+          title: Estimate
+        rows_read:
+          type: integer
+          title: Rows Read
+        bytes_read:
+          type: integer
+          title: Bytes Read
+        total_rows_approx:
+          type: integer
+          title: Total Rows Approx
+        progress_ratio:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Progress Ratio
+        columns:
+          anyOf:
+          - items:
+              type: string
+            type: array
+          - type: 'null'
+          title: Columns
+        rows:
+          anyOf:
+          - items:
+              items: {}
+              type: array
+            type: array
+          - type: 'null'
+          title: Rows
+        row_count:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Row Count
+        error:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Error
+        created_at:
+          type: string
+          format: date-time
+          title: Created At
+        started_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Started At
+        finished_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Finished At
+      type: object
+      required:
+      - id
+      - status
+      - referenced_tables
+      - row_cap
+      - estimate
+      - rows_read
+      - bytes_read
+      - total_rows_approx
+      - progress_ratio
+      - columns
+      - rows
+      - row_count
+      - error
+      - created_at
+      - started_at
+      - finished_at
+      title: LakeQueryJobResponse
+      description: A job's state. The fields a console needs to show progress honestly.
     LakeQueryRequest:
       properties:
         sql:
@@ -26968,6 +32123,16 @@ components:
           title: Timeout Seconds
           description: Optional wall-clock cap. Defaults to the server cap (30s).
             Useful for agent loops that need to fail fast.
+        force_sync:
+          type: boolean
+          title: Force Sync
+          description: 'Run synchronously even when the estimate says the query must
+            read the cold volume. Off by default: the synchronous path is bounded
+            by the 30-second default and 60-second maximum above, and a cold read
+            that does not fit inside them used to come back as a bare timeout with
+            no indication of how much data was involved. Set this only when you already
+            know the scan is small.'
+          default: false
       type: object
       required:
       - sql
@@ -27170,6 +32335,36 @@ components:
         total:
           type: integer
           title: Total
+        builtinTotal:
+          type: integer
+          title: Builtintotal
+          default: 0
+        customTotal:
+          type: integer
+          title: Customtotal
+          default: 0
+        returned:
+          type: integer
+          title: Returned
+          default: 0
+        offset:
+          type: integer
+          title: Offset
+          default: 0
+        limit:
+          type: integer
+          title: Limit
+          default: 0
+        catalogError:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Catalogerror
+        missingArtefacts:
+          items:
+            type: string
+          type: array
+          title: Missingartefacts
       type: object
       required:
       - rules
@@ -27341,6 +32536,76 @@ components:
         only signal we expose — same convention the OAuth credential view
 
         uses (``has_secret``).'
+    LlmModelDiscoveryRequest:
+      properties:
+        base_url:
+          anyOf:
+          - type: string
+            maxLength: 512
+          - type: 'null'
+          title: Base Url
+        api_key:
+          anyOf:
+          - type: string
+            maxLength: 4096
+          - type: 'null'
+          title: Api Key
+      type: object
+      title: LlmModelDiscoveryRequest
+      description: 'Where to list models from, for a form that may not be saved yet.
+
+
+        Both fields are optional. ``base_url`` falls back to the stored ``custom``
+
+        credential''s. ``api_key`` is used for this one request and never stored;
+
+        when it is omitted the stored key is used, but only if the target is the
+
+        stored base URL -- see :func:`discover_llm_models`.'
+    LlmModelDiscoveryResult:
+      properties:
+        outcome:
+          type: string
+          enum:
+          - ok
+          - refused
+          - unreachable
+          - unverified
+          title: Outcome
+        detail:
+          type: string
+          title: Detail
+        models:
+          items:
+            $ref: '#/components/schemas/DiscoveredModelView'
+          type: array
+          title: Models
+        listed:
+          type: integer
+          title: Listed
+        excluded:
+          type: integer
+          title: Excluded
+        truncated:
+          type: boolean
+          title: Truncated
+      type: object
+      required:
+      - outcome
+      - detail
+      - models
+      - listed
+      - excluded
+      - truncated
+      title: LlmModelDiscoveryResult
+      description: 'The chat models an endpoint listed, or why there are none.
+
+
+        ``outcome`` uses the Test button''s vocabulary. Anything other than ``ok``
+
+        leaves ``models`` empty and the console falls back to the hand-typed id,
+
+        which is the path that always worked; nothing is invented to fill the gap.'
     LoginRequest:
       properties:
         email:
@@ -27509,6 +32774,137 @@ components:
       - changed_at
       - created_at
       title: MaturityOut
+    McpApprovalDecisionRequest:
+      properties:
+        approve:
+          type: boolean
+          title: Approve
+        note:
+          type: string
+          maxLength: 500
+          title: Note
+          default: ''
+      type: object
+      required:
+      - approve
+      title: McpApprovalDecisionRequest
+    McpApprovalModel:
+      properties:
+        id:
+          type: string
+          title: Id
+        tool_name:
+          type: string
+          title: Tool Name
+        argument_fingerprint:
+          type: string
+          title: Argument Fingerprint
+        requested_by:
+          type: string
+          title: Requested By
+        state:
+          type: string
+          title: State
+        decided_by:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Decided By
+        decision_note:
+          type: string
+          title: Decision Note
+        expires_at:
+          type: string
+          format: date-time
+          title: Expires At
+        created_at:
+          type: string
+          format: date-time
+          title: Created At
+      type: object
+      required:
+      - id
+      - tool_name
+      - argument_fingerprint
+      - requested_by
+      - state
+      - decided_by
+      - decision_note
+      - expires_at
+      - created_at
+      title: McpApprovalModel
+    McpAuthorizeRequest:
+      properties:
+        tool_name:
+          type: string
+          maxLength: 120
+          minLength: 1
+          title: Tool Name
+        arguments:
+          additionalProperties: true
+          type: object
+          title: Arguments
+      type: object
+      required:
+      - tool_name
+      title: McpAuthorizeRequest
+      description: 'What ``services/mcp`` asks before dispatching.
+
+
+        ``arguments`` is sent in full rather than as key names because the
+
+        approval fingerprint has to bind to the specific call. It is hashed on
+
+        arrival and never stored, and the audit row records the argument *names*
+
+        only — the values routinely carry hostnames and lake queries.'
+    McpAuthorizeResponse:
+      properties:
+        call_id:
+          type: string
+          title: Call Id
+        outcome:
+          type: string
+          title: Outcome
+        reason:
+          type: string
+          title: Reason
+        approval_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Approval Id
+        required_permission:
+          type: string
+          title: Required Permission
+          default: ''
+      type: object
+      required:
+      - call_id
+      - outcome
+      - reason
+      title: McpAuthorizeResponse
+    McpCompleteRequest:
+      properties:
+        outcome:
+          type: string
+          title: Outcome
+        latency_ms:
+          type: integer
+          maximum: 86400000.0
+          minimum: 0.0
+          title: Latency Ms
+        error_kind:
+          anyOf:
+          - type: string
+            maxLength: 120
+          - type: 'null'
+          title: Error Kind
+      type: object
+      required:
+      - outcome
+      - latency_ms
+      title: McpCompleteRequest
     McpServerCreate:
       properties:
         name:
@@ -27718,6 +33114,48 @@ components:
           title: Enabled
       type: object
       title: McpServerUpdate
+    McpToolGrantRequest:
+      properties:
+        enabled:
+          type: boolean
+          title: Enabled
+      type: object
+      required:
+      - enabled
+      title: McpToolGrantRequest
+    McpToolStateModel:
+      properties:
+        name:
+          type: string
+          title: Name
+        read_only:
+          type: boolean
+          title: Read Only
+        enabled:
+          type: boolean
+          title: Enabled
+        source:
+          type: string
+          title: Source
+        required_permission:
+          type: string
+          title: Required Permission
+        requires_approval:
+          type: boolean
+          title: Requires Approval
+        decided_by:
+          type: string
+          title: Decided By
+      type: object
+      required:
+      - name
+      - read_only
+      - enabled
+      - source
+      - required_permission
+      - requires_approval
+      - decided_by
+      title: McpToolStateModel
     MemberOut:
       properties:
         user_id:
@@ -27757,6 +33195,314 @@ components:
       required:
       - user_id
       title: MemberUpsert
+    MemoryConflictOut:
+      properties:
+        left:
+          $ref: '#/components/schemas/MemoryItemOut'
+        right:
+          anyOf:
+          - $ref: '#/components/schemas/MemoryItemOut'
+          - type: 'null'
+      type: object
+      required:
+      - left
+      - right
+      title: MemoryConflictOut
+    MemoryConflictResolution:
+      properties:
+        keep:
+          type: string
+          title: Keep
+        note:
+          type: string
+          maxLength: 500
+          title: Note
+          default: ''
+      type: object
+      required:
+      - keep
+      title: MemoryConflictResolution
+    MemoryIngestResult:
+      properties:
+        item:
+          $ref: '#/components/schemas/MemoryItemOut'
+        outcome:
+          type: string
+          title: Outcome
+        indexed:
+          type: boolean
+          title: Indexed
+        index_error:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Index Error
+      type: object
+      required:
+      - item
+      - outcome
+      - indexed
+      title: MemoryIngestResult
+    MemoryItemIn:
+      properties:
+        kind:
+          type: string
+          title: Kind
+          description: case | runbook | memory
+        subject:
+          type: string
+          maxLength: 400
+          minLength: 1
+          title: Subject
+        content:
+          type: string
+          maxLength: 200000
+          minLength: 1
+          title: Content
+        title:
+          type: string
+          maxLength: 400
+          title: Title
+          default: ''
+        source_ref:
+          type: string
+          maxLength: 400
+          title: Source Ref
+          default: ''
+        source:
+          type: string
+          maxLength: 60
+          title: Source
+          default: analyst
+        scope:
+          type: string
+          title: Scope
+          default: tenant
+        expires_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Expires At
+      type: object
+      required:
+      - kind
+      - subject
+      - content
+      title: MemoryItemIn
+    MemoryItemOut:
+      properties:
+        id:
+          type: string
+          title: Id
+        kind:
+          type: string
+          title: Kind
+        subject:
+          type: string
+          title: Subject
+        title:
+          type: string
+          title: Title
+        content:
+          type: string
+          title: Content
+        source_ref:
+          type: string
+          title: Source Ref
+        author:
+          type: string
+          title: Author
+        source:
+          type: string
+          title: Source
+        scope:
+          type: string
+          title: Scope
+        state:
+          type: string
+          title: State
+        state_reason:
+          type: string
+          title: State Reason
+        conflicts_with:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Conflicts With
+        expires_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Expires At
+        embedding_model:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Embedding Model
+        embedded_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Embedded At
+        created_at:
+          type: string
+          format: date-time
+          title: Created At
+        updated_at:
+          type: string
+          format: date-time
+          title: Updated At
+      type: object
+      required:
+      - id
+      - kind
+      - subject
+      - title
+      - content
+      - source_ref
+      - author
+      - source
+      - scope
+      - state
+      - state_reason
+      - conflicts_with
+      - expires_at
+      - embedding_model
+      - embedded_at
+      - created_at
+      - updated_at
+      title: MemoryItemOut
+    MemoryRecallChunk:
+      properties:
+        item_id:
+          type: string
+          format: uuid
+          title: Item Id
+        kind:
+          type: string
+          title: Kind
+        subject:
+          type: string
+          title: Subject
+        title:
+          type: string
+          title: Title
+        content:
+          type: string
+          title: Content
+        score:
+          type: number
+          title: Score
+        author:
+          type: string
+          title: Author
+        source:
+          type: string
+          title: Source
+      type: object
+      required:
+      - item_id
+      - kind
+      - subject
+      - title
+      - content
+      - score
+      - author
+      - source
+      title: MemoryRecallChunk
+      description: 'One semantically recalled memory item, with the provenance to
+        weigh it.
+
+
+        A separate type from ``KBChunk`` on purpose. These come from a different
+
+        store, by a different retrieval, with an author and a source attached,
+
+        and flattening them into the same list would let a reader take a
+
+        similarity hit for a full-text match.'
+    MemoryRecallHit:
+      properties:
+        item:
+          $ref: '#/components/schemas/MemoryItemOut'
+        score:
+          type: number
+          title: Score
+      type: object
+      required:
+      - item
+      - score
+      title: MemoryRecallHit
+    MemoryRecallIn:
+      properties:
+        query:
+          type: string
+          maxLength: 4000
+          minLength: 1
+          title: Query
+        kinds:
+          items:
+            type: string
+          type: array
+          title: Kinds
+        limit:
+          type: integer
+          maximum: 50.0
+          minimum: 1.0
+          title: Limit
+          default: 5
+      type: object
+      required:
+      - query
+      title: MemoryRecallIn
+    MergeRequest:
+      properties:
+        primary_id:
+          type: string
+          format: uuid
+          title: Primary Id
+        duplicate_ids:
+          items:
+            type: string
+            format: uuid
+          type: array
+          maxItems: 200
+          minItems: 1
+          title: Duplicate Ids
+        reason:
+          type: string
+          maxLength: 500
+          title: Reason
+          default: ''
+      type: object
+      required:
+      - primary_id
+      - duplicate_ids
+      title: MergeRequest
+    MergeResponse:
+      properties:
+        primary_id:
+          type: string
+          title: Primary Id
+        merged_ids:
+          items:
+            type: string
+          type: array
+          title: Merged Ids
+        case_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Case Id
+      type: object
+      required:
+      - primary_id
+      - merged_ids
+      - case_id
+      title: MergeResponse
     MetricsOut:
       properties:
         tenant_id:
@@ -27803,6 +33549,54 @@ components:
       - connector_count
       - health_score
       title: MetricsOut
+    MfaPolicy:
+      properties:
+        require_totp:
+          type: boolean
+          title: Require Totp
+        require_for_roles:
+          items:
+            type: string
+          type: array
+          title: Require For Roles
+      type: object
+      required:
+      - require_totp
+      title: MfaPolicy
+    MfaStatus:
+      properties:
+        enrolled:
+          type: boolean
+          title: Enrolled
+        tenant_requires_totp:
+          type: boolean
+          title: Tenant Requires Totp
+        recovery_codes_remaining:
+          type: integer
+          title: Recovery Codes Remaining
+        has_totp:
+          type: boolean
+          title: Has Totp
+          default: false
+        has_webauthn:
+          type: boolean
+          title: Has Webauthn
+          default: false
+        require_for_roles:
+          items:
+            type: string
+          type: array
+          title: Require For Roles
+        required_for_me:
+          type: boolean
+          title: Required For Me
+          default: false
+      type: object
+      required:
+      - enrolled
+      - tenant_requires_totp
+      - recovery_codes_remaining
+      title: MfaStatus
     MiniTimelineEvent:
       properties:
         id:
@@ -28938,6 +34732,21 @@ components:
       - alerts
       - sample_data_loaded
       title: OnboardingStatus
+    OpenWarRoomRequest:
+      properties:
+        provider:
+          type: string
+          title: Provider
+          description: slack | teams
+          default: slack
+        invite:
+          items:
+            type: string
+          type: array
+          maxItems: 100
+          title: Invite
+      type: object
+      title: OpenWarRoomRequest
     OrganizationCreate:
       properties:
         slug:
@@ -30409,6 +36218,24 @@ components:
       - label
       - publisher_id
       title: PublisherKeyOut
+    PurgeRequest:
+      properties:
+        execute:
+          type: boolean
+          title: Execute
+          description: 'False previews: every mailbox is graded and reported, nothing
+            is removed, and no row reads ''purged''. Preview is the default because
+            this is the most disruptive verb the product offers.'
+          default: false
+        confidence:
+          anyOf:
+          - type: number
+            maximum: 1.0
+            minimum: 0.0
+          - type: 'null'
+          title: Confidence
+      type: object
+      title: PurgeRequest
     QueryRequest:
       properties:
         question:
@@ -30438,6 +36265,12 @@ components:
           title: Synthesise
           description: Use LLM to synthesise an answer from retrieved chunks.
           default: true
+        recall_memory:
+          type: boolean
+          title: Recall Memory
+          description: Append semantically recalled memory items to the result. Never
+            reorders the full-text chunks. Off by default; see scripts/score_memory_recall.py.
+          default: false
       type: object
       required:
       - question
@@ -30462,6 +36295,16 @@ components:
             type: string
           type: array
           title: Sources
+        memory:
+          items:
+            $ref: '#/components/schemas/MemoryRecallChunk'
+          type: array
+          title: Memory
+        memory_unavailable:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Memory Unavailable
       type: object
       required:
       - question
@@ -30849,6 +36692,23 @@ components:
       - proposed_disposition
       - event_time
       title: RedispositionCandidateModel
+    ReferenceLookupRequest:
+      properties:
+        names:
+          items:
+            type: string
+          type: array
+          maxItems: 32
+          title: Names
+        tenant_id:
+          anyOf:
+          - type: string
+            format: uuid
+          - type: 'null'
+          title: Tenant Id
+      type: object
+      title: ReferenceLookupRequest
+      description: The ``${NAME}`` tokens one ``http`` step needs resolved.
     RefreshRequest:
       properties:
         refresh_token:
@@ -30989,6 +36849,94 @@ components:
       required:
       - name
       title: ReportDefinitionBody
+    ReportRequest:
+      properties:
+        source:
+          type: string
+          enum:
+          - m365_graph
+          - google_workspace
+          - email_inbox
+          title: Source
+        payload:
+          additionalProperties: true
+          type: object
+          title: Payload
+          description: 'The vendor''s own payload, unmodified: a Microsoft Graph message
+            resource, a Gmail Message, or the event the email_inbox connector emits.
+            Normalised server-side by app.services.phishing.intake, which is the only
+            place that knows the three shapes.'
+        reported_by:
+          type: string
+          title: Reported By
+          description: Who reported it, when the payload does not say.
+          default: ''
+      type: object
+      required:
+      - source
+      - payload
+      title: ReportRequest
+    ReportResponse:
+      properties:
+        submission:
+          $ref: '#/components/schemas/SubmissionResponse'
+        campaign_id:
+          anyOf:
+          - type: string
+            format: uuid
+          - type: 'null'
+          title: Campaign Id
+        campaign_created:
+          type: boolean
+          title: Campaign Created
+        analysis_run_id:
+          anyOf:
+          - type: string
+            format: uuid
+          - type: 'null'
+          title: Analysis Run Id
+        auth_results:
+          additionalProperties:
+            type: string
+          type: object
+          title: Auth Results
+        artefacts_analysed:
+          type: integer
+          title: Artefacts Analysed
+          default: 0
+        artefacts_unanalysed:
+          type: integer
+          title: Artefacts Unanalysed
+          default: 0
+        grouping_basis:
+          type: string
+          title: Grouping Basis
+          default: ''
+        grouping_is_factual:
+          type: boolean
+          title: Grouping Is Factual
+          default: false
+        recipient_count:
+          type: integer
+          title: Recipient Count
+          default: 0
+      type: object
+      required:
+      - submission
+      - campaign_id
+      - campaign_created
+      title: ReportResponse
+    ResetRequest:
+      properties:
+        reason:
+          type: string
+          maxLength: 500
+          minLength: 3
+          title: Reason
+      type: object
+      required:
+      - reason
+      title: ResetRequest
     RetentionOut:
       properties:
         raw_events_days:
@@ -32544,6 +38492,25 @@ components:
       - scenarios
       - note
       title: SampleDataResponse
+    SanctionRequest:
+      properties:
+        sanctioned:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Sanctioned
+          description: true = approved, false = reviewed and refused, null = back
+            to undecided. The three are distinct.
+        note:
+          anyOf:
+          - type: string
+            maxLength: 500
+          - type: 'null'
+          title: Note
+      type: object
+      required:
+      - sanctioned
+      title: SanctionRequest
     SandboxResultResponse:
       properties:
         outcome:
@@ -32877,6 +38844,27 @@ components:
       - rotated_from_id
       - active
       title: ScimTokenOut
+    SessionTokens:
+      properties:
+        access_token:
+          type: string
+          title: Access Token
+        refresh_token:
+          type: string
+          title: Refresh Token
+        token_type:
+          type: string
+          title: Token Type
+          default: bearer
+        expires_in:
+          type: integer
+          title: Expires In
+          default: 1800
+      type: object
+      required:
+      - access_token
+      - refresh_token
+      title: SessionTokens
     SetupStep:
       properties:
         key:
@@ -33860,6 +39848,21 @@ components:
       required:
       - reason
       title: SuppressRequest
+    SyncResult:
+      properties:
+        posted:
+          type: integer
+          title: Posted
+        error:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Error
+      type: object
+      required:
+      - posted
+      - error
+      title: SyncResult
     TAXIICollection:
       properties:
         id:
@@ -36015,6 +42018,54 @@ components:
         pass-through would let a caller supply their own vendor credential and
 
         have the read run somewhere else entirely.'
+    VerificationPolicyIn:
+      properties:
+        alert_class:
+          type: string
+          maxLength: 200
+          minLength: 1
+          title: Alert Class
+          description: An alert's rule_id, category or alert_class. Matched case-insensitively.
+      type: object
+      required:
+      - alert_class
+      title: VerificationPolicyIn
+    VerificationPolicyOut:
+      properties:
+        alert_class:
+          type: string
+          title: Alert Class
+        enabled_by:
+          anyOf:
+          - type: string
+            format: uuid
+          - type: 'null'
+          title: Enabled By
+        enabled_at:
+          type: string
+          format: date-time
+          title: Enabled At
+      type: object
+      required:
+      - alert_class
+      - enabled_by
+      - enabled_at
+      title: VerificationPolicyOut
+    VerifyRequest:
+      properties:
+        mfa_token:
+          type: string
+          title: Mfa Token
+        code:
+          type: string
+          maxLength: 64
+          minLength: 1
+          title: Code
+      type: object
+      required:
+      - mfa_token
+      - code
+      title: VerifyRequest
     VulnerabilityCreate:
       properties:
         asset_id:
@@ -36305,6 +42356,53 @@ components:
         Same shape whether the email was net-new or already on the list —
 
         the prospect should not be able to enumerate existing signups.'
+    WarRoomModel:
+      properties:
+        id:
+          type: string
+          title: Id
+        case_id:
+          type: string
+          title: Case Id
+        provider:
+          type: string
+          title: Provider
+        channel_id:
+          type: string
+          title: Channel Id
+        channel_name:
+          type: string
+          title: Channel Name
+        channel_url:
+          type: string
+          title: Channel Url
+        state:
+          type: string
+          title: State
+        opened_by:
+          type: string
+          title: Opened By
+        last_synced_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Last Synced At
+        last_error:
+          type: string
+          title: Last Error
+      type: object
+      required:
+      - id
+      - case_id
+      - provider
+      - channel_id
+      - channel_name
+      - channel_url
+      - state
+      - opened_by
+      - last_synced_at
+      - last_error
+      title: WarRoomModel
     WatchlistUpdate:
       properties:
         is_watchlisted:
@@ -36319,6 +42417,130 @@ components:
       required:
       - is_watchlisted
       title: WatchlistUpdate
+    WebAuthnChallengeRequest:
+      properties:
+        mfa_token:
+          type: string
+          title: Mfa Token
+      type: object
+      required:
+      - mfa_token
+      title: WebAuthnChallengeRequest
+    WebAuthnVerifyRequest:
+      properties:
+        mfa_token:
+          type: string
+          title: Mfa Token
+        challenge:
+          type: string
+          title: Challenge
+        credential:
+          additionalProperties: true
+          type: object
+          title: Credential
+      type: object
+      required:
+      - mfa_token
+      - challenge
+      - credential
+      title: WebAuthnVerifyRequest
+    WebhookCreate:
+      properties:
+        name:
+          type: string
+          maxLength: 255
+          title: Name
+        url:
+          type: string
+          maxLength: 2048
+          title: Url
+        event_types:
+          items:
+            type: string
+          type: array
+          maxItems: 64
+          title: Event Types
+      type: object
+      required:
+      - name
+      - url
+      title: WebhookCreate
+    WebhookOut:
+      properties:
+        id:
+          type: string
+          format: uuid
+          title: Id
+        name:
+          type: string
+          title: Name
+        url:
+          type: string
+          title: Url
+        event_types:
+          items:
+            type: string
+          type: array
+          title: Event Types
+        enabled:
+          type: boolean
+          title: Enabled
+        has_secret:
+          type: boolean
+          title: Has Secret
+        created_at:
+          type: string
+          format: date-time
+          title: Created At
+      type: object
+      required:
+      - id
+      - name
+      - url
+      - event_types
+      - enabled
+      - has_secret
+      - created_at
+      title: WebhookOut
+      description: 'The public projection. ``secret`` is never in it.
+
+
+        Not even decrypted, and not even to the operator who set it: rotation
+
+        issues a new secret rather than showing the old one, the same rule the
+
+        connector wizard follows. ``has_secret`` answers the only question a
+
+        console needs.'
+    WebhookUpdate:
+      properties:
+        name:
+          anyOf:
+          - type: string
+            maxLength: 255
+          - type: 'null'
+          title: Name
+        url:
+          anyOf:
+          - type: string
+            maxLength: 2048
+          - type: 'null'
+          title: Url
+        event_types:
+          anyOf:
+          - items:
+              type: string
+            type: array
+            maxItems: 64
+          - type: 'null'
+          title: Event Types
+        enabled:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Enabled
+      type: object
+      title: WebhookUpdate
     WhitelistCreate:
       properties:
         action_type:
@@ -36386,6 +42608,53 @@ components:
       - approved_by
       - created_at
       title: WhitelistOut
+    WorkloadCreated:
+      properties:
+        identity:
+          additionalProperties: true
+          type: object
+          title: Identity
+        secret:
+          type: string
+          title: Secret
+        warning:
+          type: string
+          title: Warning
+          default: Store this now. It is shown once and is not recoverable.
+      type: object
+      required:
+      - identity
+      - secret
+      title: WorkloadCreated
+      description: The one response that carries secret material, and only on create.
+    WorkloadIn:
+      properties:
+        service:
+          type: string
+          title: Service
+        description:
+          anyOf:
+          - type: string
+            maxLength: 500
+          - type: 'null'
+          title: Description
+        scopes:
+          items:
+            type: string
+          type: array
+          maxItems: 40
+          title: Scopes
+        expires_in_days:
+          anyOf:
+          - type: integer
+            maximum: 3650.0
+            minimum: 1.0
+          - type: 'null'
+          title: Expires In Days
+      type: object
+      required:
+      - service
+      title: WorkloadIn
     app__api__v1__endpoints__business_context__UpdateRuleRequest:
       properties:
         yaml:

@@ -30,8 +30,10 @@ pipeline end to end — one real event through Kafka, fusion and detection, read
 back as an alert from the API. If that check fails the installer exits
 non-zero and says so; "the containers started" is not "it works".
 
-The console is at `http://localhost:3000` and Swagger at
-`http://localhost:8000/api/docs`. Sign in as `admin@aisoc.internal` with the
+The console is at `http://localhost:3000` and the API at
+`http://localhost:8000`. There is no interactive `/api/docs` page: this is a
+production-class stack and the spec generator is off, which is the posture to
+keep — read `docs/openapi.yaml` instead. Sign in as `admin@aisoc.internal` with the
 generated password. The console starts **empty** — that is correct, because
 nothing has been connected yet. `make demo` loads clearly-labelled synthetic
 data if you want something to look at.

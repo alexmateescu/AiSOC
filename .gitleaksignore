@@ -62,11 +62,6 @@ scripts/detection_specs_part2.py:jwt:1111
 
 # ── Infrastructure and CI ─────────────────────────────────────────────────
 
-# Render IaC. The match is the YAML `key:` field of an env-var declaration
-# and the value is the variable's *name* (`AISOC_DISABLE_NEO4J`,
-# `AISOC_DISABLE_QDRANT`), not its value, which is the string "true".
-render.yaml:generic-api-key:78
-render.yaml:generic-api-key:132
 
 # The disaster-recovery job's BACKUP_ENCRYPTION_KEY used to be a committed
 # 64-hex constant and needed an entry here. It is generated per run now, so
@@ -85,9 +80,35 @@ apps/docs/docs/connectors/orca.md:curl-auth-header:121
 # has to contain things that look like credentials — a sample JWT, a PEM
 # header, and AWS's own published example key AKIAIOSFODNN7EXAMPLE. A scanner
 # matching them is the test data doing its job.
+#
+# The same body, `IOSFODNN7EXAMPLE`, is published by AWS under both prefixes:
+# AKIA for a permanent key and ASIA for a temporary STS one. The session
+# fixtures use the ASIA form because the code under test reads an access key
+# id out of a CloudTrail `userIdentity` to key a session, so the value has to
+# be key-shaped or the assertion proves nothing. AWS rejects it —
+# `sts:GetCallerIdentity` answers InvalidClientTokenId — and GitHub secret
+# scanning alert #1 is resolved as a false positive on that evidence.
 tests/test_support_bundle.py:jwt:44
 tests/test_support_bundle.py:private-key:62
 tests/test_support_bundle.py:generic-api-key:112
+
+# The session fixtures named by the paragraph above. Each is the literal
+# `ASIAIOSFODNN7EXAMPLE` standing in for the `accessKeyId` a CloudTrail
+# `userIdentity` carries, because that field is the session key and a
+# fixture that holds something other than a key-shaped value would assert
+# the deriver works on input it will never see.
+services/fusion/tests/test_sessions.py:aws-access-token:162
+services/fusion/tests/test_sessions.py:aws-access-token:166
+services/fusion/tests/test_sessions.py:aws-access-token:178
+services/fusion/tests/test_sessions.py:aws-access-token:179
+services/ingest/internal/graph/session_test.go:aws-access-token:97
+services/ingest/internal/graph/session_test.go:aws-access-token:100
+services/ingest/internal/graph/session_test.go:aws-access-token:118
+services/ingest/internal/graph/session_test.go:aws-access-token:121
+services/ingest/internal/graph/session_test.go:aws-access-token:132
+services/ingest/internal/activity/session_test.go:aws-access-token:203
+services/ingest/internal/activity/session_test.go:aws-access-token:207
+services/ingest/internal/activity/session_test.go:aws-access-token:285
 
 # Asserts that `api_key = '...'` in an LLM response is classified as a leak.
 # The string is "sk-AbCdEf0123456789xyz", invented for the assertion.
@@ -118,3 +139,15 @@ services/connectors/tests/test_kubernetes_audit.py:generic-api-key:218
 # literal the suite signs with so it can then prove a *different* key fails to verify;
 # it authenticates nothing and exists in no deployment.
 services/api/tests/test_evidence_bundle.py:generic-api-key:26
+
+# Depth 4.2 (#1322): the TAXII live job's signing secret is a CI-only literal
+# that names itself as one; the workflow's Postgres and app both live and die
+# inside the job. Not a credential for anything reachable.
+.github/workflows/taxii-live.yml:generic-api-key:51
+
+# Rule-id lock entries: `"<slug>": "det-threat-anomaly-NNN"` pins a detection
+# rule's id so regeneration cannot renumber it. The scanner's key/value
+# heuristic reads the pair as an api key; it is a rule identifier in a
+# generated lock file.
+detections/rule-ids.lock.json:generic-api-key:841
+detections/rule-ids.lock.json:generic-api-key:854
