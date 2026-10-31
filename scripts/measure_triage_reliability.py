@@ -71,8 +71,14 @@ CORPUS = AGENTS_ROOT / "tests" / "eval_data" / "synthetic_incidents.json"
 # Production values, read from the call site in auto_triage_agent.run_auto_triage.
 # If these drift from production the measurement stops describing production,
 # so they are asserted against it in tests/test_triage_reliability_harness.py.
+#
+# MAX_TOKENS moved 512 → 2048 with production (#1558): 512 clipped JSON
+# verdicts carrying a long rationale, forcing re-asks or the deterministic
+# fallback. The published 44/50 → 50/50 figures were measured at 512 and
+# remain true statements about that run (none of the prose names the
+# ceiling); the next harness run grades the 2048 configuration.
 TEMPERATURE = 0.0
-MAX_TOKENS = 512
+MAX_TOKENS = 2048
 
 DEFAULT_BASE_URL = "http://localhost:11434"
 DEFAULT_MODEL = "llama3.2:3b-instruct-q4_K_M"

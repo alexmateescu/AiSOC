@@ -9,6 +9,189 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Dependencies:** the Oct-30 npm advisory wave cleared across both
+  lockfiles. Root: `follow-redirects` floored at **1.16.2**
+  ([GHSA-mrwp-f3q8-3g9p](https://github.com/advisories/GHSA-mrwp-f3q8-3g9p),
+  high) and `joi` at **17.13.9**
+  ([GHSA-4528-x5fx-h6hg](https://github.com/advisories/GHSA-4528-x5fx-h6hg),
+  high) — both already carried overrides from earlier waves, so the existing
+  floors move rather than new keys landing (a duplicate key in
+  `pnpm.overrides` is silently discarded by last-key-wins, which is exactly
+  how a first attempt at this fix produced an unchanged lockfile). Mobile:
+  `node-forge` overridden to **1.4.1+** (resolves 1.4.2), clearing five high
+  and three low advisories
+  ([GHSA-7wch-p9px-956x](https://github.com/advisories/GHSA-7wch-p9px-956x)
+  et al., all fixed in 1.4.1). Published after `main`'s last audit pass, so
+  they reddened the push-event `Security Audit` at the v20.4.0 release
+  commit through no change of its own.
+
+## [20.4.0] - 2026-10-30
+
+### Security
+
+- **Dependencies:** `graphql-core` floored at **3.3.1**
+  ([CVE-2026-119286](https://nvd.nist.gov/vuln/detail/CVE-2026-119286),
+  high) and `pyasn1` at **0.6.5**
+  ([CVE-2026-119194](https://nvd.nist.gov/vuln/detail/CVE-2026-119194)
+  / 119195 / 119196 / 119197, high) in `services/api`. Both are
+  transitive — `graphql-core` via `strawberry-graphql`, `pyasn1` via the
+  SAML/crypto stack — so the floors are declared directly in the manifest
+  to keep the resolver off the vulnerable versions, and `poetry.lock` moves
+  only those two packages. Published after `main`'s last `security-audit`
+  pass, so they reddened every open pull request through no change of its
+  own; cleared at the source here rather than suppressed per branch.
+
+### Fixed
+
+- **Activating SSO OIDC no longer locks the administrator out** (reported in
+  discussion #1568). `resolve_permissions` uses the static role map only while
+  a tenant holds zero `user_roles` grants; the first SSO sign-in provisions a
+  user and grants it a role, which flips the tenant to database-backed RBAC,
+  and from that instant the bootstrap admin — created by `bootstrap_admin.py`
+  *after* migration 092's membership backfill, so the one account with
+  `users.role = 'admin'` and no grant — resolved to **zero** permissions and
+  every route answered 403 (users, investigations, the alert queue alike).
+  `bootstrap_admin` now grants the admin its `admin` catalog role on every
+  startup, in an isolated session so it can never disturb admin creation, and
+  as a no-op when the catalog is unseeded. Because it runs on every startup it
+  also heals a deployment already locked out, on the next restart. The
+  resolver's deprovisioning semantics are unchanged and still separately
+  pinned; a live-Postgres test reproduces the lockout and proves the fix.
+- **The alert-funnel's "events of interest" count queried a column the lake
+  does not have.** `_events_of_interest` filtered `aisoc.raw_events` on
+  `ingested_at`, which raised ClickHouse `Code: 47, Missing columns:
+  'ingested_at'` on every call (surfaced alongside #1568), so the funnel
+  silently served its Postgres fallback on every deployment with a reachable
+  lake. It now filters on `ingest_time` — when the event landed, the column
+  `usage_metering` already counts arrivals by — with a test that checks the
+  query's filter columns against the committed ClickHouse DDL so any
+  non-existent column is caught, not only this one.
+
+## [20.3.0] - 2026-10-30
+
+### Added
+
+- **The BYOK selector can ask a custom endpoint what it serves** (#1543,
+  externally contributed by [vito-bush](https://github.com/vito-bush)).
+  `POST /api/v1/llm/credentials/models` lists the chat-capable models an
+  OpenAI-compatible endpoint publishes at `GET {base}/models`, so the
+  `custom` provider's model no longer has to be a hand-typed id — closing
+  the gap the #1481 review named. Bounded (10 s whole-exchange deadline,
+  2 MB decoded cap, 500 models returned), redirects refused, the air-gap
+  and SSRF guards applied before anything is dialled, and the stored key
+  is sent only to the stored base URL — a form pointing at a changed URL
+  makes a keyless request. Discovery filters a dropdown; the Test button
+  stays the proof a model answers, and the typed id remains for endpoints
+  that publish no list.
+- **Prompt bytes are capped at the egress chokepoint** (#1554, externally
+  contributed by [alexmateescu](https://github.com/alexmateescu)).
+  `AISOC_LLM_MAX_PROMPT_BYTES` (default 240,000) bounds every gateway
+  call inside the same `safe_*` functions the LLM contract already owns:
+  oversized prompts are truncated by water-filling across the non-system
+  messages — largest contributors clipped to a fair share, the system
+  prompt preserved verbatim, every cut marked in the text — instead of
+  being rejected wholesale by the provider's own guard and retried
+  forever.
+
+### Changed
+
+- **Auto-triage's output ceiling moves 512 → 2,048 tokens** (#1558,
+  externally contributed): verdicts carrying a long rationale were
+  clipped mid-JSON, forcing re-asks or the deterministic fallback. The
+  reliability harness's `MAX_TOKENS` moves with it — the parity test that
+  went red on the one-line bump is the drift guard doing its job — and
+  the published 44/50 → 50/50 figures stay true as statements about the
+  512-era run they measured; the next harness run grades 2,048.
+- **The console's root URL now lands an operator on their console.** On a
+  clean self-hosted install, `/` rendered the project's marketing landing
+  page — neither the dashboard nor the login page the operator was looking
+  for (reported in discussion #1549). `/` now redirects to `/login`, which
+  already routes onward: a first run lands on the setup wizard and a
+  signed-in session on `/dashboard`. The marketing page remains the root for
+  deployments that *are* the public project site, by setting
+  `AISOC_MARKETING_HOME` in the running container (runtime outranks the
+  build-time `NEXT_PUBLIC_MARKETING_HOME`, the same relationship
+  `AISOC_DEMO_MODE` has to its build-time twin, because `NEXT_PUBLIC_*` is
+  frozen into a pulled image). The root route is `force-dynamic` so the
+  answer comes from the container's environment on every request, and the
+  decision is pinned in both directions by `apps/web/src/app/page.test.tsx`.
+
+### Fixed
+
+- **Five GitHub detection rules could not fire and five more claused on
+  evidence the org audit log cannot carry** (#1547, closing #1545; the
+  external report was substantially correct — measured before coding,
+  1 of 12 GitHub rules fired on real connector output). Four rules
+  expected an unprefixed event type the connector has never emitted; the
+  deploy-key rule matched `deploy_key.create`, an action that does not
+  exist in GitHub's vocabulary (deploy keys log as `public_key.create`,
+  now matched with a repo-qualifier and a negative fixture); wrong action
+  values were re-claused to GitHub's documented audit vocabulary
+  (`repo.access`, `org./repo.register_self_hosted_runner`); the windowed
+  deploy-key rule's `distinct_by` named a key the entries do not carry;
+  and two actions in the connector's severity list do not exist. Five
+  rules whose evidence the audit log cannot carry are quarantined with
+  recorded reasons; one (`ip_is_internal`) became real instead, derived
+  from `src_ip`. A new CI gate replays every GitHub rule through the real
+  connector and real engine — it failed with 11 findings on the pre-fix
+  tree — and the executable count honestly moves **2,535 → 2,530** across
+  every pinned surface, including the technical guide (#1550).
+- **A saved connector that had polled once answered 422 to every
+  test-connection** (#1555, externally contributed): the route merged the
+  stored `connector_config` verbatim into the constructor, and the first
+  recorded `checkpoint` became an unexpected keyword argument. The route
+  now strips scheduler-owned keys through the same `_connector_kwargs`
+  exclusion every other construction site uses — one set, so the next
+  scheduler-only key cannot drift past it — with a route-level regression
+  test that answers 422 on the pre-fix tree.
+- **Fresh chatops deploys crash-looped** (#1556, externally contributed):
+  teams-bot cross-loads slack-bot source at `/slack-bot`, which neither
+  its image nor compose provided — `ModuleNotFoundError` at startup.
+  Compose now mounts the sibling read-only. The published image still
+  cannot boot standalone outside this compose file; #1563 tracks the
+  vendored-copy fix that removes the mount.
+- **Deterministic 400s from the inference gateway are terminal for the
+  fused-alert consumer** (#1554): a request rejected as invalid is
+  rejected because of its bytes, so replaying identical bytes burned
+  retries and pinned the inference machine for every other alert — a
+  live-observed retry storm. Such failures now dead-letter on first
+  sight under their own `triage-terminal` stage, while transient errors
+  keep their full retry ladder (both directions tested).
+- **Playbook agent-event delivery dialled a dead port on every compose
+  deployment** (#1557, externally contributed): the agents service never
+  received `REALTIME_URL`, and its code default names `realtime:3001` —
+  a port the realtime service has never served (compose runs it on
+  4000). Compose now passes `REALTIME_URL` and
+  `AISOC_INVESTIGATION_MAX_SECONDS` through, so `.env` tuning of the
+  investigation wall-clock budget stops being inert; #1564 tracks the
+  code-default correction.
+- The technical guide moved to v1.1 (#1546): the Windows section told
+  operators to run `install.ps1` from an elevated PowerShell, which the
+  installer's own help contradicts; counted figures re-derived; the
+  model-discovery feature documented with its credential scoping.
+
+### Security
+
+- **Dependencies (archived prototype):** the historical connector-ts SDK under
+  `plans/cyble-aisoc/` moves `zod` `^3.23.8` → `^4.6.6`
+  ([GHSA-mrhx-c7xc-m3w5](https://github.com/advisories/GHSA-mrhx-c7xc-m3w5),
+  high: memory exhaustion validating oversized constrained strings; the fix
+  exists only on the 4.x line), importing through zod 4's `zod/v3`
+  compatibility subpath so the v3 runtime semantics the SDK's introspection
+  depends on are unchanged. Archived reference code, not the published
+  `packages/sdk-ts` — but it is public code people copy from, and the
+  advisory is real. Externally contributed.
+
+- **Dependencies:** `decode-uri-component` 0.5.0 → 0.5.1 in the mobile
+  app's lockfile, resolving
+  [GHSA-qr28-fpjm-wq7f](https://github.com/advisories/GHSA-qr28-fpjm-wq7f)
+  (CVE-2026-118664, high: denial of service on a crafted URI component).
+  The mobile `package.json` already carried a `^0.5.0` override from an
+  earlier advisory; the floor moves to the patched release. Published
+  upstream after `main`'s last audit pass, so every open pull request was
+  red on `security-audit` and `Trivy filesystem` through no change of its
+  own — this lands at the source instead of being suppressed per branch.
+
 - **Dependencies:** `@hono/node-server` 1.19.17 → 2.1.5 across the pnpm
   workspace, resolving
   [GHSA-rmxm-3fg6-px4f](https://github.com/advisories/GHSA-rmxm-3fg6-px4f)

@@ -97,6 +97,78 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 
+# ── Prompt byte cap (egress safety valve) ────────────────────────────────────
+#: Max total bytes of message content allowed to leave toward the inference
+#: gateway. The cap is a ceiling against runaway growth (tool output
+#: accumulating across loop iterations), not a normal-path limit: ordinary
+#: prompts land two orders of magnitude below it. A prompt over the backend's
+#: own limit is rejected wholesale and deterministically, and the retry
+#: storm behind such a rejection burns inference capacity without ever
+#: succeeding — so we truncate the largest contributor here, honestly
+#: marking what was cut, and let the request be answered.
+_MAX_PROMPT_BYTES = int(os.getenv("AISOC_LLM_MAX_PROMPT_BYTES", "240000"))
+_TRUNCATION_MARKER = "\n\n[... truncated: AiSOC prompt byte cap ...]"
+
+
+def _msg_bytes(msg: Any) -> int:
+    content = getattr(msg, "content", msg)
+    if isinstance(content, str):
+        return len(content.encode("utf-8"))
+    if isinstance(content, list):
+        return sum(len(str(p.get("text", "")).encode("utf-8")) for p in content if isinstance(p, dict))
+    return 0
+
+
+def _cap_prompt_bytes(messages: list[Any]) -> list[Any]:
+    """Truncate oversized non-system messages to a fair share until fitting.
+
+    Water-filling rather than greedy: clipping one message to zero while its
+    neighbours stay whole punishes whichever tool happened to answer first.
+    Processing messages largest-first, every message still above the even
+    share of the remaining budget is clipped down to that share, so the cut
+    is spread proportionally across the contributors that are actually big.
+    """
+    if _MAX_PROMPT_BYTES <= 0:
+        return messages
+    sizes = [_msg_bytes(m) for m in messages]
+    total = sum(sizes)
+    if total <= _MAX_PROMPT_BYTES:
+        return messages
+    marker_bytes = len(_TRUNCATION_MARKER.encode("utf-8"))
+    out = list(messages)
+    budget = _MAX_PROMPT_BYTES
+    order: list[int] = []
+    for i, m in enumerate(messages):
+        if getattr(m, "type", "") == "system":
+            budget -= sizes[i]
+        else:
+            order.append(i)
+    order.sort(key=lambda i: (-sizes[i], i))
+    for pos, i in enumerate(order):
+        if not order:
+            break
+        n = len(order) - pos
+        fair = max(0, budget // n)
+        if sizes[i] <= fair:
+            break  # everything remaining fits within the even share
+        keep = max(0, fair - marker_bytes)
+        content = getattr(out[i], "content", None)
+        if not isinstance(content, str):
+            continue
+        clipped = content.encode("utf-8")[:keep].decode("utf-8", errors="ignore") + _TRUNCATION_MARKER
+        try:
+            out[i] = out[i].model_copy(update={"content": clipped})
+        except Exception:  # noqa: BLE001 — non-pydantic stand-in
+            import copy as _copy
+
+            clone = _copy.copy(out[i])
+            clone.content = clipped
+            out[i] = clone
+        sizes[i] = len(clipped.encode("utf-8"))
+        budget -= sizes[i]
+    return out
+
+
 async def safe_ainvoke(llm: Any, messages: Iterable[Any], **kwargs: Any) -> Any:
     """Validate ``messages`` against the contract, then call ``llm.ainvoke``.
 
@@ -106,6 +178,7 @@ async def safe_ainvoke(llm: Any, messages: Iterable[Any], **kwargs: Any) -> Any:
     """
     materialised = list(messages)
     LLMInputContract.validate(materialised)
+    materialised = _cap_prompt_bytes(materialised)
 
     model = _model_name(llm)
     prompt, user_input = _cache_parts(materialised)
@@ -150,6 +223,7 @@ async def safe_astream(llm: Any, messages: Iterable[Any], **kwargs: Any):
     """Streaming variant of :func:`safe_ainvoke` that yields chunks."""
     materialised = list(messages)
     LLMInputContract.validate(materialised)
+    materialised = _cap_prompt_bytes(materialised)
     egress = egress_privacy.open_session(
         model=_model_name(llm),
         base_url=getattr(llm, "base_url", None) or getattr(llm, "openai_api_base", None),
@@ -224,6 +298,7 @@ async def safe_chat_completions_request(
 
     materialised = list(messages)
     LLMInputContract.validate(materialised)
+    materialised = _cap_prompt_bytes(materialised)
 
     try:
         import httpx

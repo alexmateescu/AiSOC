@@ -1260,10 +1260,6 @@ services:
       TAXII_URL: ${TAXII_URL:-}
       TAXII_USERNAME: ${TAXII_USERNAME:-}
       TAXII_PASSWORD: ${TAXII_PASSWORD:-}
-      OPENCTI_URL: ${OPENCTI_URL:-}
-      OPENCTI_TOKEN: ${OPENCTI_TOKEN:-}
-      OPENCTI_VERIFY_SSL: ${OPENCTI_VERIFY_SSL:-true}
-      OPENCTI_POLL_INTERVAL: ${OPENCTI_POLL_INTERVAL:-1800}
     networks:
       - aisoc
     restart: unless-stopped
@@ -1537,10 +1533,10 @@ services:
     profiles:
       - chatops
     volumes:
-      # Upstream v20.2.1 packaging gap: hmac_signer cross-loads slack-bot
-      # source at /slack-bot; neither the image nor compose provides it.
+      # Upstream v20.2.1 packaging gap: teams-bot hmac_signer cross-loads
+      # slack-bot source at /slack-bot, but neither the image nor compose
+      # provides that path, so fresh deploys crash-loop with ModuleNotFoundError.
       - ./services/slack-bot:/slack-bot:ro
-
     environment:
       AISOC_API_BASE_URL: http://api:8000
       AISOC_ACTIONS_BASE_URL: http://actions:8085

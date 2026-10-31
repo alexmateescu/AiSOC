@@ -179,3 +179,39 @@ async def test_the_test_route_still_reaches_the_connector_for_public_urls(
     assert "destination refused" not in r.text
     assert r.status_code == 200, r.text
     probe.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_scheduler_owned_config_keys_do_not_reach_the_constructor(client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A connector that has polled once carries scheduler state in its stored
+    ``connector_config`` — ``record_checkpoint`` writes ``checkpoint`` there,
+    beside ``poll_interval_seconds`` and ``filter_rules``. This route merged
+    the blob verbatim into the constructor, so the first recorded checkpoint
+    made every later test-connection answer 422 ("unexpected keyword argument
+    'checkpoint'") on every connector whose ``__init__`` does not take it.
+    The exclusion is ``_connector_kwargs`` — the same set the scheduler uses —
+    so the next scheduler-only key cannot drift past this route either.
+    Pre-fix this test fails with exactly that 422; Splunk's ``__init__``
+    declares its keywords explicitly, so the stray key cannot be swallowed."""
+    from app.connectors.splunk import SplunkConnector
+
+    probe = AsyncMock(return_value={"success": True, "connector": "splunk", "version": "stub"})
+    monkeypatch.setattr(SplunkConnector, "test_connection", probe)
+    async with client as c:
+        r = await c.post(
+            "/api/v1/connectors/splunk/test",
+            headers={"Authorization": f"Bearer {_console_jwt('viewer')}"},
+            json={
+                "auth_config": {"token": "x"},
+                "connector_config": {
+                    "base_url": "https://93.184.216.34:8089",
+                    "ssl_verify": False,
+                    # The scheduler-owned trio a polled connector accumulates.
+                    "checkpoint": {"cursor": "2026-10-29T00:00:00Z"},
+                    "poll_interval_seconds": 120,
+                    "filter_rules": [{"field": "severity", "op": "gte", "value": "high"}],
+                },
+            },
+        )
+    assert r.status_code == 200, r.text
+    probe.assert_awaited_once()
