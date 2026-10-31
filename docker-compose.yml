@@ -1586,7 +1586,7 @@ services:
       - escalations
     environment:
       # Plain postgresql:// scheme: this service uses psycopg (sync), not asyncpg.
-      DATABASE_URL: postgresql://aisoc_app:aisoc_app_dev_secret@postgres:5432/aisoc
+      DATABASE_URL: postgresql://aisoc_app:${AISOC_APP_DB_PASSWORD:-aisoc_app_dev_secret}@postgres:5432/aisoc
       AISOC_ESCALATION_TEAMS_URL: ${AISOC_ESCALATION_TEAMS_URL:-}
       AISOC_CONSOLE_URL: https://soc.c8r-tech.com
       ESC_TICK_SECONDS: 900
