@@ -1,0 +1,16 @@
+[tool.poetry]
+name = "aisoc-escalations"
+version = "0.1.0"
+description = "Ack-clock escalation bridge: Teams escalations for unacknowledged CRITICAL/HIGH cases while native outbound webhook emitters are unwired."
+authors = ["c8r-tech"]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+psycopg = {version = "^3.2", extras = ["binary"]}
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
