@@ -1801,6 +1801,7 @@ async def _ledger_investigation_run(
     row = (await db.execute(stmt)).scalars().first()
     if row is None:
         return None
+    recon, forensic, responder, audit_log = await _ledger_phase_blocks(db, tenant_id, uuid.UUID(run_id))
     return {
         "run_id": str(row.id),
         "case_id": row.case_id,
@@ -1811,7 +1812,96 @@ async def _ledger_investigation_run(
         "started_at": row.started_at.isoformat() if row.started_at else None,
         "completed_at": row.completed_at.isoformat() if row.completed_at else None,
         "error": row.error,
+        # The recon/forensic/responder blocks + audit trail live only in
+        # agents' volatile `_runs`; rebuild them from the append-only event
+        # ledger so the case workspace's three phase tabs render after a
+        # restart instead of showing bare headers with no explanation.
+        "recon": recon,
+        "forensic": forensic,
+        "responder": responder,
+        "audit_log": audit_log,
     }
+
+
+def _parse_llm_json(payload: Any) -> dict[str, Any]:
+    """The JSON an agent emitted in its `llm_response` event payload.
+
+    Agents return a JSON string in `payload["response"]`; the API's jsonb
+    column already deserialises the envelope, so we only parse the inner
+    string. Anything that isn't a JSON object yields {} (tabs then show just
+    the event summary rather than crashing on a malformed body).
+    """
+    if not isinstance(payload, dict):
+        return {}
+    raw = payload.get("response")
+    if isinstance(raw, dict):
+        return raw
+    if not isinstance(raw, str) or not raw.strip():
+        return {}
+    try:
+        obj = json.loads(raw)
+    except (ValueError, TypeError):
+        return {}
+    return obj if isinstance(obj, dict) else {}
+
+
+def _audit_from_events(events: list[Any]) -> list[dict[str, Any]]:
+    """Map ledger rows to the workspace's audit-log step shape."""
+    return [
+        {
+            "kind": ev.kind,
+            "agent": ev.agent,
+            "summary": ev.summary or "",
+            "timestamp": ev.ts.isoformat() if getattr(ev, "ts", None) else None,
+        }
+        for ev in events
+    ]
+
+
+async def _ledger_phase_blocks(
+    db, tenant_id: uuid.UUID, run_uuid: uuid.UUID
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    """Reconstruct recon / forensic / responder + audit_log from the ledger.
+
+    The investigator pipeline persists every agent step to `investigation_events`
+    (kind='llm_response' carries each agent's structured JSON output). The live
+    detail blocks themselves are never persisted, so we reassemble them from
+    those events: recon/forensic/responder come from the matching agent's
+    llm_response body, with a fallback to the phase-event summary so the tab is
+    never blank when *some* record exists.
+    """
+    from app.models.investigation import InvestigationEvent
+
+    rows = (
+        await db.execute(
+            select(InvestigationEvent)
+            .where(InvestigationEvent.tenant_id == tenant_id)
+            .where(InvestigationEvent.run_id == run_uuid)
+            .order_by(InvestigationEvent.seq.asc())
+        )
+    ).scalars().all()
+
+    audit_log = _audit_from_events(rows)
+
+    def phase(agent_prefix: str, fallback_kind: str) -> dict[str, Any]:
+        # latest llm_response from the matching agent wins (agents may retry)
+        body: dict[str, Any] = {}
+        for ev in rows:
+            if ev.kind == "llm_response" and ev.agent.lower().startswith(agent_prefix):
+                body = _parse_llm_json(ev.payload)
+        summary = next(
+            (ev.summary for ev in reversed(rows) if ev.kind == fallback_kind and ev.summary),
+            None,
+        )
+        block = dict(body)
+        if not block.get("summary") and summary:
+            block["summary"] = summary
+        return block
+
+    recon = phase("recon", "recon")
+    forensic = phase("forensic", "forensic")
+    responder = phase("responder", "responder")
+    return recon, forensic, responder, audit_log
 
 
 async def _ledger_report_md(db, tenant_id: uuid.UUID, run_id: str) -> str | None:
