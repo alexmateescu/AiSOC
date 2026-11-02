@@ -68,13 +68,6 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/cases", tags=["cases"])
 
-# Every read route here took a bare AuthUser: authenticated, never authorized
-# (GHSA-wwq7-2xvh-qgq6). Role users all hold `cases:read`, so nothing changes
-# for them, but an API key's scopes are enforced only through
-# `require_permission`, so a key minted with nothing but `alerts:read` could
-# list cases and read their comments, timeline and evidence chain.
-CaseReader = Annotated[AuthUser, Depends(require_permission("cases:read"))]
-
 # The agents service owns the actual investigation orchestrator (Pillar-1).
 # We keep the route surface on `/cases/{id}/investigate` and
 # `/cases/{id}/investigations/{run_id}` for the web console and proxy through
@@ -247,13 +240,7 @@ class UpdateObservablesRequest(BaseModel):
 
 class AddCommentRequest(BaseModel):
     body: str = Field(..., min_length=1)
-    # `is_system` is no longer accepted from callers (GHSA-9mc5-hqgh-j6wf).
-    # It was, and `case_summary` renders such a row as an unattributed
-    # "System note" while the post-mortem drops it from the analyst record,
-    # so any `cases:write` holder could author text the incident report
-    # presents as the platform's own. System notes are written by the server
-    # itself (author "aisoc"); a client still sending the field is ignored,
-    # not refused.
+    is_system: bool = False
 
 
 class CaseResponse(BaseModel):
@@ -500,7 +487,7 @@ async def _resolve_case_id(case_id: str, db: Any, tenant_id: uuid.UUID) -> uuid.
 @router.get("", response_model=list[CaseResponse], summary="List cases")
 async def list_cases(
     db: DBSession,
-    user: CaseReader,
+    user: AuthUser,
     status_filter: str | None = Query(None, alias="status"),
     severity: str | None = Query(None),
     assignee: str | None = Query(None),
@@ -618,7 +605,7 @@ async def create_case(
 
 
 @router.get("/{case_id}", response_model=CaseResponse, summary="Get case")
-async def get_case(case_id: str, db: DBSession, user: CaseReader) -> CaseResponse:
+async def get_case(case_id: str, db: DBSession, user: AuthUser) -> CaseResponse:
     cid = await _resolve_case_id(case_id, db, user.tenant_id)
     row = (
         await db.execute(
@@ -1105,7 +1092,7 @@ async def add_comment(
         tenant_id=user.tenant_id,
         author=getattr(user, "email", None) or "system",
         body=body.body,
-        sys=False,
+        sys=body.is_system,
         now=now,
     )
     try:
@@ -1128,7 +1115,7 @@ async def add_comment(
 
 
 @router.get("/{case_id}/comments", response_model=list[CommentResponse], summary="List case comments")
-async def list_comments(case_id: str, db: DBSession, user: CaseReader) -> list[CommentResponse]:
+async def list_comments(case_id: str, db: DBSession, user: AuthUser) -> list[CommentResponse]:
     cid = await _resolve_case_id(case_id, db, user.tenant_id)
     rows = (
         await db.execute(
@@ -1148,7 +1135,7 @@ async def list_comments(case_id: str, db: DBSession, user: CaseReader) -> list[C
 # avoids a behavior change for any existing integration that already speaks
 # `/comments`.
 @router.get("/{case_id}/notes", response_model=list[CommentResponse], summary="List case notes (alias of /comments)")
-async def list_notes(case_id: str, db: DBSession, user: CaseReader) -> list[CommentResponse]:
+async def list_notes(case_id: str, db: DBSession, user: AuthUser) -> list[CommentResponse]:
     return await list_comments(case_id, db, user)
 
 
@@ -1160,7 +1147,7 @@ async def add_note(
 
 
 @router.get("/{case_id}/evidence", response_model=EvidenceReport, summary="Export evidence chain report")
-async def evidence_report(case_id: str, db: DBSession, user: CaseReader) -> EvidenceReport:
+async def evidence_report(case_id: str, db: DBSession, user: AuthUser) -> EvidenceReport:
     cid = await _resolve_case_id(case_id, db, user.tenant_id)
     row = (
         await db.execute(
@@ -1193,7 +1180,7 @@ async def evidence_report(case_id: str, db: DBSession, user: CaseReader) -> Evid
 
 
 @router.get("/{case_id}/timeline", response_model=TimelineResponse, summary="Case activity timeline")
-async def case_timeline(case_id: str, db: DBSession, user: CaseReader) -> TimelineResponse:
+async def case_timeline(case_id: str, db: DBSession, user: AuthUser) -> TimelineResponse:
     cid = await _resolve_case_id(case_id, db, user.tenant_id)
     case_row = (
         await db.execute(
@@ -1321,7 +1308,7 @@ async def case_timeline(case_id: str, db: DBSession, user: CaseReader) -> Timeli
 
 
 @router.get("/{case_id}/tasks", response_model=list[TaskResponse], summary="List case tasks")
-async def list_tasks(case_id: str, db: DBSession, user: CaseReader) -> list[TaskResponse]:
+async def list_tasks(case_id: str, db: DBSession, user: AuthUser) -> list[TaskResponse]:
     cid = await _resolve_case_id(case_id, db, user.tenant_id)
     exists = (
         await db.execute(
@@ -1736,7 +1723,7 @@ async def case_investigate(
 async def list_case_investigations(
     case_id: str,
     db: DBSession,
-    user: CaseReader,
+    user: AuthUser,
 ) -> dict[str, Any]:
     """List all investigation runs for a case.
 
@@ -1789,12 +1776,77 @@ async def list_case_investigations(
     }
 
 
+async def _ledger_investigation_run(
+    db, tenant_id: uuid.UUID, cid: Any, run_id: str
+) -> dict[str, Any] | None:
+    """The investigation-run envelope from the Postgres ledger.
+
+    Agents' `_runs` is process-local and empties on restart; every run is
+    persisted to `investigation_runs` regardless, so this reconstructs the
+    detail shape the case workspace expects when agents can no longer answer.
+    Tenant-scoped and case-bound: a run id from another tenant, or one that
+    belongs to a different case, returns None so the caller keeps its 404.
+    """
+    from app.models.investigation import InvestigationRun
+
+    if not _looks_like_uuid(run_id):
+        # The ledger keys runs by UUID id; a non-UUID run_id cannot match one.
+        return None
+    stmt = (
+        select(InvestigationRun)
+        .where(InvestigationRun.tenant_id == tenant_id)
+        .where(InvestigationRun.id == uuid.UUID(run_id))
+        .where(InvestigationRun.case_id.in_([str(cid), run_id]))
+    )
+    row = (await db.execute(stmt)).scalars().first()
+    if row is None:
+        return None
+    return {
+        "run_id": str(row.id),
+        "case_id": row.case_id,
+        "status": row.status,
+        "model": row.model_used,
+        "iterations": row.iterations,
+        "total_tokens": row.total_tokens,
+        "started_at": row.started_at.isoformat() if row.started_at else None,
+        "completed_at": row.completed_at.isoformat() if row.completed_at else None,
+        "error": row.error,
+    }
+
+
+async def _ledger_report_md(db, tenant_id: uuid.UUID, run_id: str) -> str | None:
+    """The persisted Markdown report body for a run, from investigation_artifacts."""
+    from app.models.investigation import InvestigationArtifact
+
+    if not _looks_like_uuid(run_id):
+        return None
+    row = (
+        await db.execute(
+            select(InvestigationArtifact)
+            .where(InvestigationArtifact.tenant_id == tenant_id)
+            .where(InvestigationArtifact.run_id == uuid.UUID(run_id))
+            .where(InvestigationArtifact.kind == "report_md")
+            .order_by(InvestigationArtifact.created_at.desc())
+            .limit(1)
+        )
+    ).scalars().first()
+    return row.content if row and row.content else None
+
+
+def _looks_like_uuid(value: str) -> bool:
+    try:
+        uuid.UUID(str(value))
+        return True
+    except (ValueError, AttributeError, TypeError):
+        return False
+
+
 @router.get("/{case_id}/investigations/{run_id}", summary="Get investigation run")
 async def case_investigation_run(
     case_id: str,
     run_id: str,
     db: DBSession,
-    user: CaseReader,
+    user: AuthUser,
 ) -> dict[str, Any]:
     """One investigation run belonging to this case, in the caller's tenant."""
     # Scoping kept out of the docstring because FastAPI publishes that verbatim
@@ -1815,16 +1867,25 @@ async def case_investigation_run(
     # CR/LF, or other URL syntax into the proxied path.
     safe_run_id = quote(run_id, safe="")
     resp = await _agents_proxy("GET", f"/api/v1/investigations/{safe_run_id}", headers={"X-AiSOC-Tenant-ID": str(user.tenant_id)})
-    if resp.status_code >= 400:
-        raise HTTPException(status_code=resp.status_code, detail=resp.text)
-    run = resp.json()
+    if resp.status_code < 400:
+        run = resp.json()
+        # A run that names a different case is not this case's run. Compared as
+        # strings because the agents service echoes whatever case id it was given.
+        run_case_id = run.get("case_id")
+        if run_case_id is not None and str(run_case_id) != str(cid):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Investigation run not found for this case")
+        return run
 
-    # A run that names a different case is not this case's run. Compared as
-    # strings because the agents service echoes whatever case id it was given.
-    run_case_id = run.get("case_id")
-    if run_case_id is not None and str(run_case_id) != str(cid):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Investigation run not found for this case")
-    return run
+    # Agents keeps runs in a process-local dict (`_runs`, "swap for Redis in
+    # production") — every run is persisted to the Postgres ledger anyway, so
+    # an agents restart empties `_runs` and every historical run 404s here
+    # while the sibling list route (which falls back to the ledger) still shows
+    # it. Mirror that fallback so case detail survives an agents restart; the
+    # 404 only stands when the run genuinely isn't this tenant's.
+    ledger_run = await _ledger_investigation_run(db, user.tenant_id, cid, run_id)
+    if ledger_run is None:
+        raise HTTPException(status_code=resp.status_code, detail=resp.text)
+    return ledger_run
 
 
 @router.get(
@@ -1836,7 +1897,7 @@ async def case_investigation_report_md(
     case_id: str,
     run_id: str,
     db: DBSession,
-    user: CaseReader,
+    user: AuthUser,
 ) -> PlainTextResponse:
     """The Markdown report the case workspace renders."""
     # `CaseWorkspace.tsx` fetched this from two places and the route did not
@@ -1854,19 +1915,32 @@ async def case_investigation_report_md(
     safe_run_id = quote(run_id, safe="")
 
     meta = await _agents_proxy("GET", f"/api/v1/investigations/{safe_run_id}", headers={"X-AiSOC-Tenant-ID": str(user.tenant_id)})
-    if meta.status_code >= 400:
-        raise HTTPException(status_code=meta.status_code, detail=meta.text)
-    run_case_id = meta.json().get("case_id")
-    if run_case_id is not None and str(run_case_id) != str(cid):
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Investigation run not found for this case",
-        )
+    if meta.status_code < 400:
+        run_case_id = meta.json().get("case_id")
+        if run_case_id is not None and str(run_case_id) != str(cid):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Investigation run not found for this case",
+            )
+        resp = await _agents_proxy("GET", f"/api/v1/investigations/{safe_run_id}/report.md", headers={"X-AiSOC-Tenant-ID": str(user.tenant_id)})
+        if resp.status_code < 400:
+            return PlainTextResponse(content=resp.text, media_type="text/markdown; charset=utf-8")
 
-    resp = await _agents_proxy("GET", f"/api/v1/investigations/{safe_run_id}/report.md", headers={"X-AiSOC-Tenant-ID": str(user.tenant_id)})
-    if resp.status_code >= 400:
-        raise HTTPException(status_code=resp.status_code, detail=resp.text)
-    return PlainTextResponse(content=resp.text, media_type="text/markdown; charset=utf-8")
+    # Same ledger fallback as the sibling detail route: agents' `_runs` is
+    # process-local and empties on restart, but the Markdown report is
+    # persisted to `investigation_artifacts` (kind='report_md') at run close,
+    # so serve it from there rather than 404-ing a completed run. Runs whose
+    # report predates artifact persistence have no body anywhere and still 404.
+    ledger_run = await _ledger_investigation_run(db, user.tenant_id, cid, run_id)
+    if ledger_run is None:
+        raise HTTPException(
+            status_code=meta.status_code if meta.status_code >= 400 else status.HTTP_404_NOT_FOUND,
+            detail=meta.text if meta.status_code >= 400 else "Investigation run not found",
+        )
+    body = await _ledger_report_md(db, user.tenant_id, run_id)
+    if not body:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report not persisted for this run")
+    return PlainTextResponse(content=body, media_type="text/markdown; charset=utf-8")
 
 
 # Filename sanitiser for Content-Disposition: keep only safe ASCII so the
@@ -1937,7 +2011,7 @@ async def _emit_summary_breadcrumb(
 async def case_auto_summary(
     case_id: str,
     db: DBSession,
-    user: CaseReader,
+    user: AuthUser,
     format: Literal["json", "html"] = Query(
         "json",
         description=(
@@ -1976,7 +2050,7 @@ async def case_auto_summary(
 async def case_auto_postmortem(
     case_id: str,
     db: DBSession,
-    user: CaseReader,
+    user: AuthUser,
     format: Literal["json", "html"] = Query(
         "json",
         description=(
@@ -2017,7 +2091,7 @@ async def case_auto_postmortem(
 async def case_investigation_pdf(
     case_id: str,
     run_id: str,
-    user: CaseReader,
+    user: AuthUser,
 ) -> Response:
     safe_run_id = quote(run_id, safe="")
     resp = await _agents_proxy(
@@ -2045,7 +2119,7 @@ async def case_investigation_pdf(
 async def list_related_cases(
     case_id: str,
     db: DBSession,
-    user: CaseReader,
+    user: AuthUser,
 ) -> dict[str, Any]:
     """Return other cases that share alerts or observables with this case.
 

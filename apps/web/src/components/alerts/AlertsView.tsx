@@ -317,8 +317,10 @@ export function AlertsView() {
     sort: 'priority',
     status: 'new',
   });
-  // Default to the raw alerts grid (operator preference 2026-10-28): triage
-  // starts from alerts; the entity-centric RBA queue stays one click away.
+  // Standing console default (operator preference, never silently revert):
+  // triage starts from the raw alerts grid with `new` pre-filtered; the
+  // entity-centric RBA queue stays one click away. Re-apply after upstream
+  // rebase — an upstream merge reverted this to 'entities' once already.
   const [viewMode, setViewMode] = useState<ViewMode>('alerts');
 
   const { data, error, isLoading } = useSWR(
