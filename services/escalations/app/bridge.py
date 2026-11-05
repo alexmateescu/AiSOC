@@ -3,7 +3,7 @@
 The platform's outbound webhook subsystem (services/api/app/services/
 outbound_webhooks.py) is complete but not yet wired: enqueue_event has no
 production callers. Until it is, this service fills the gap by watching the
-platform's OWN ack clock (aisoc_cases.acknowledged_at) and
+platform's OWN ack clock (aisoc_cases.acknowledged_at / ack_due_at) and
 posting escalations to a Microsoft Teams Power Automate workflow (or any
 generic JSON webhook):
 

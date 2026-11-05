@@ -1,4 +1,4 @@
--- PR2 (docs/cve-patch-policy.md): patch-window tracking on the vulnerability
+-- 161 (docs/cve-patch-policy.md): patch-window tracking on the vulnerability
 -- inventory. Additive only — no existing column is touched, so a stack that
 -- rolls back the code keeps running against this schema unchanged.
 --

@@ -1,4 +1,4 @@
--- 095: dedicated schema for bulk-close backup snapshots.
+-- 160: dedicated schema for bulk-close backup snapshots.
 --
 -- POST /api/v1/alerts/bulk-close snapshots every matched row into a
 -- per-call table (bulk_close_backup_<uuid>) immediately before the
