@@ -297,8 +297,82 @@ _BASELINE_DERIVED_FIELDS = frozenset(
         "baseline_client_family_rarity",
         "baseline_location_rarity",
         "baseline_principal_volume_z",
-        "baseline_oauth_app_volume_z",
         "baseline_peer_deviation",
+        # Sub-principal baselines (wave-2 7.3, and wave-2 1.4's mechanism).
+        # `baselines.SUB_PRINCIPAL_FIELDS` generates these from its keys, so
+        # a kind added there must be added here too — which is precisely
+        # what the bidirectional test in `test_baselines.py` enforces, and
+        # what caught this list when the sub-principal table landed.
+        "baseline_oauth_app_volume_z",
+        "baseline_agent_volume_z",
+        "baseline_gateway_key_volume_z",
+        # Per-agent novelty and rate (depth 6.4's "tools, resources, volume,
+        # token spend, hours").
+        "baseline_agent_tool_rarity",
+        "baseline_agent_model_rarity",
+        "baseline_agent_hour_rarity",
+        "baseline_agent_token_spend_z",
+        "baseline_gateway_key_token_spend_z",
+        # Depth plan wave 2, 1.4 — per-sub-principal baselines. A token, an
+        # OAuth app, a service account or an AI agent acting for a human
+        # gets its own baseline, because a stolen credential acts *as* the
+        # user and leaves the user's own numbers untouched.
+        "baseline_sub_principal_kind",
+        "baseline_sub_principal_rarity",
+        "baseline_sub_principal_volume_z",
+        "baseline_token_cadence",
+        "baseline_token_cadence_shift",
+        "baseline_token_reactivated_after_idle",
+        "baseline_token_new_asn_after_creation",
+    }
+)
+
+#: Depth 2 wave 2 item 2.2. Distinct source networks that have failed and
+#: succeeded against one account over weeks, from
+#: `services/fusion/app/services/long_horizon_identity.py`, folded into the
+#: namespace by `DetectionEngine.evaluate_async` beside the baseline store.
+#: Absent for an account with too little history, which is why a rule
+#: reading one fires on a measured breadth and never on a quiet account.
+#:
+#: `services/fusion/tests/test_long_horizon_identity.py` asserts this set and
+#: `long_horizon_identity.DERIVED_FIELDS` agree in both directions.
+_LONG_HORIZON_DERIVED_FIELDS = frozenset(
+    {
+        "lh_distinct_failed_asn",
+        "lh_distinct_failed_country",
+        "lh_distinct_failed_ip",
+        "lh_distinct_success_asn",
+        "lh_distinct_success_country",
+        "lh_distinct_success_ip",
+        "lh_failed_asn_saturated",
+        "lh_failed_country_saturated",
+        "lh_failed_ip_saturated",
+        "lh_success_asn_saturated",
+        "lh_success_country_saturated",
+        "lh_success_ip_saturated",
+        "lh_failed_to_success_asn_ratio",
+        "lh_horizon_days",
+    }
+)
+
+#: Depth 2 wave 2 item 2.4. Per-endpoint API behaviour from
+#: `services/fusion/app/services/api_behaviour.py`, published only for a
+#: tenant that opted in and only for a template with enough history — so a
+#: rule reading one fires on a measured deviation from a learned shape and
+#: never on the first request to a new endpoint.
+#:
+#: `services/fusion/tests/test_api_behaviour.py` asserts this set and
+#: `api_behaviour.DERIVED_FIELDS` agree in both directions.
+_API_BEHAVIOUR_DERIVED_FIELDS = frozenset(
+    {
+        "api_template",
+        "api_unknown_parameter",
+        "api_unknown_parameter_detail",
+        "api_parameter_type_change",
+        "api_parameter_type_change_detail",
+        "api_identifier_enumeration",
+        "api_identifier_enumeration_detail",
+        "api_enumeration_distinct",
     }
 )
 
@@ -318,6 +392,8 @@ def _is_derivable(field: str, namespace: set[str]) -> bool:
         or field in _TENANT_DERIVED_FIELDS
         or field in _FIRST_SEEN_DERIVED_FIELDS
         or field in _BASELINE_DERIVED_FIELDS
+        or field in _LONG_HORIZON_DERIVED_FIELDS
+        or field in _API_BEHAVIOUR_DERIVED_FIELDS
     ):
         return True
     match = _DERIVED_COMPARISON_RE.match(field)
@@ -376,6 +452,46 @@ def _family(field: str) -> str:
     return "other"
 
 
+def _module_field_names(path: Path) -> set[str]:
+    """Every string-literal dict key appearing in one module."""
+    names: set[str] = set()
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except (SyntaxError, OSError):
+        return names
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Dict):
+            for key in node.keys:
+                if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                    names.add(key.value)
+        # `d["key"] = v` and `d.get("key")` also declare a field name.
+        elif isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant):
+            if isinstance(node.slice.value, str):
+                names.add(node.slice.value)
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            if node.func.attr in {"get", "pop", "setdefault"} and node.args:
+                first = node.args[0]
+                if isinstance(first, ast.Constant) and isinstance(first.value, str):
+                    names.add(first.value)
+    return names
+
+
+def _connector_namespace_by_module() -> dict[str, set[str]]:
+    """Connector module stem -> the field names that module names.
+
+    The union of this is what most callers want, but not every caller: a
+    rule declares the ``log_source.product`` it matches, and "some connector
+    somewhere names this field" is a weaker statement than "the source this
+    rule reads emits it". Keeping the split lets a caller ask the stronger
+    question. See ``check_enrichment_decisions``, which found a GitHub rule
+    credited with a ``scopes`` field only an unrelated connector emits.
+    """
+    sources = list(CONNECTORS.rglob("*.py"))
+    if AI_SDK.is_dir():
+        sources += list(AI_SDK.rglob("*.py"))
+    return {path.stem: _module_field_names(path) for path in sorted(sources)}
+
+
 def _connector_namespace() -> set[str]:
     """Every string-literal dict key appearing in a connector module.
 
@@ -384,28 +500,8 @@ def _connector_namespace() -> set[str]:
     f-string prefix is still picked up as a literal where one exists.
     """
     namespace: set[str] = set(_PLATFORM_FIELDS)
-    sources = list(CONNECTORS.rglob("*.py"))
-    if AI_SDK.is_dir():
-        sources += list(AI_SDK.rglob("*.py"))
-    for path in sorted(sources):
-        try:
-            tree = ast.parse(path.read_text(encoding="utf-8"))
-        except (SyntaxError, OSError):
-            continue
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Dict):
-                for key in node.keys:
-                    if isinstance(key, ast.Constant) and isinstance(key.value, str):
-                        namespace.add(key.value)
-            # `d["key"] = v` and `d.get("key")` also declare a field name.
-            elif isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant):
-                if isinstance(node.slice.value, str):
-                    namespace.add(node.slice.value)
-            elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
-                if node.func.attr in {"get", "pop", "setdefault"} and node.args:
-                    first = node.args[0]
-                    if isinstance(first, ast.Constant) and isinstance(first.value, str):
-                        namespace.add(first.value)
+    for names in _connector_namespace_by_module().values():
+        namespace |= names
     return namespace
 
 

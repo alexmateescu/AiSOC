@@ -13,6 +13,11 @@ rather than by guessing from field presence:
 
 * ``ai-runtime`` and ``ai-finding`` — the SDK and gateway telemetry. These
   name the agent, the model, the MCP server and the human it acted for.
+  ``agentmetry`` rides the same branch: its inbox template maps the coding
+  agent onto the identical slots (``agent.name`` → ``actor.process.name``,
+  ``actor.id`` → ``actor.user.name``, ``host_id`` →
+  ``src_endpoint.hostname``) precisely so this recorder and the graph
+  projection read one shape.
 * ``llm_usage`` provider audit events — these name a provider key and the
   account that minted it, and nothing about any device.
 * OCSF Process Activity (class 1007) carrying a known coding-agent or MCP
@@ -372,7 +377,7 @@ def classify(message: dict[str, Any]) -> list[_Sighting]:
     source_type = _text(ocsf.get("source_type")) or _text(_nested(ocsf, "metadata", "product", "name")) or ""
     out: list[_Sighting] = []
 
-    if source_type in ("ai-runtime", "ai-finding", "AI Runtime", "AI Guardrail"):
+    if source_type in ("ai-runtime", "ai-finding", "agentmetry", "AI Runtime", "AI Guardrail"):
         out.extend(_from_ai_telemetry(tenant_id, ocsf, now))
     elif source_type in ("llm_usage", "AI / LLM Usage Audit"):
         out.extend(_from_provider_audit(tenant_id, ocsf, now))
@@ -683,13 +688,20 @@ def _from_provider_audit(tenant_id: str, ocsf: dict[str, Any], now: float) -> li
     No device is available from any provider's audit log, and that is the
     reason `discovery_source` exists: an analyst must be able to tell an
     unlinked device from an unlinkable one.
+
+    Reads through `_connector_fields`, not off the canonical OCSF map. The
+    canonical map carries the identity aliases and nothing else, so every
+    field this function needs beyond the actor — a consent grant's scope
+    list, the application it was granted to — exists only in the
+    connector's own dict, which ingest stores as a JSON string under
+    `raw_data`. Reading `finding.evidence.scopes` instead meant the scopes
+    were always absent and a grant over a whole mailbox scored as a grant
+    over nothing.
     """
-    event_type = _text(ocsf.get("activity_name")) or ""
-    principal = _text(_nested(ocsf, "actor", "user", "name"))
+    fields = _connector_fields(ocsf)
+    event_type = _first(fields, ("event_type",)) or _text(ocsf.get("activity_name")) or ""
+    principal = _text(_nested(ocsf, "actor", "user", "name")) or _first(fields, ("actor_email", "actor"))
     provider = _text(_nested(ocsf, "metadata", "product", "vendor_name"))
-    subject = _text(_nested(ocsf, "finding", "uid")) or _text(ocsf.get("message"))
-    if not subject:
-        return []
 
     lowered = event_type.lower()
     if "api_key" in lowered or "service_account" in lowered:
@@ -699,8 +711,28 @@ def _from_provider_audit(tenant_id: str, ocsf: dict[str, Any], now: float) -> li
     else:
         return []
 
+    # The governed object, not the audit record. Keying an OAuth grant on
+    # the record id would make every re-consent a new asset and reset
+    # `first_seen_at` on each one, so the inventory would grow a row per
+    # event and never show that this application has been there since May.
+    subject = None
+    display_name = None
+    if kind == KIND_OAUTH_GRANT:
+        subject = _first(fields, ("application_id", "client_id"))
+        display_name = _first(fields, ("application_name",))
+    subject = subject or _text(_nested(ocsf, "finding", "uid")) or _text(ocsf.get("message"))
+    if not subject:
+        return []
+
     attributes: dict[str, Any] = {"event_type": event_type}
-    scopes = _nested(ocsf, "finding", "evidence", "scopes")
+    # `granted_scopes` is what the connector promotes for a consent grant;
+    # `scopes` is kept for any producer that emits the plainer name.
+    scopes = fields.get("granted_scopes") or fields.get("scopes")
+    if not (isinstance(scopes, list) and scopes):
+        # The OCSF-native path some producers use. Kept so an event that
+        # does carry evidence.scopes is still read, rather than trading one
+        # blind spot for another.
+        scopes = _nested(ocsf, "finding", "evidence", "scopes")
     if isinstance(scopes, list) and scopes:
         attributes["scopes"] = sorted({str(s) for s in scopes})
 
@@ -710,7 +742,7 @@ def _from_provider_audit(tenant_id: str, ocsf: dict[str, Any], now: float) -> li
             kind=kind,
             external_id=subject,
             device=None,
-            display_name=subject,
+            display_name=display_name or subject,
             vendor=provider,
             discovery_source=source,
             principal=principal,

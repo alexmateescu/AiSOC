@@ -36,6 +36,12 @@ KNOWN_CAPABILITIES: frozenset[str] = frozenset(
         "pull_logs",
         "pull_pcap",
         "pull_vulnerabilities",
+        # Context rather than events: an HR system and an MDM report
+        # slowly-changing state, which the connector scheduler materialises
+        # into workforce_members and workforce_devices instead of pushing
+        # through ingest.
+        "pull_workforce",
+        "pull_device_inventory",
         # QUERY
         "query_logs",
         "query_processes",
@@ -90,6 +96,13 @@ KNOWN_CAPABILITIES: frozenset[str] = frozenset(
         # or a principal, so neither fits the three verbs above.
         "lookup_cloud_audit",
         "lookup_endpoint_telemetry",
+        # Depth plan wave 2, 8.2. Network evidence for a vendor-originated
+        # alert: the flow and protocol records involving one address, and
+        # the devices an NDR appliance has discovered at it. Neither fits
+        # `lookup_endpoint_telemetry`, which searches an EDR's own index on
+        # a host, nor `lookup_cloud_audit`, which reads a control plane.
+        "lookup_network_flows",
+        "lookup_network_device",
         # Depth 5.1. A distributed osquery query across a fleet. Distinct
         # from `query_processes`, which names one table; this runs one of a
         # closed set of allowlisted templates and the caller never supplies
@@ -135,5 +148,37 @@ KNOWN_CAPABILITIES: frozenset[str] = frozenset(
         "notify",
         # AUDIT
         "read_audit_trail",
+        # CLOUD IDENTITY (wave-2 Phase 6.1 / depth 5.5). The non-human half
+        # of the directory, plus the instance-level quarantine that works
+        # without an EDR agent. See the matching block in
+        # services/connectors/app/connectors/base.py for why each is its
+        # own verb rather than a flag on an existing one.
+        "deactivate_access_key",
+        "reactivate_access_key",
+        "disable_service_identity",
+        "enable_service_identity",
+        "get_cloud_identity",
+        "get_oauth_grants",
+        "quarantine_instance",
+        "release_instance",
+        "restore_role_sessions",
+        "restore_token",
+        "revoke_oauth_grant",
+        "revoke_role_sessions",
+        # CODE PLATFORM
+        "disable_workflow",
+        "enable_workflow",
+        "get_secret_scanning_alerts",
+        "remove_org_member",
+        "restore_org_member",
+        "revoke_deploy_key",
+        # SECURE WEB GATEWAY
+        "allow_url",
+        "block_url",
+        # AI ESTATE (wave-2 Phase 7.5 / depth 6.6)
+        "demote_role",
+        "remove_workspace_member",
+        "restore_spend_cap",
+        "set_spend_cap",
     }
 )

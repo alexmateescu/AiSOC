@@ -104,8 +104,22 @@ jobs:
         run: |
           set -euo pipefail
 
-          spine_paths='services/ingest/ services/fusion/ services/realtime/ docker-compose.yml scripts/integration/ .github/workflows/integration.yml'
-          migration_paths='services/api/migrations/ services/api/app/scripts/run_migrations.py services/ueba/alembic/ services/api/tests/test_mssp_portfolio_isolation.py tests/isolation/test_postgres_rls.py tests/isolation/test_mssp_rls_live.py scripts/check_runtime_db_role.py .github/workflows/integration.yml'
+          # services/agents/ is in here for the readiness probe at the far end
+          # of the Kafka spine: the triage worker is the spine's last
+          # consumer, and its /readyz answered 200 through an entire broker
+          # outage while ingest, fusion and realtime all answered 503. One
+          # assignment — see the note on migration_paths below for what two
+          # cost.
+          spine_paths='services/ingest/ services/fusion/ services/realtime/ services/agents/app/_health.py services/agents/app/main.py services/agents/app/workers/fused_alert_consumer.py services/agents/tests/integration/ docker-compose.yml scripts/integration/ .github/workflows/integration.yml'
+          # One assignment, deliberately. Three parallel lanes each appended
+          # their live-test paths as a fresh `migration_paths=` line, and in
+          # shell the last assignment wins silently — so two lanes' filter
+          # entries (the asset-context live leg, then the business-context
+          # rail legs) were inert: their live tests only ran when something
+          # *else* in the surviving list changed. This is the union of all
+          # three lists; the next lane extends it rather than re-assigning.
+          migration_paths='services/api/migrations/ services/api/app/scripts/run_migrations.py services/ueba/alembic/ services/api/tests/test_mssp_portfolio_isolation.py tests/isolation/test_postgres_rls.py tests/isolation/test_mssp_rls_live.py scripts/check_runtime_db_role.py services/fusion/tests/test_asset_context_live.py services/fusion/app/services/asset_context.py services/api/tests/test_alert_rail_business_context_live.py services/api/app/services/alert_rail.py services/agents/tests/test_business_context_tenant_rules_live.py services/agents/app/workers/business_context.py services/api/tests/test_alert_queue_priority_live.py services/api/app/services/alert_queue.py tests/isolation/test_alert_occurrences_live.py services/fusion/app/services/alert_sink.py services/fusion/tests/test_alert_reduction_real.py tests/isolation/test_root_cause_findings_live.py .github/workflows/integration.yml'
+          migration_paths='services/api/migrations/ services/api/app/scripts/run_migrations.py services/ueba/alembic/ services/api/tests/test_mssp_portfolio_isolation.py tests/isolation/test_postgres_rls.py tests/isolation/test_mssp_rls_live.py scripts/check_runtime_db_role.py services/fusion/tests/test_asset_context_live.py services/fusion/app/services/asset_context.py services/api/tests/test_alert_rail_business_context_live.py services/api/app/services/alert_rail.py services/agents/tests/test_business_context_tenant_rules_live.py services/agents/app/workers/business_context.py services/api/tests/test_alert_queue_priority_live.py services/api/app/services/alert_queue.py services/api/tests/test_identity_privilege_live.py services/api/app/services/identity_privilege.py services/api/app/services/identity_privilege_store.py services/api/app/services/alert_priority.py services/api/tests/test_access_review_live.py services/api/app/services/access_review.py services/api/app/services/access_review_store.py services/api/tests/test_identity_resolution_live.py services/api/app/services/identity_resolution.py services/api/app/services/identity_resolution_store.py services/api/app/services/change_timeline.py tests/isolation/test_alert_occurrences_live.py services/fusion/app/services/alert_sink.py services/fusion/tests/test_alert_reduction_real.py services/connectors/app/vuln_promotion_sql.py services/connectors/app/scheduler.py services/connectors/tests/test_vuln_promotion_live.py services/api/app/api/v1/endpoints/triage_questions.py services/agents/app/context/triage_questions_store.py services/agents/app/hunt/source_report_store.py services/agents/app/api/router.py services/agents/tests/integration/ .github/workflows/integration.yml'
           # backup_crypt.py was missing from the old filter, and it is where
           # every byte of the AES-256-GCM implementation lives — so a change
           # to the encryption itself did not run the gate that proves the
@@ -780,6 +794,218 @@ jobs:
           MSSP_ISOLATION_REQUIRED: '1'
         run: pip install --quiet pytest pytest-asyncio && python -m pytest tests/test_mssp_portfolio_isolation.py -v --tb=short
 
+      # The patch-window promotion sweep is the only path from
+      # `asset_vulnerabilities` back into the alert queue, and its upsert
+      # carried `:affected_hosts::jsonb` — never substituted, so the literal
+      # text reached the driver and every sweep on every deployment answered
+      # `syntax error at or near ":"` into a per-tenant `except Exception`.
+      # The suite that covered it asserted substrings against the SQL string,
+      # which cannot fail on this: the substring is present and correct.
+      #
+      # Under the CONNECTORS service's own locked interpreter, deliberately.
+      # It resolves SQLAlchemy 2.1.6 where the migrations job above installs a
+      # different closure, and the two releases declare different parameter
+      # sets for this statement — so the version that grades the fix has to be
+      # the version services/connectors/Dockerfile installs.
+      - name: Patch-window promotion statements against real Postgres
+        working-directory: services/connectors
+        env:
+          # The RUNTIME role, not the owner. A superuser ignores every RLS
+          # policy in the schema even under FORCE ROW LEVEL SECURITY, and
+          # seeding as the owner is the exact workaround that has hidden
+          # policy defects here before — `check_runtime_db_role.py` fails a
+          # workflow that points a test DSN at the superuser.
+          AISOC_TEST_POSTGRES: postgresql+asyncpg://aisoc_app:aisoc_app_ci_secret@localhost:5432/aisoc
+        run: |
+          set -euo pipefail
+          python3 -m venv $RUNNER_TEMP/.venv-connectors
+          python3 ../../scripts/service_requirements.py connectors --locked > /tmp/connectors.lock.txt
+          $RUNNER_TEMP/.venv-connectors/bin/pip install --quiet --disable-pip-version-check --no-deps -r /tmp/connectors.lock.txt
+          $RUNNER_TEMP/.venv-connectors/bin/python -m pytest tests/test_vuln_promotion_live.py -q -p no:cacheprovider 2>&1 | tee /tmp/vuln-promo.log
+          grep -Eq "[1-9][0-9]* passed" /tmp/vuln-promo.log \
+            || { echo "::error::the promotion statements never executed — the Postgres leg is misconfigured"; exit 1; }
+
+      # Two tables that had a migration, a schema and no path that writes
+      # them. `triage_questions` is read on the triage hot path of every alert
+      # and had no writer anywhere; `hunt_source_reports` was a pure orphan
+      # whose `approved_at` enforced the property its own migration states.
+      # Both halves run against one database here, because a unit test of
+      # either half passes whether or not the other one exists — which is
+      # exactly how both shipped under GATED claim rows.
+      - name: The write surface for triage questions (live Postgres)
+        working-directory: services/api
+        env:
+          # The runtime role, not the owner: a superuser ignores every RLS
+          # policy even under FORCE ROW LEVEL SECURITY.
+          AISOC_TEST_POSTGRES: postgresql+asyncpg://aisoc_app:aisoc_app_ci_secret@localhost:5432/aisoc
+        run: |
+          set -euo pipefail
+          python -m pytest tests/test_triage_question_write_surface.py -q -p no:cacheprovider 2>&1 | tee /tmp/tq-write.log
+          grep -Eq "[1-9][0-9]* passed" /tmp/tq-write.log \
+            || { echo "::error::the triage-question write surface never ran — the Postgres leg is misconfigured"; exit 1; }
+
+      - name: Orphan-table round trips, read side (live Postgres)
+        working-directory: services/agents
+        env:
+          AISOC_TEST_POSTGRES: postgresql://aisoc_app:aisoc_app_ci_secret@localhost:5432/aisoc
+          AISOC_DEV_MODE: '1'
+        run: |
+          set -euo pipefail
+          python3 -m venv $RUNNER_TEMP/.venv-agents-db
+          python3 ../../scripts/service_requirements.py agents --locked > /tmp/agents.db.lock.txt
+          $RUNNER_TEMP/.venv-agents-db/bin/pip install --quiet --disable-pip-version-check --no-deps -r /tmp/agents.db.lock.txt
+          $RUNNER_TEMP/.venv-agents-db/bin/python -m pytest \
+            tests/integration/test_triage_questions_round_trip.py \
+            tests/integration/test_hunt_source_report_store_live.py \
+            -q -p no:cacheprovider 2>&1 | tee /tmp/agents-db.log
+          grep -Eq "[1-9][0-9]* passed" /tmp/agents-db.log \
+            || { echo "::error::no orphan-table round trip actually ran — the Postgres leg is misconfigured"; exit 1; }
+
+      # Fusion's fuse-time asset-context resolver: the name/FQDN/IP match,
+      # the highest-criticality tie-break and the tenant predicate are schema
+      # facts a fake pool would invent. The file's import closure is kept
+      # deliberately tiny (pydantic + pydantic-settings + structlog + asyncpg,
+      # the last two because fusion's conftest imports app.core.config) so this job can run
+      # it without fusion's full dependency set.
+      - name: Fusion asset-context resolver matches real inventory (live Postgres)
+        working-directory: services/fusion
+        env:
+          MSSP_ISOLATION_REQUIRED: '1'
+        run: pip install --quiet pydantic pydantic-settings structlog && python -m pytest tests/test_asset_context_live.py -v --tb=short
+      # The Investigation Rail's business-context leg joins
+      # investigation_events through investigation_runs (case_id TEXT = alert
+      # id) — schema facts only this job can check, including that another
+      # tenant's event stays invisible. REQUIRED turns an unreachable database
+      # into a failure rather than a skip.
+      - name: Rail business-context leg reads real ledger rows (live Postgres)
+        working-directory: services/api
+        env:
+          MSSP_ISOLATION_REQUIRED: '1'
+        run: python -m pytest tests/test_alert_rail_business_context_live.py -v --tb=short
+
+      # The auto-triage worker reads console-authored rules from
+      # aisoc_business_context_rule_sets with its own asyncpg client — the one
+      # read path the per-tenant engine suites (seeded rules) cannot see. The
+      # module's dependency closure is deliberately tiny (structlog + pyyaml);
+      # the agents conftest imports only asyncpg + pytest at module scope.
+      - name: Auto-triage worker reads console-authored rules (live Postgres)
+        working-directory: services/agents
+        env:
+          MSSP_ISOLATION_REQUIRED: '1'
+        run: pip install --quiet structlog pyyaml && python -m pytest tests/test_business_context_tenant_rules_live.py -v --tb=short
+      # Asset criticality orders the queue: the lower(name)/IP-overlap match,
+      # the exploited-and-unremediated KEV filter and the tenant predicate on
+      # both resolver queries are schema facts only this job can check. The
+      # negative control removes the resolver and asserts the order collapses.
+      - name: Queue priority resolves the tenant's asset inventory (live Postgres)
+        working-directory: services/api
+        env:
+          MSSP_ISOLATION_REQUIRED: '1'
+        run: python -m pytest tests/test_alert_queue_priority_live.py -v --tb=short
+
+      # Phase 3.3. A repeat kept as a linked occurrence is a jsonb statement
+      # with three parts a stub connection cannot judge: `payload_ids - 0`
+      # (the oldest-first eviction), the `@>` containment guard on the
+      # ON CONFLICT arm (the only thing stopping a Kafka redelivery from
+      # inflating the count), and the RLS policy itself. The suite runs as
+      # `aisoc_app` — DML-only, NOBYPASSRLS — because that is what fusion
+      # connects as, and it is what found the defect recorded in migration
+      # 151: the conventional `WITH CHECK (tenant_id = current_tenant_id())`
+      # makes the row unwritable by a consumer that binds no tenant session,
+      # and the write is best-effort, so it would have failed in silence.
+      - name: A repeated vendor finding is counted, not discarded (live Postgres)
+        working-directory: services/fusion
+        env:
+          MSSP_ISOLATION_REQUIRED: '1'
+          # The runtime role for the code under test; the owner for fixtures
+          # only. One superuser DSN for both would bypass every policy on the
+          # way through and could not have found the WITH CHECK defect.
+          ISOLATION_OCCURRENCES_DSN: postgresql://aisoc_app:aisoc_app_ci_secret@localhost:5432/aisoc
+          # aisoc-db-role: owner — fixtures only. The suite creates scratch tenants, which the DML-only runtime role cannot. The code under test reads ISOLATION_OCCURRENCES_DSN above, which is the runtime role with NOBYPASSRLS, so every assertion — including the one that found migration 151's WITH CHECK defect — is still judged under forced RLS.
+          ISOLATION_OCCURRENCES_ADMIN_DSN: postgresql://aisoc:aisoc_ci_secret@localhost:5432/aisoc
+        run: |
+          set -euo pipefail
+          pip install --quiet pydantic pydantic-settings structlog
+          python -m pytest ../../tests/isolation/test_alert_occurrences_live.py -v --tb=short -rs | tee /tmp/occurrences.log
+          # A skipped live suite reports the same word as a passing one.
+          #
+          # The count is NOT anchored to the start of the line: pytest writes
+          # its summary as `===== 6 passed in 0.67s =====`, so `^[0-9]+` never
+          # matched and this guard reddened a run in which all six tests
+          # passed. A guard that fails on a healthy suite is worse than no
+          # guard, because the documented remedy becomes "ignore it".
+          #
+          # `[1-9][0-9]*` rather than `[0-9]+`, so a run that collected
+          # nothing and reported `0 passed` is still a failure.
+          grep -qE '[1-9][0-9]* passed' /tmp/occurrences.log \
+            || { echo "::error::the occurrence live suite did not report any passing test"; exit 1; }
+          ! grep -qE 'skipped' /tmp/occurrences.log \
+            || { echo "::error::the occurrence live suite skipped a test; its DSNs must both be set"; exit 1; }
+
+      # Phase 3.3, second half. Three statements a stub accepts and Postgres
+      # does not: the ON CONFLICT upsert on the (resource, technique,
+      # principal) unique index; the recount's correlated subquery, which
+      # orders severity by the five-tier ladder explicitly because
+      # alphabetical order puts `critical` below `medium`; and
+      # COUNT(DISTINCT connector_type), recomputed rather than incremented so
+      # a redelivery cannot turn two vendors into three.
+      - name: Several vendors reporting one root cause are one finding (live Postgres)
+        working-directory: services/fusion
+        env:
+          MSSP_ISOLATION_REQUIRED: '1'
+          ISOLATION_ROOT_CAUSE_DSN: postgresql://aisoc_app:aisoc_app_ci_secret@localhost:5432/aisoc
+          # aisoc-db-role: owner — fixtures only. The suite creates scratch tenants, which the DML-only runtime role cannot. The code under test reads ISOLATION_ROOT_CAUSE_DSN above, which is the NOBYPASSRLS runtime role, so the RLS assertion is judged under the policy it really runs under.
+          ISOLATION_ROOT_CAUSE_ADMIN_DSN: postgresql://aisoc:aisoc_ci_secret@localhost:5432/aisoc
+        run: |
+          set -euo pipefail
+          python -m pytest ../../tests/isolation/test_root_cause_findings_live.py -v --tb=short -rs | tee /tmp/rootcause.log
+          # Same pattern as the occurrence guard above, and for both its
+          # reasons. Unanchored, because pytest's summary line begins with
+          # `=====` and `^[0-9]+ passed` therefore matches nothing — the
+          # guard failed a run in which all six tests passed. And
+          # `[1-9][0-9]*` rather than `[0-9]+`, so a run that collected
+          # nothing and reported `0 passed` is still a failure.
+          grep -qE '[1-9][0-9]* passed' /tmp/rootcause.log \
+            || { echo "::error::the root-cause live suite did not report any passing test"; exit 1; }
+          ! grep -qE 'skipped' /tmp/rootcause.log \
+            || { echo "::error::the root-cause live suite skipped a test; its DSNs must both be set"; exit 1; }
+      # Depth 2 wave 2, 1.1. The properties here are schema facts a stand-in
+      # store always gets right by construction: the
+      # `valid_from <= t < valid_until` select that makes an alert read the
+      # tier its actor held *when it acted*, the partial unique index that
+      # refuses two live rows, the principal_id-or-label join, and
+      # `boolean NULL` round-tripping as None rather than False. Each test
+      # carries its own negative control.
+      - name: Privilege at event time is read point-in-time (live Postgres)
+        working-directory: services/api
+        env:
+          MSSP_ISOLATION_REQUIRED: '1'
+        run: python -m pytest tests/test_identity_privilege_live.py -v --tb=short
+
+      # Depth 2 wave 2, 1.2. The review's properties are all schema facts:
+      # the unique index that turns a nightly re-run into an update rather
+      # than a ninetieth copy of one sentence, the NOT IN delete that
+      # retires a finding somebody fixed, an acknowledgement surviving the
+      # next run, and the tenant predicate on every statement including the
+      # acknowledgement write.
+      - name: Access review de-duplicates, retires and stays tenant-scoped (live Postgres)
+        working-directory: services/api
+        env:
+          MSSP_ISOLATION_REQUIRED: '1'
+        run: python -m pytest tests/test_access_review_live.py -v --tb=short
+
+      # Depth 2 wave 2, 3.1. The cluster walk is the leg that matters: a
+      # weak link must not be traversable, and the way that breaks is a
+      # chain of three weak hops joining two identities no single rule
+      # would join. The filter is in the SQL, so only a database can check
+      # it. The ordered-pair CHECK is exercised with a deliberate
+      # out-of-order insert that must be refused.
+      - name: Identity resolution never merges on a weak link (live Postgres)
+        working-directory: services/api
+        env:
+          MSSP_ISOLATION_REQUIRED: '1'
+        run: python -m pytest tests/test_identity_resolution_live.py -v --tb=short
+
       # 060_rls_coverage.sql takes RLS from 31 of 95 tenant-scoped tables to
       # every one of them bar a documented exclusion. A migration that adds 49
       # policies is worth what the evidence that they filter is worth, so the
@@ -984,6 +1210,145 @@ jobs:
   # condition is on the steps instead, so the expensive half — a Postgres, an
   # S3 endpoint, a full dump-and-restore — is skipped when the diff touches
   # none of it, and the verdict still arrives.
+  fusion-redis-live:
+    # The fusion correlator and the windowed engine's claim protocol, against
+    # a real Redis. Both have in-memory doubles in the unit suite, and both
+    # rest on properties only the server has: `SET NX` deciding exactly one
+    # winner between concurrent creators, TTL-driven window expiry, and the
+    # owner-checked claim scripts. A single-threaded double passes those by
+    # construction — the more-capable-than-reality shape — so the suites at
+    # services/fusion/tests/integration/ existed and ran in no workflow,
+    # which is the other recurring shape: a live suite that is decoration
+    # until something sets its env var. This job is that something. The
+    # Kafka/Postgres-legged tests in the same directory skip here, visibly,
+    # and run under the spine job's full stack instead.
+    name: Fusion correlator + windowed claims (live Redis)
+    needs: changes
+    if: needs.changes.outputs.spine == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      # The service's committed lock, not a hand-picked closure. This job
+      # runs the whole tests/integration/ suite, and the install-parity gate
+      # is right to hold a whole-suite run to the lock: a tiny closure
+      # re-resolves inside the declared ranges, so the versions it grades
+      # need not be the versions services/fusion/Dockerfile installs — and a
+      # missing optional dependency (clickhouse-driver) silently grades the
+      # `except ImportError` fallback where production grades the real path.
+      - name: Install fusion's locked dependency set
+        run: |
+          set -euo pipefail
+          python3 -m venv $RUNNER_TEMP/.venv-fusion
+          python3 scripts/service_requirements.py fusion --locked > /tmp/fusion.lock.txt
+          $RUNNER_TEMP/.venv-fusion/bin/pip install --quiet --disable-pip-version-check --no-deps -r /tmp/fusion.lock.txt
+
+      - name: Correlator + windowed claims against the real server
+        working-directory: services/fusion
+        env:
+          AISOC_TEST_REDIS: redis://127.0.0.1:6379/0
+        run: |
+          set -euo pipefail
+          $RUNNER_TEMP/.venv-fusion/bin/python -m pytest tests/integration/ -q -p no:cacheprovider 2>&1 | tee /tmp/fusion-live.log
+          # A run in which everything skipped is a configuration failure
+          # wearing a green tick — the one outcome this job must refuse.
+          grep -Eq "[1-9][0-9]* passed" /tmp/fusion-live.log \
+            || { echo "::error::no live fusion test actually ran — the Redis leg is misconfigured"; exit 1; }
+
+  agents-kafka-live:
+    # `/readyz` on the service that hosts the auto-triage worker, against a
+    # real broker that then goes away. The unit suite can only prove the
+    # endpoint reports whatever the probe returns; the premise the fix rests
+    # on — that aiokafka keeps `attached` true for the whole outage, because
+    # the reconnect lives inside `__anext__` — is a property of the client,
+    # and a double that models it models the author's belief about aiokafka.
+    #
+    # The broker advertises the PROXY's port, not its own. Without that the
+    # client takes the cluster's real address out of the bootstrap response
+    # and leaves the proxy behind, so the staged outage never reaches it and
+    # the test passes against the defect.
+    name: Agents readiness through a broker outage (live Kafka)
+    needs: changes
+    if: needs.changes.outputs.spine == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      kafka:
+        image: confluentinc/cp-kafka:7.5.0
+        ports:
+          - 9092:9092
+        env:
+          KAFKA_NODE_ID: 1
+          KAFKA_PROCESS_ROLES: broker,controller
+          KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+          KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://127.0.0.1:19092
+          KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+          KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+          KAFKA_CONTROLLER_QUORUM_VOTERS: 1@127.0.0.1:9093
+          KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+          KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+          KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+          KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+          KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
+          CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install the agents service's locked dependency set
+        run: |
+          set -euo pipefail
+          python3 -m venv $RUNNER_TEMP/.venv-agents
+          python3 scripts/service_requirements.py agents --locked > /tmp/agents.lock.txt
+          $RUNNER_TEMP/.venv-agents/bin/pip install --quiet --disable-pip-version-check --no-deps -r /tmp/agents.lock.txt
+
+      - name: Wait for the broker to answer
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 60); do
+            if (echo > /dev/tcp/127.0.0.1/9092) >/dev/null 2>&1; then
+              echo "broker accepting connections"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::the Kafka service container never accepted a connection"
+          exit 1
+
+      - name: Readiness against a broker that goes away
+        working-directory: services/agents
+        env:
+          AISOC_TEST_KAFKA: 127.0.0.1:9092
+          AISOC_TEST_KAFKA_PROXY_PORT: '19092'
+          AISOC_DEV_MODE: '1'
+        run: |
+          set -euo pipefail
+          $RUNNER_TEMP/.venv-agents/bin/python -m pytest tests/integration/ -q -p no:cacheprovider 2>&1 | tee /tmp/agents-live.log
+          # A run in which everything skipped is a configuration failure
+          # wearing a green tick — the one outcome this job must refuse.
+          grep -Eq "[1-9][0-9]* passed" /tmp/agents-live.log \
+            || { echo "::error::no live agents readiness test actually ran — the Kafka leg is misconfigured"; exit 1; }
+
   backup-restore:
     name: Backup → destroy → restore (Postgres via S3)
     runs-on: ubuntu-latest

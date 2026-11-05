@@ -110,6 +110,36 @@ class InvestigationState(BaseModel):
     # `{"skill_id": ..., "version": N, "ref": "id@vN", "owner": ...}`.
     tenant_skill: dict[str, Any] | None = None
 
+    # What the tenant's business-context rules did to this alert before triage
+    # (services/agents workers/business_context). Carried on the state so the
+    # prompt can tell the model a mutation happened and the verdict can cite
+    # the rule ids that caused it — a `set_severity` the model cannot see is a
+    # provenance hole in every downstream explanation.
+    # `{"matched_rule_ids": [...], "severity_before": ..., "severity_after": ...}`.
+    business_context: dict[str, Any] | None = None
+
+    # The tenant's standing questions, answered from collected evidence
+    # before the prompt was built (app/context/triage_questions.py). Carried
+    # as the rendered block rather than as structure because the renderer is
+    # what wraps every tenant string in the untrusted envelope — a caller
+    # re-rendering it from parts is a caller that can forget to.
+    # `{"block": str, "answered": int, "unanswerable": int, "skipped": [...]}`.
+    triage_questions: dict[str, Any] | None = None
+
+    # The verdict's business-impact element, kept only when every citation it
+    # carries resolves to supplied context (rule ids, identity accounts). An
+    # uncited impact statement is dropped, not rendered — same discipline as
+    # knowledge-base citations. `{"statement": str, "citations": [...]}`.
+    business_impact: dict[str, Any] | None = None
+
+    #: The claim-support review behind the verdict, as structure rather than
+    #: only as basis strings: which decisive claims the evidence supported,
+    #: which it did not, and which it contradicted
+    #: (``ClaimSupportResult.as_dict()``). ``None`` on paths that never score
+    #: claims — the deterministic tier, memory suppression — which is a
+    #: different fact from "scored and found nothing".
+    claim_review: dict[str, Any] | None = None
+
     # Knowledge-base runbook chunks retrieved for this alert, as
     # `app.context.knowledge_base.RunbookRetrieval.as_state()` renders them:
     # the chunks, the markers a citation resolves through, and what the
@@ -137,6 +167,34 @@ class InvestigationState(BaseModel):
     # rather than the dataclasses for the same import-cycle reason as above.
     recent_dispositions: dict[str, Any] | None = None
     identity_context: dict[str, Any] | None = None
+    #: Depth-2 8.1. Open cloud-security findings on the resources this
+    #: alert names, with the `collected` flag that tells an absent CNAPP
+    #: apart from a clean estate.
+    cloud_posture_context: dict[str, Any] | None = None
+
+    # Phase 4.5. What the vendors that raised or observe this alert said when
+    # asked, just before triage reasoned over it. Carried as the
+    # `VendorEvidence` dataclass rather than as a dict, because the guard on
+    # fabricated tool claims reads `executed_capabilities` off it — the list
+    # of verbs a vendor really answered, which is not recoverable from a
+    # rendered block. `Any` for the same import-cycle reason as above, and
+    # excluded from the serialised state for the same reason the retrieval
+    # dicts are shaped the way they are.
+    vendor_evidence: Any = None
+    # Phase 4.2. What the reviewer pass did, including when it abstained.
+    # `None` means the pass did not run; an abstention is a dict saying so,
+    # and the two must not be collapsed.
+    reviewer_outcome: dict[str, Any] | None = None
+    # Phase 4.4(a). Past decisions on alerts *like* this one, matched by
+    # similarity rather than by the exact evidence fingerprint. Context only
+    # — nothing here closes an alert; suppression stays exact-match.
+    precedent: list[dict[str, Any]] = Field(default_factory=list)
+    # What those principals could do *at the alert's event time*, as
+    # `app.context.privilege.PrivilegeContext.as_state()` renders it (depth
+    # plan wave 2, 1.1). Distinct from `identity_context`, which says who
+    # holds the account: a service account no directory knows about still
+    # has effective permissions, and that is usually the interesting case.
+    privilege_context: dict[str, Any] | None = None
 
     # Findings accumulated during investigation
     findings: list[str] = Field(default_factory=list)
@@ -212,6 +270,9 @@ class InvestigationState(BaseModel):
         prompt: str | list[dict[str, Any]],
         response: str,
         duration_ms: int,
+        serving_model: str | None = None,
+        serving_attribution: str | None = None,
+        system_fingerprint: str | None = None,
     ) -> dict[str, Any]:
         """Record one model call so the verdict it produced can be replayed.
 
@@ -228,6 +289,15 @@ class InvestigationState(BaseModel):
             "agent": agent,
             "purpose": purpose,
             "model": model,
+            # The serving identity, kept apart from the requested one above.
+            # `model` is what was asked for; `serving_model` is what some
+            # party said answered, `serving_attribution` is who said it
+            # (gateway_header / response_body), and None means nobody did —
+            # never a copy of the request. `system_fingerprint` is the
+            # backend's own configuration digest when it published one.
+            "serving_model": serving_model,
+            "serving_attribution": serving_attribution,
+            "system_fingerprint": system_fingerprint,
             "prompt": prompt_text[:_LLM_LITERAL_LIMIT],
             "prompt_truncated": len(prompt_text) > _LLM_LITERAL_LIMIT,
             "response": response[:_LLM_LITERAL_LIMIT],

@@ -25,12 +25,16 @@ Endpoints
 Persistence story
 -----------------
 
-v1 of T3.5 keeps the parsed rule set in the
-:class:`BusinessContextEngine` process singleton. A
-``# TODO(T3.5-followup)`` is wired in :func:`_persist_for` for the
-``aisoc_business_context_rule_sets`` migration that adds JSONB +
-versioning. Keeping persistence to a single helper means swapping in
-the DB-backed store is a one-file change.
+Rule sets persist as JSONB + YAML source on
+``aisoc_business_context_rule_sets`` (one row per tenant, ``version``
+bumped on every save) via :func:`_persist_for`. The
+:class:`BusinessContextEngine` process singleton is only the parsed
+cache in front of that row — a restart or another replica re-reads
+Postgres, and the auto-triage worker loads the same row per tenant
+(``services/agents`` ``_load_tenant_rules``), so a saved rule applies
+to triage on every deployment. An earlier revision of this module kept
+rules only in the process dict; that is the defect this note used to
+describe as a TODO, not the current state.
 
 Feature flag
 ------------
@@ -52,6 +56,7 @@ tenant-admin concern.
 
 from __future__ import annotations
 
+import json
 import time
 from datetime import UTC, datetime
 from typing import Any
@@ -73,6 +78,10 @@ from app.services.business_context.engine import (
     BusinessContextEngine,
     EngineSnapshot,
     get_engine,
+)
+from app.services.business_context.plain_language import (
+    PlainLanguageError,
+    compile_plain_language,
 )
 
 logger = structlog.get_logger()
@@ -147,10 +156,11 @@ class UpdateRuleRequest(BaseModel):
 class PreviewRequest(BaseModel):
     yaml: str = Field(..., max_length=_MAX_YAML_BYTES)
     alerts: list[dict[str, Any]] = Field(default_factory=list)
-    """Optional alert sample. When empty, the endpoint pulls the last
-    50 alerts off ``aisoc_alerts``; when non-empty, the supplied
-    alerts are used verbatim (useful for the editor's "preview against
-    these three illustrative alerts" power-user flow).
+    """Optional alert sample. When empty, the endpoint pulls the tenant's
+    last 50 rows from ``alerts``, shaped like the fused alert the worker
+    evaluates; when non-empty, the supplied alerts are used verbatim
+    (useful for the editor's "preview against these three illustrative
+    alerts" power-user flow).
     """
 
 
@@ -374,13 +384,13 @@ async def _fetch_sample_alerts(
         result = await db.execute(
             text(
                 """
-                SELECT id, severity, title,
+                SELECT id, severity, title, description, risk_score,
                        connector_type AS source,
                        affected_ips->>0  AS src_ip,
                        affected_hosts->>0 AS hostname,
                        affected_users->>0 AS username,
                        tags,
-                       raw_event AS metadata
+                       raw_event
                 FROM alerts
                 WHERE tenant_id = CAST(:tenant_id AS uuid)
                 ORDER BY created_at DESC
@@ -401,27 +411,32 @@ async def _fetch_sample_alerts(
     out: list[dict[str, Any]] = []
     for row in rows:
         d = dict(row)
-        meta = d.pop("metadata", None) or {}
-        # Promote the common fields the rule grammar references onto the
-        # top level so authors can write `field: alert.severity` rather
-        # than `field: alert.metadata.severity`.
+        raw_event = d.pop("raw_event", None) or {}
+        if isinstance(raw_event, str):
+            try:
+                raw_event = json.loads(raw_event)
+            except (TypeError, ValueError):
+                raw_event = {}
+        # Shape the sample exactly like the fused alert the worker evaluates
+        # (`RawAlert.model_dump()`): top-level fields plus `raw_event.*`,
+        # nothing else. This used to manufacture a nested
+        # `alert.{severity, target, time}` structure that exists on no fused
+        # alert — so a rule written against the suggested `alert.*` paths
+        # previewed as matching and then never fired in production, which is
+        # the one failure mode a preview exists to prevent.
         out.append(
             {
                 "id": str(d.get("id")),
                 "severity": d.get("severity"),
                 "title": d.get("title"),
+                "description": d.get("description"),
                 "source": d.get("source"),
                 "src_ip": d.get("src_ip"),
                 "hostname": d.get("hostname"),
                 "username": d.get("username"),
+                "risk_score": d.get("risk_score"),
                 "tags": list(d.get("tags") or []),
-                "alert": {
-                    "severity": d.get("severity"),
-                    "source": d.get("source"),
-                    "target": (meta.get("target") if isinstance(meta, dict) else {}) or {},
-                    "time": (meta.get("time") if isinstance(meta, dict) else {}) or {},
-                },
-                "metadata": meta,
+                "raw_event": raw_event if isinstance(raw_event, dict) else {},
             }
         )
     return out
@@ -726,3 +741,111 @@ def _serialise_rules(rules: list[BusinessContextRule]) -> str:
         for r in rules
     ]
     return yaml.safe_dump({"rules": docs}, sort_keys=False)
+
+
+# ---------------------------------------------------------------------------
+# Plain-language authoring (Wave 2, Phase 4.3)
+# ---------------------------------------------------------------------------
+#
+# An analyst types a sentence and sees, before saving, the exact structured
+# rule it compiles to. No model is involved: the compiler is a deterministic
+# parser, which is how the item's hard constraint — a tenant's free text never
+# becomes an instruction — is met by construction rather than by a guard.
+#
+# The preview answers the question the `neq` defect never got asked: "will
+# this rule ever match?". Fields are dotted paths into a fused alert whose
+# shape depends on a tenant's connectors, so they cannot be a closed list;
+# instead the route measures each referenced field against the tenant's own
+# recent alerts and reports the coverage. A field present in 0 of 50 is the
+# warning that stops a rule that parses and never fires.
+
+
+class CompileRequest(BaseModel):
+    sentence: str = Field(..., max_length=2000)
+    rule_id: str = Field(..., min_length=3, max_length=63)
+    description: str = Field("", max_length=300)
+
+
+class FieldCoverage(BaseModel):
+    field: str
+    present_in: int
+    sample_size: int
+
+
+class CompileResponse(BaseModel):
+    rule: dict[str, Any]
+    yaml: str
+    fields: list[FieldCoverage]
+    warnings: list[str]
+
+
+def _present_in(alerts: list[dict[str, Any]], path: str) -> int:
+    """How many sampled alerts carry ``path``. Absent, not falsy."""
+    count = 0
+    for alert in alerts:
+        current: Any = alert
+        for part in path.split("."):
+            if isinstance(current, dict) and part in current:
+                current = current[part]
+            else:
+                break
+        else:
+            count += 1
+    return count
+
+
+@router.post("/rules/compile", response_model=CompileResponse)
+async def compile_rule(
+    payload: CompileRequest,
+    user: AuthUser,
+    db: DBSession,
+) -> CompileResponse:
+    """Compile one plain-language sentence into the structured rule schema.
+
+    Saves nothing. The returned ``rule`` is the exact mapping a save would
+    write, so the preview and the save cannot drift — they are one dict.
+    """
+    await user.require_permission_db("settings:read", db)
+
+    try:
+        compiled = compile_plain_language(
+            payload.sentence,
+            rule_id=payload.rule_id,
+            description=payload.description,
+        )
+    except PlainLanguageError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+
+    # Round-trip through the real parser rather than trusting the compiler.
+    # If the two ever disagree the author must see it here, not discover it
+    # when the rule is saved and refused.
+    rule_yaml = yaml.safe_dump({"rules": [compiled.rule]}, sort_keys=False)
+    try:
+        load_rules_from_yaml(rule_yaml)
+    except RuleParseError as exc:  # pragma: no cover - defence in depth
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"the sentence compiled to a rule the schema rejects: {exc}",
+        ) from exc
+
+    alerts = await _fetch_sample_alerts(db, user.tenant_id, limit=50)
+    coverage = [
+        FieldCoverage(field=name, present_in=_present_in(alerts, name), sample_size=len(alerts)) for name in compiled.fields_referenced
+    ]
+
+    warnings = list(compiled.warnings)
+    for entry in coverage:
+        if entry.sample_size and entry.present_in == 0:
+            warnings.append(
+                f"{entry.field!r} is not present in any of your last {entry.sample_size} alerts, "
+                "so this rule would not have matched any of them"
+            )
+    if not alerts:
+        warnings.append("there are no recent alerts to check these fields against, so field coverage is unknown rather than zero")
+
+    return CompileResponse(
+        rule=compiled.rule,
+        yaml=rule_yaml,
+        fields=coverage,
+        warnings=warnings,
+    )

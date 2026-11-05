@@ -35,7 +35,9 @@ so individual executors never have to think about them:
 
 from __future__ import annotations
 
+import asyncio
 import os
+import socket
 from dataclasses import replace
 from typing import Any
 from uuid import uuid4
@@ -43,7 +45,9 @@ from uuid import uuid4
 import structlog
 
 from app.models.action import ActionRequest, ActionType
+from app.security.ssrf_guard import SSRFError, validate_outbound_url
 from app.services.approval_matrix import evaluate_contract
+from app.services.asset_lookup import asset_criticality_for_target
 from app.services.autonomy_safety import (
     _BLAST_ORDER,
     ACTION_BLAST_RADIUS,
@@ -54,14 +58,15 @@ from app.services.autonomy_safety import (
     decide,
     rollback_capability,
 )
-from app.services.credential_resolver import resolve_params
+from app.services.credential_resolver import ProtectedParameterOverride, resolve_params
 from app.services.kill_switch import KillSwitchState, kill_switch_state
 from app.services.maturity import _AUTO_ALLOWED_AT_TIER, MaturityTier
+from app.services.response_schedule_store import resolve_response_schedule
 from app.services.tenant_policy import TenantPolicy, resolve_tenant_policy
 from app.services.verification import PostActionVerifier, VerificationOutcome
 
 from . import registry
-from .approval_rules import EARNED_TIER_CEILING_LABEL, TIER_ORDER, tier_from_env_value
+from .approval_rules import EARNED_TIER_CEILING_LABEL, TIER_ORDER, ResponseSchedule, tier_from_env_value
 from .capability_contracts import CAPABILITY_CONTRACTS
 from .contract import ActionImpact, ApprovalRequirement, Reversal
 from .models import LiveActionRequest, LiveActionResult, LiveActionStatus
@@ -134,6 +139,17 @@ async def _govern(request: LiveActionRequest, action_type: ActionType) -> Autono
         requested_by=request.requested_by,
     )
     policy = await resolve_tenant_policy(request.tenant_id)
+    # What is this action about to touch? Resolved once per dispatch from the
+    # tenant's own inventory; None (no CMDB, no match, outage) grades exactly
+    # as before. Tighten-only by construction in evaluate_contract.
+    target_criticality = await asset_criticality_for_target(request.tenant_id, request.target)
+    # Wave-2 Phase 6.3. The tenant's declared time gates: a change freeze, an
+    # out-of-hours condition, a nobody-on-call condition. Raise-only by
+    # construction (see `apply_schedule`), and `None` for the overwhelming
+    # majority of tenants, who have declared no schedule. Resolved here
+    # because this is the door that has a database — the same reasoning as
+    # `asset_criticality` directly above.
+    schedule = await resolve_response_schedule(request.tenant_id)
 
     # A tenant override is a deliberate, explicit instruction for one action
     # type, so it outranks the tier ladder in both directions.
@@ -162,6 +178,8 @@ async def _govern(request: LiveActionRequest, action_type: ActionType) -> Autono
                 f"action type '{action_type.value}' is force-auto by tenant policy",
             ),
             tier_label="L4",
+            asset_criticality=target_criticality,
+            schedule=schedule,
         )
 
     # Gap-closure Phase 2.3. A tenant that has run this verb's alert classes in
@@ -208,6 +226,8 @@ async def _govern(request: LiveActionRequest, action_type: ActionType) -> Autono
         request,
         decision,
         tier_label=_tier_label(effective_tier),
+        asset_criticality=target_criticality,
+        schedule=schedule,
     )
 
 
@@ -260,7 +280,13 @@ async def _govern_by_contract_alone(request: LiveActionRequest) -> AutonomyDecis
             f"contract ({contract.impact.value} impact) under tier {policy.tier.name}"
         ),
     )
-    return _apply_capability_contract(request, baseline, tier_label=_tier_label(policy.tier))
+    return _apply_capability_contract(
+        request,
+        baseline,
+        tier_label=_tier_label(policy.tier),
+        asset_criticality=await asset_criticality_for_target(request.tenant_id, request.target),
+        schedule=await resolve_response_schedule(request.tenant_id),
+    )
 
 
 def _apply_capability_contract(
@@ -268,6 +294,8 @@ def _apply_capability_contract(
     decision: AutonomyDecision,
     *,
     tier_label: str,
+    asset_criticality: str | None = None,
+    schedule: ResponseSchedule | None = None,
 ) -> AutonomyDecision:
     """Raise the autonomy verdict to whatever the capability contract demands.
 
@@ -311,6 +339,8 @@ def _apply_capability_contract(
         contract=contract,
         confidence=request.confidence,
         tier=tier_label,
+        asset_criticality=asset_criticality,
+        schedule=schedule,
     )
 
     if verdict.is_blocked:
@@ -455,6 +485,45 @@ def _stopped_by_kill_switch(request: LiveActionRequest, state: KillSwitchState) 
     )
 
 
+def _ungovernable_reason(request: LiveActionRequest, action_type: ActionType | None) -> str | None:
+    """Why this request cannot be graded, or ``None`` if it can.
+
+    Checked before any executor runs and only for would-be real executions --
+    an explicit dry run is already the safest mode and changes nothing, so
+    refusing one would stop an operator previewing a verb they are about to
+    be told they may not run.
+    """
+    if request.tenant_id is None:
+        return (
+            "the request names no tenant, so neither the tenant's autonomy tier nor its kill "
+            "switch can be resolved; set tenant_id on the dispatch"
+        )
+    if action_type is None and request.capability not in CAPABILITY_CONTRACTS:
+        return (
+            f"capability '{request.capability}' has neither a legacy ActionType nor an entry in "
+            "CAPABILITY_CONTRACTS, so its impact, reversibility and approval requirement are "
+            "undeclared; add a contract in capability_contracts.py"
+        )
+    return None
+
+
+def _refusal(reason: str) -> AutonomyDecision:
+    """A blocked verdict for a request governance could not grade.
+
+    CRITICAL blast radius and the lowest tier deliberately: the fields are
+    read by callers deciding how loudly to report, and an ungraded request is
+    not a low-risk one -- it is one whose risk nobody measured.
+    """
+    return AutonomyDecision(
+        mode=AutonomyMode.BLOCKED,
+        blast_radius=BlastRadius.CRITICAL,
+        tier=MaturityTier.L0_OBSERVE,
+        rollback=RollbackCapability.UNSUPPORTED,
+        requires_verification=False,
+        reason=reason,
+    )
+
+
 def _not_executed(request: LiveActionRequest, status: LiveActionStatus, decision: AutonomyDecision) -> LiveActionResult:
     return LiveActionResult(
         request_id=request.request_id,
@@ -470,6 +539,36 @@ def _not_executed(request: LiveActionRequest, status: LiveActionStatus, decision
             "reason": decision.reason,
         },
     )
+
+
+def _first_blocked_destination(params: dict[str, Any]) -> tuple[str, str] | None:
+    """``(param_name, reason)`` for the first caller-named address we refuse.
+
+    Matches on the *value's* shape, not the key's name: a connection URL
+    arrives as ``base_url``, ``cs_base_url``, ``snow_instance_url``,
+    ``webhook_url`` and half a dozen other spellings, and a key-name list
+    would have to be kept level with every one of them. The same reasoning,
+    and the same carve-out, as ``_refuse_internal_destinations`` in the API.
+
+    A hostname that simply fails to resolve is **allowed through**. The vendor
+    client's own connection error says more than a guard's would, and refusing
+    on a failed lookup would put every dispatch behind a working DNS server —
+    turning a transient resolver fault into a refusal to contain a host.
+
+    Blocking ``getaddrinfo`` is why the caller runs this in a thread.
+    """
+    for key, value in (params or {}).items():
+        candidates = value if isinstance(value, list) else [value]
+        for item in candidates:
+            if not isinstance(item, str) or not item.startswith(("http://", "https://")):
+                continue
+            try:
+                validate_outbound_url(item)
+            except SSRFError as exc:
+                if isinstance(exc.__cause__, socket.gaierror):
+                    continue
+                return key, str(exc)
+    return None
 
 
 async def dispatch(request: LiveActionRequest) -> LiveActionResult:
@@ -513,9 +612,56 @@ async def dispatch(request: LiveActionRequest) -> LiveActionResult:
         )
         return _stopped_by_kill_switch(request, switch)
 
-    # Phase B2 — translate connector-style credentials into executor params.
+    # ── Where the caller may point this service ──────────────────────────
+    #
+    # Two separate controls, because the reported defect had two halves
+    # (GHSA-78jg-x2ch-638f) and closing either alone leaves the other open.
+    #
+    # First: a destination the caller named at all. The vendors with no entry
+    # in VENDOR_CREDENTIAL_MAP — osctrl, fleetdm, aisoc_direct — take their
+    # whole connection from `params`, so the protected-key rule below has
+    # nothing to compare against and the caller is the only source. That is a
+    # request this container makes to an address a user chose, with the reply
+    # reflected into the dispatch report, which is the shape the connectors
+    # service already adopted the platform guard for (GHSA-cq4g-g6wp-4m2w).
+    #
+    # Matched on the value's shape rather than the key's name, like the API's
+    # `_refuse_internal_destinations`, because `base_url` is one of a dozen
+    # spellings. A host that merely fails to resolve passes: the vendor
+    # client's own connection error is the better diagnostic, and refusing
+    # here would make every dispatch depend on DNS.
+    refused_destination = await asyncio.to_thread(_first_blocked_destination, request.params)
+    if refused_destination is not None:
+        key, reason = refused_destination
+        log.warning("live_action.blocked_destination", param=key, reason=reason)
+        return LiveActionResult(
+            request_id=request.request_id,
+            status=LiveActionStatus.FAILED,
+            capability=request.capability,
+            vendor_id=request.vendor_id,
+            summary=f"'{request.capability}' was refused before any request left this service.",
+            error=f"{key}: destination refused: {reason}",
+        )
+
+    # Second: Phase B2 translation of connector-style credentials into
+    # executor params. `request.params` may choose *what* an action does and
+    # never *where* it goes or *whose* credential it spends, so a key naming a
+    # stored connection or credential field is refused here rather than
+    # overriding one. Refused, not dropped: dropping would send the call to
+    # the vendor's default endpoint and report success.
     if request.auth_config:
-        resolved = resolve_params(request.vendor_id, request.auth_config, extra=request.params)
+        try:
+            resolved = resolve_params(request.vendor_id, request.auth_config, extra=request.params)
+        except ProtectedParameterOverride as exc:
+            log.warning("live_action.protected_param_override", detail=str(exc))
+            return LiveActionResult(
+                request_id=request.request_id,
+                status=LiveActionStatus.FAILED,
+                capability=request.capability,
+                vendor_id=request.vendor_id,
+                summary=f"'{request.capability}' was refused before any credential was used.",
+                error=str(exc),
+            )
         request = request.model_copy(update={"params": resolved, "auth_config": None})
 
     executor = registry.get_executor(request.vendor_id, request.capability)
@@ -537,7 +683,34 @@ async def dispatch(request: LiveActionRequest) -> LiveActionResult:
     # possible — so governance applies to would-be real executions only.
     decision: AutonomyDecision | None = None
     action_type = _action_type_for(request, executor)
-    if not request.dry_run and (action_type is not None or request.capability in CAPABILITY_CONTRACTS):
+    if not request.dry_run:
+        # Two ways a real execution used to escape governance entirely, and
+        # both are the same shape: the gate was opt-in, and whatever fell
+        # outside the vocabulary it knew ran unchecked (GHSA-fm3f-p5jv-6hcg).
+        #
+        # F07 -- no tenant. `resolve_tenant_policy(None)` returns the
+        # deployment's `AISOC_MATURITY_TIER`, and `kill_switch_state(None)`
+        # matches only the global row, so a tenantless request is graded by an
+        # environment variable and no tenant's stop button can reach it.
+        # `_govern` even papered over it with `tenant_id=request.tenant_id or
+        # uuid4()`, inventing a tenant to build the ActionRequest with.
+        #
+        # F81 -- no contract and no ActionType. 22 of the 95 known
+        # capabilities are in that gap. None of the 167 registered executors
+        # is, today, so this was latent rather than exploitable -- but the
+        # gate was opt-in by vocabulary and a test
+        # (`test_unmapped_capability_is_not_governed`) pinned the fail-open as
+        # intended behaviour, which is how it would have stayed true for the
+        # first write capability added without a contract.
+        #
+        # Both now refuse. "Unverifiable means not autonomous" is this
+        # service's own stated rule for verification probes; a verdict nobody
+        # can compute is not a verdict that permits.
+        ungovernable = _ungovernable_reason(request, action_type)
+        if ungovernable is not None:
+            log.warning("live_action.refused_ungovernable", reason=ungovernable)
+            return _not_executed(request, LiveActionStatus.BLOCKED, _refusal(ungovernable))
+
         decision = await (_govern(request, action_type) if action_type is not None else _govern_by_contract_alone(request))
         log = log.bind(autonomy_mode=decision.mode.value, blast=decision.blast_radius.value)
         if decision.mode is AutonomyMode.BLOCKED:

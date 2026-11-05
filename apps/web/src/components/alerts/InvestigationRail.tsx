@@ -40,6 +40,7 @@ import { format, formatDistanceToNow } from 'date-fns';
 import {
   alertsApi,
   type Alert,
+  type BusinessContextRail,
   type MiniTimelineEvent,
   type RecommendedAction,
   type RelatedEntity,
@@ -147,6 +148,8 @@ export function InvestigationRail({ alertId, onClose }: InvestigationRailProps) 
         ) : (
           <>
             <AutomatedTriageSection alert={alert} />
+            <SourceAddressClassSection alert={alert} />
+            <BusinessContextSection ctx={alert.businessContext ?? null} />
             <NarrativeSection narrative={alert.narrative ?? null} />
             <RelatedEntitiesSection entities={alert.relatedEntities ?? []} />
             <MiniTimelineSection events={alert.miniTimeline ?? []} />
@@ -426,6 +429,82 @@ function AutomatedTriageSection({ alert }: { alert: Alert }) {
   );
 }
 
+/**
+ * What the pinned ingest dataset said about the source address.
+ *
+ * Rendered only when there is something to say. An alert whose address the
+ * dataset has never seen gets no section at all, deliberately: three of the
+ * five classes ship with no records because no redistributable source for
+ * them exists, so "no class" is the ordinary answer and a chip reading "not
+ * an anonymizer" would be a reassurance the data cannot support.
+ *
+ * The dataset version sits beside the class for the same reason it is a
+ * column rather than an inference: the dataset is refreshed, an address
+ * changes class over time, and an analyst reading an old alert has to be
+ * able to tell a reclassification from a change in behaviour.
+ */
+function SourceAddressClassSection({ alert }: { alert: Alert }) {
+  if (!alert.srcIpClass) return null;
+  // A value outside the closed set renders as nothing rather than as an
+  // unlabelled chip. `normalizeAlert` already drops unknown classes, so this
+  // only fires for an envelope that reached the component another way, and
+  // an unexplained class on a security surface is worse than silence.
+  const cfg = IP_CLASS_CONFIG[alert.srcIpClass];
+  if (!cfg) return null;
+  return (
+    <section className="px-4 py-4 border-b border-gray-800/40">
+      <SectionHeader title="Source address" />
+      <div className="flex flex-wrap items-center gap-2">
+        <span
+          className={clsx(
+            'inline-flex items-center rounded px-2 py-0.5 text-xs font-medium',
+            cfg.tone,
+          )}
+        >
+          {cfg.label}
+        </span>
+        {alert.srcIpClassDatasetVersion && (
+          <span className="text-[11px] text-gray-500">
+            dataset {alert.srcIpClassDatasetVersion}
+          </span>
+        )}
+      </div>
+      <p className="mt-1.5 text-xs text-gray-500">{cfg.detail}</p>
+    </section>
+  );
+}
+
+const IP_CLASS_CONFIG: Record<
+  NonNullable<Alert['srcIpClass']>,
+  { label: string; tone: string; detail: string }
+> = {
+  tor_exit: {
+    label: 'Tor exit relay',
+    tone: 'bg-rose-500/10 text-rose-300 ring-1 ring-rose-500/30',
+    detail: 'The address is published as a Tor exit relay. The originating network is not observable.',
+  },
+  vpn: {
+    label: 'VPN exit',
+    tone: 'bg-amber-500/10 text-amber-300 ring-1 ring-amber-500/30',
+    detail: 'The address is on a list of VPN exit nodes supplied by this tenant.',
+  },
+  public_proxy: {
+    label: 'Public proxy',
+    tone: 'bg-amber-500/10 text-amber-300 ring-1 ring-amber-500/30',
+    detail: 'The address is on a list of open proxies supplied by this tenant.',
+  },
+  residential_proxy: {
+    label: 'Residential proxy',
+    tone: 'bg-orange-500/10 text-orange-300 ring-1 ring-orange-500/30',
+    detail: 'The address is on a list of residential proxy exits supplied by this tenant.',
+  },
+  hosting_provider: {
+    label: 'Hosting provider',
+    tone: 'bg-sky-500/10 text-sky-300 ring-1 ring-sky-500/30',
+    detail: 'The address belongs to a cloud or hosting range, not to a consumer network.',
+  },
+};
+
 function NarrativeSection({ narrative }: { narrative: string | null }) {
   if (!narrative || !narrative.trim()) return null;
   // `build_narrative` emits a markdown-light dialect. Preserving newlines in a
@@ -551,6 +630,44 @@ function TimelineRow({ event }: { event: MiniTimelineEvent }) {
         <p className="mt-0.5 text-[10px] text-gray-600">by {event.actor}</p>
       )}
     </li>
+  );
+}
+
+function BusinessContextSection({ ctx }: { ctx: BusinessContextRail | null }) {
+  // Null means no tenant rule fired on this alert (or it predates the field).
+  // Render nothing rather than an empty shell — absence here is honest
+  // absence, not a measurement of zero.
+  if (!ctx || ctx.matchedRuleIds.length === 0) return null;
+  const mutated =
+    ctx.severityBefore && ctx.severityAfter && ctx.severityBefore !== ctx.severityAfter;
+  return (
+    <section className="px-4 py-4 border-t border-gray-800/60">
+      <SectionHeader title="Business context" count={ctx.matchedRuleIds.length} />
+      <div className="border border-gray-800/60 bg-gray-900/40 rounded-lg p-2.5 space-y-1.5">
+        <p className="text-xs text-gray-400">
+          Tenant rules applied before triage:{' '}
+          <span className="font-mono text-gray-200">{ctx.matchedRuleIds.join(', ')}</span>
+        </p>
+        {mutated && (
+          <p className="text-xs text-gray-400">
+            Severity{' '}
+            <span className="font-mono text-gray-300">{ctx.severityBefore}</span>
+            {' → '}
+            <span className="font-mono text-amber-300">{ctx.severityAfter}</span>
+          </p>
+        )}
+        {ctx.impactStatement && (
+          <p className="text-sm text-gray-200">
+            {ctx.impactStatement}
+            {ctx.impactCitations.length > 0 && (
+              <span className="ml-1 text-[10px] font-mono text-gray-500">
+                [cites: {ctx.impactCitations.join(', ')}]
+              </span>
+            )}
+          </p>
+        )}
+      </div>
+    </section>
   );
 }
 

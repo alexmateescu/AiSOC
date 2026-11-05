@@ -4,10 +4,12 @@ from fastapi import APIRouter
 
 from app.api.v1.endpoints import (
     access_conditions,
+    access_review,
     admin_users,
     agent_tools,
     agents,
     ai_assets,
+    ai_chat_compliance,
     airgap,
     alert_explain,
     alert_writeback,
@@ -47,6 +49,7 @@ from app.api.v1.endpoints import (
     hunt_reports,
     hunts,
     identity_graph,
+    identity_resolution,
     identity_timeline,
     inbox,
     inbox_itsm,
@@ -84,6 +87,7 @@ from app.api.v1.endpoints import (
     replay,
     report_builder,
     reports,
+    response_schedule,
     retro_hunts,
     rule_tuning,
     sandbox,
@@ -92,6 +96,7 @@ from app.api.v1.endpoints import (
     scim_tokens,
     semantic_memory,
     sla,
+    software_inventory,
     sso_connections,
     stix_taxii,
     taxii,
@@ -100,6 +105,7 @@ from app.api.v1.endpoints import (
     tenants,
     threat_intel,
     translation,
+    triage_questions,
     usage,
     verification_policies,
     waitlist,
@@ -223,6 +229,7 @@ api_router.include_router(health.router)
 # preceding window) so the dashboard can render in one round trip.
 api_router.include_router(insights.router)
 api_router.include_router(sla.router)
+api_router.include_router(software_inventory.router)
 api_router.include_router(investigations.router)
 api_router.include_router(kill_switch.router)
 
@@ -237,6 +244,7 @@ api_router.include_router(replay.public_router)
 # Resolves "what can principal X actually do?" across AWS / Azure / GCP /
 # Okta / Google Workspace and caches the result as :EFFECTIVE_PERMISSION
 # edges in Neo4j. Backs apps/web/src/app/(app)/identity/permissions.
+api_router.include_router(access_review.router)
 api_router.include_router(effective_permissions.router)
 
 # Signed email-approval links (T3.6). Unauthenticated by necessity — the
@@ -291,6 +299,8 @@ api_router.include_router(feedback.router)
 
 # Configurable autonomy guardrails — three-tier per-action confidence (Tier 1.3)
 api_router.include_router(autonomy_policy.router)
+api_router.include_router(response_schedule.router)
+api_router.include_router(triage_questions.router)
 
 # Business Context Rules — Track 3, T3.5 (v8.0 parallel team plan).
 # YAML rule engine that mutates fused alerts (severity bump, route, suppress,
@@ -345,6 +355,7 @@ api_router.include_router(threat_intel.router)
 api_router.include_router(posture.router)
 api_router.include_router(easm.router)
 api_router.include_router(identity_graph.router)
+api_router.include_router(identity_resolution.router)
 api_router.include_router(reports.router)
 # Depth 9.5: a natural-language hunt or a retro-hunt that found something
 # becomes a readable, cited report, exportable through the same WeasyPrint
@@ -446,6 +457,7 @@ api_router.include_router(realtime.router)
 # The module shipped in #1303 with no include site, so its three routes were
 # unreachable on that branch; mounted here by the merge train.
 api_router.include_router(ai_assets.router)
+api_router.include_router(ai_chat_compliance.router)
 
 # Case war rooms — depth 9.4. One action opens a Slack channel for a case,
 # invites the assignees and mirrors the timeline; the sweep worker is started

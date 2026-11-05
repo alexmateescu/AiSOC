@@ -66,6 +66,13 @@ class RawAlert(BaseModel):
     file_hash: str | None = None
     domain: str | None = None
     url: str | None = None
+    # Anonymizer or hosting class of `src_ip`, stamped at ingest from a
+    # pinned local dataset (depth plan wave 2, 1.6), with the dataset version
+    # that answered. None means the dataset had no entry, which is the
+    # ordinary case: three of the five classes ship with no records and are
+    # tenant-supplied. None must render as unknown, never as "not a VPN".
+    src_ip_class: str | None = None
+    src_ip_class_dataset_version: str | None = None
 
     # MITRE ATT&CK
     mitre_tactics: list[str] = Field(default_factory=list)
@@ -123,11 +130,47 @@ class RawAlert(BaseModel):
         return hashlib.sha256(canonical.encode()).hexdigest()
 
     def correlation_key(self) -> str:
-        """Generate a key for alert correlation (grouping related alerts)."""
-        # Correlate by primary entity and tactic
-        entity = self.src_ip or self.hostname or self.username or self.domain or "unknown"
-        tactic = self.mitre_tactics[0] if self.mitre_tactics else "unknown"
-        return f"{self.tenant_id}:{entity}:{tactic}"
+        """The key related alerts group under: entity and tactic, when both exist.
+
+        When either is missing, the key **narrows instead of widening**. The
+        previous fallback substituted the literal ``"unknown"`` for a missing
+        field, and since neither detection engine has ever set
+        ``mitre_tactics`` (the ruleset carries technique ids only), every
+        detection alert's key read ``{tenant}:{entity}:unknown`` — all of an
+        entity's detection alerts, whatever the rule or kill-chain stage,
+        collapsed into one incident per window, titled after whichever alert
+        arrived first. An exfiltration alert became row 37 inside an incident
+        named for a port scan. Alerts with no entity either were worse:
+        ``{tenant}:unknown:unknown`` merged unrelated alerts **tenant-wide**.
+
+        The fallback ladder, most to least evidence of relatedness:
+
+        * entity + tactic — unchanged, the designed key;
+        * entity, no tactic — scoped to the detection rule. Same rule firing
+          repeatedly on one entity is the storm correlation exists for;
+          different rules on one entity are not known to be one incident, and
+          merging them buries the one that mattered. The cost is stated: one
+          event firing N tactic-less rules now makes N incidents rather than
+          one, which fragments rather than buries — the recoverable
+          direction, since a reviewer can join incidents and cannot unbury
+          an alert nobody rendered;
+        * no entity — never groups across rules, and a tactic (when present)
+          narrows it further rather than standing alone tenant-wide;
+        * no entity and no rule — groups by the dedup fingerprint, so exact
+          repeats of one shape still collapse and nothing else does. Zero
+          evidence of relatedness groups nothing.
+        """
+        entity = self.src_ip or self.hostname or self.username or self.domain
+        tactic = self.mitre_tactics[0] if self.mitre_tactics else None
+        if entity and tactic:
+            return f"{self.tenant_id}:{entity}:{tactic}"
+        rule = self.rule_id or self.rule_name
+        if entity:
+            scope = f"rule:{rule}" if rule else f"fp:{self.fingerprint()[:16]}"
+            return f"{self.tenant_id}:{entity}:{scope}"
+        if rule:
+            return f"{self.tenant_id}:no-entity:rule:{rule}:{tactic or 'no-tactic'}"
+        return f"{self.tenant_id}:no-entity:fp:{self.fingerprint()[:16]}"
 
 
 class ConfidenceLabel(str, Enum):

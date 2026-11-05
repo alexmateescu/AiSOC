@@ -16,6 +16,8 @@ from app.services.ai_asset_recorder import AiAssetRecorder
 from app.services.alert_enricher import AlertEnricher
 from app.services.alert_outbox import AlertNotificationOutbox
 from app.services.alert_sink import AlertSink
+from app.services.api_behaviour import ApiBehaviourProfiler
+from app.services.asset_context import AssetContextResolver
 from app.services.attack_chain_grouper import AttackChainGrouper
 from app.services.baselines import BaselineStore
 from app.services.confidence import ConfidenceScorer
@@ -26,11 +28,14 @@ from app.services.dlq_sink import PostgresDLQ
 from app.services.entity_risk import EntityRiskEngine
 from app.services.first_seen import FirstSeenStore
 from app.services.fusion_engine import FusionEngine
+from app.services.identity_privilege_context import IdentityPrivilegeResolver
 from app.services.ioc_match import TenantIocMatcher
 from app.services.lake_writer import LakeWriter
+from app.services.long_horizon_identity import LongHorizonIdentityStore
 from app.services.sessions import SessionStore
 from app.services.tenant_overlay import OverlayCache
 from app.services.ueba_signal import UebaSignalCache
+from app.services.weak_signals import WeakSignalAggregator
 from app.services.windowed_detection import WindowedDetectionEngine
 from app.workers.consumer import FusionWorker
 
@@ -104,6 +109,16 @@ async def lifespan(app: FastAPI):
     memory_provider = (
         MemoryPriorProvider() if os.getenv("AISOC_FUSION_MEMORY_NUDGE", "1").strip().lower() not in {"0", "false", "no", "off"} else None
     )
+    # Business-context plan PR-3 — fuse-time asset-context stamp. Same
+    # Postgres this service already connects to (the assets table the console
+    # import writes); unset DATABASE_URL leaves the scorer's factor honestly
+    # reading "unknown (no inventory match)".
+    asset_resolver = AssetContextResolver(settings.database_url) if settings.database_url else None
+    # Depth 2 wave 2, 1.1 — the actor's privilege as of the event, read from
+    # `identity_privilege_facts` (migration 124) in the same Postgres. Unset
+    # DATABASE_URL leaves every alert stamped "unknown", which is what a
+    # deployment that has collected no posture should see.
+    privilege_resolver = IdentityPrivilegeResolver(settings.database_url) if settings.database_url else None
     engine = FusionEngine(
         dedup,
         correlator,
@@ -112,7 +127,9 @@ async def lifespan(app: FastAPI):
         ueba_cache=ueba_cache,
         chain_grouper=chain_grouper,
         enricher=enricher,
+        asset_resolver=asset_resolver,
         memory_provider=memory_provider,
+        privilege_resolver=privilege_resolver,
     )
     # Phase 3.1 — fused alerts land in the Postgres alert store so the spine
     # is continuous (raw event → alert row). Fail-soft: a missing/unreachable
@@ -143,6 +160,16 @@ async def lifespan(app: FastAPI):
     # same Redis. ADR-0011 records why this is a fusion module rather than
     # the `full`-profile UEBA service.
     baselines = BaselineStore(redis_client)
+    # Wave 2 items 2.2, 2.3 and 2.4 — three more stores on the same Redis.
+    # Each was built, tested and reachable from nothing, which is the defect
+    # `scripts/check_module_reachability.py` exists to name: a passing test
+    # on an uncalled module is indistinguishable from a working feature.
+    long_horizon = LongHorizonIdentityStore(redis_client) if settings.long_horizon_identity_enabled else None
+    weak_signals = WeakSignalAggregator(redis_client) if settings.weak_signal_aggregation_enabled else None
+    # Opt-in per tenant rather than a global switch: `enabled` is consulted
+    # before any Redis call, so an unconfigured deployment pays one set
+    # membership test per event and nothing else.
+    api_behaviour = ApiBehaviourProfiler(redis_client, enabled_for=settings.api_behaviour_tenant_set)
     # Dead letters go to Postgres so they can be read back. Until now the
     # worker defaulted to LoggingDLQ, so a dropped event produced a log
     # line and nothing else — and an invisible drop is indistinguishable
@@ -207,6 +234,9 @@ async def lifespan(app: FastAPI):
         windowed_detector=windowed_detector,
         first_seen=first_seen,
         baselines=baselines,
+        long_horizon=long_horizon,
+        api_behaviour=api_behaviour,
+        weak_signals=weak_signals,
         # Parity 5.4. Per-tenant detection tuning as a versioned overlay
         # with hot reload. Without it the engine evaluated the shared
         # corpus and nothing else, so a tenant who disabled a noisy rule

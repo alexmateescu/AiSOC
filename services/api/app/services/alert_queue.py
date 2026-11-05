@@ -34,13 +34,15 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
-from sqlalchemy import and_, case, func, literal, or_, select, update
+from sqlalchemy import and_, case, func, literal, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.alert import Alert
+from app.models.asset import Asset, AssetVulnerability
 from app.models.sla import TenantSLAConfig
 from app.services import sla_events
 from app.services.alert_priority import AssetContext, IdentityContext, score_alert_priority
+from app.services.alert_status import RESOLVED_STATUSES
 from app.services.sla import DEFAULT_SLA_TARGETS
 
 # Severities that show up in the *unassigned* bucket of the queue.
@@ -51,12 +53,12 @@ QUEUE_UNASSIGNED_SEVERITIES: tuple[str, ...] = ("critical", "high")
 # Alert statuses that *exit* the queue. Anything in this set is
 # considered done — claim/snooze/assign must not return it to the
 # queue, and the queue endpoint hides it.
-QUEUE_CLOSED_STATUSES: tuple[str, ...] = (
-    "resolved",
-    "closed",
-    "false_positive",
-    "fp",
-)
+#
+# Read from `alert_status` rather than retyped: a fourth copy of "which
+# states mean finished" is a fourth thing to forget to update, and the copy
+# here already omitted `dismissed`, so a dismissed case's alerts stayed in
+# the queue forever.
+QUEUE_CLOSED_STATUSES: tuple[str, ...] = RESOLVED_STATUSES
 
 # Maximum page size for the queue endpoint. The workbench paginates
 # locally; this cap exists to keep one bad client from yanking
@@ -147,6 +149,18 @@ class QueueItem(BaseModel):
     suggested_action: QueueAction | None = None
 
     bucket: Literal["mine", "unassigned"]
+
+    # Context-aware ordering (gap-closure wave 11, wired by the
+    # business-context plan). ``priority_score`` is what the row sorts by
+    # within its (bucket, SLA) position: severity as the base, asset
+    # criticality / KEV / internet exposure as bounded multipliers, resolved
+    # from the tenant's own ``assets`` inventory. Distinct from ``priority``
+    # above, which is the vendor-reported integer carried off the alert row.
+    # ``priority_basis`` is the factor-by-factor rationale — an ordering a
+    # person cannot interrogate is one they stop trusting. On a tenant with
+    # no asset inventory the score is severity alone and the basis says so.
+    priority_score: int = 0
+    priority_basis: dict[str, Any] = Field(default_factory=dict)
 
 
 class QueueResponse(BaseModel):
@@ -311,6 +325,196 @@ def first_action(alert: Alert) -> QueueAction | None:
 # ─── Queue assembly ─────────────────────────────────────────────────────
 
 
+async def resolve_asset_contexts(
+    db: AsyncSession,
+    tenant_id: uuid.UUID,
+    alerts: list[Alert],
+) -> dict[uuid.UUID, AssetContext]:
+    """Match a page of alerts to the tenant's asset inventory, batched.
+
+    Two queries for the whole page, never one per row: one against
+    ``assets`` on lowered hostname/FQDN or IP overlap, one against
+    ``asset_vulnerabilities`` for open exploited findings (the KEV
+    signal) on the assets that matched.
+
+    An alert matching several assets takes the highest-criticality one —
+    failing toward attention, because the queue's job is "what should I
+    look at first" and the costlier mistake is burying a domain
+    controller under a kiosk. An alert matching nothing gets no entry,
+    and the caller scores it on severity alone; that is the honest
+    day-one state of a deployment with no CMDB import.
+    """
+    host_by_alert: dict[uuid.UUID, set[str]] = {}
+    ip_by_alert: dict[uuid.UUID, set[str]] = {}
+    for alert in alerts:
+        hosts = {h.strip().lower() for h in (alert.affected_hosts or []) if isinstance(h, str) and h.strip()}
+        ips = {i.strip() for i in (alert.affected_ips or []) if isinstance(i, str) and i.strip()}
+        if hosts:
+            host_by_alert[alert.id] = hosts
+        if ips:
+            ip_by_alert[alert.id] = ips
+
+    all_hosts = sorted(set().union(*host_by_alert.values())) if host_by_alert else []
+    all_ips = sorted(set().union(*ip_by_alert.values())) if ip_by_alert else []
+    if not all_hosts and not all_ips:
+        return {}
+
+    match_clauses = []
+    if all_hosts:
+        match_clauses.append(func.lower(Asset.name).in_(all_hosts))
+        match_clauses.append(func.lower(Asset.fqdn).in_(all_hosts))
+    if all_ips:
+        match_clauses.append(Asset.ip_addresses.overlap(all_ips))
+
+    asset_rows = (
+        (
+            await db.execute(
+                select(Asset).where(
+                    Asset.tenant_id == tenant_id,
+                    or_(*match_clauses),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not asset_rows:
+        return {}
+
+    # Open exploited vulnerabilities per matched asset — the KEV signal.
+    # `remediated_at IS NULL` because a fixed finding is history, not risk.
+    exploited_counts: dict[uuid.UUID, int] = {}
+    vuln_rows = (
+        await db.execute(
+            select(AssetVulnerability.asset_id, func.count())
+            .where(
+                AssetVulnerability.tenant_id == tenant_id,
+                AssetVulnerability.asset_id.in_([a.id for a in asset_rows]),
+                AssetVulnerability.is_exploited.is_(True),
+                AssetVulnerability.remediated_at.is_(None),
+            )
+            .group_by(AssetVulnerability.asset_id)
+        )
+    ).all()
+    for asset_id, count in vuln_rows:
+        exploited_counts[asset_id] = int(count)
+
+    crit_rank = {"critical": 4, "high": 3, "medium": 2, "low": 1, "none": 0}
+
+    def _context_of(asset: Asset) -> AssetContext:
+        tags = {t.strip().lower() for t in (asset.tags or []) if isinstance(t, str)}
+        meta = asset.asset_metadata if isinstance(asset.asset_metadata, dict) else {}
+        exploited = exploited_counts.get(asset.id, 0)
+        return AssetContext(
+            asset_id=str(asset.id),
+            criticality=str(asset.criticality or "medium").lower(),
+            has_kev_vulnerability=exploited > 0,
+            exploitable_vuln_count=exploited,
+            internet_facing=("internet-facing" in tags) or bool(meta.get("internet_facing")),
+        )
+
+    out: dict[uuid.UUID, AssetContext] = {}
+    for alert in alerts:
+        hosts = host_by_alert.get(alert.id, set())
+        ips = ip_by_alert.get(alert.id, set())
+        candidates = [
+            a
+            for a in asset_rows
+            if (a.name or "").lower() in hosts or (a.fqdn or "").lower() in hosts or (ips and set(a.ip_addresses or []) & ips)
+        ]
+        if not candidates:
+            continue
+        best = max(candidates, key=lambda a: crit_rank.get(str(a.criticality or "").lower(), 0))
+        out[alert.id] = _context_of(best)
+    return out
+
+
+async def resolve_identity_contexts(
+    db: AsyncSession,
+    tenant_id: uuid.UUID,
+    alerts: list[Any],
+) -> dict[uuid.UUID, IdentityContext]:
+    """Privilege and tags per alert, **as of that alert's own event time**.
+
+    Depth plan wave 2, 1.1. One query for the page rather than one per
+    alert, matching ``resolve_asset_contexts`` above.
+
+    The point-in-time join is the part worth reading carefully. Each alert
+    brings its own timestamp into the query and is matched against the
+    privilege version whose interval contains it, so an alert from before a
+    role was revoked still ranks by the privilege the actor held when they
+    acted. A simpler join on the live row would rank the whole queue by
+    today's posture, which is both wrong and invisible -- the number looks
+    identical either way.
+
+    An alert whose actor has no covering version is deliberately **absent**
+    from the result, and the caller turns that into an ``unknown`` tier
+    rather than a ``standard`` one.
+    """
+    actors: dict[str, list[tuple[uuid.UUID, datetime]]] = {}
+    for alert in alerts:
+        for user in list(getattr(alert, "affected_users", None) or []):
+            name = str(user or "").strip()
+            if not name:
+                continue
+            when = getattr(alert, "event_time", None) or getattr(alert, "first_seen", None)
+            if when is None:
+                continue
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=UTC)
+            actors.setdefault(name.lower(), []).append((alert.id, when))
+    if not actors:
+        return {}
+
+    rows = (
+        await db.execute(
+            text(
+                """
+                SELECT principal_id, principal_label, tier,
+                       can_escalate, data_access, third_party, cross_account,
+                       valid_from, valid_until
+                  FROM identity_privilege_facts
+                 WHERE tenant_id = :tenant_id
+                   AND (lower(principal_id) = ANY(:actors) OR lower(principal_label) = ANY(:actors))
+                """
+            ),
+            {"tenant_id": str(tenant_id), "actors": list(actors)},
+        )
+    ).fetchall()
+    if not rows:
+        return {}
+
+    tier_rank = {"unknown": 0, "standard": 1, "elevated": 2, "admin": 3, "domain_admin": 4}
+    out: dict[uuid.UUID, IdentityContext] = {}
+    for row in rows:
+        handles = {
+            str(row.principal_id or "").lower(),
+            str(row.principal_label or "").lower(),
+        } - {""}
+        valid_from = row.valid_from
+        valid_until = row.valid_until
+        for handle in handles:
+            for alert_id, when in actors.get(handle, ()):
+                if valid_from > when or (valid_until is not None and valid_until <= when):
+                    continue
+                candidate = IdentityContext(
+                    principal=row.principal_id,
+                    privilege_tier=str(row.tier or "unknown"),
+                    can_escalate=row.can_escalate,
+                    data_access=row.data_access,
+                    third_party=row.third_party,
+                    cross_account=row.cross_account,
+                )
+                # One alert can name several users, and a person can hold
+                # accounts in several providers. The strongest wins: an
+                # alert about someone who is an ordinary Okta user and an
+                # AWS administrator is an alert about an administrator.
+                existing = out.get(alert_id)
+                if existing is None or tier_rank.get(candidate.privilege_tier, 0) > tier_rank.get(existing.privilege_tier, 0):
+                    out[alert_id] = candidate
+    return out
+
+
 def queue_priority(alert: Any, *, asset: Any = None, identity: Any = None) -> int:
     """The score this alert sorts by.
 
@@ -333,9 +537,13 @@ def queue_priority(alert: Any, *, asset: Any = None, identity: Any = None) -> in
         else None,
         identity=IdentityContext(
             principal=str(getattr(identity, "principal", "") or "") or None,
-            privilege_tier=str(getattr(identity, "privilege_tier", "standard") or "standard"),
+            privilege_tier=str(getattr(identity, "privilege_tier", "unknown") or "unknown"),
             is_service=bool(getattr(identity, "is_service", False)),
             is_break_glass=bool(getattr(identity, "is_break_glass", False)),
+            can_escalate=getattr(identity, "can_escalate", None),
+            data_access=getattr(identity, "data_access", None),
+            third_party=getattr(identity, "third_party", None),
+            cross_account=getattr(identity, "cross_account", None),
         )
         if identity is not None
         else None,
@@ -421,7 +629,26 @@ async def build_queue(
         )
     ).all()
 
-    items: list[QueueItem] = []
+    # Asset criticality orders the page. `score_alert_priority` existed with
+    # zero callers — two alerts of equal severity, one on a domain controller
+    # and one on a meeting-room display, arrived in whatever order they were
+    # raised. The contexts are resolved in two batched queries for the page;
+    # the re-sort below refines order *within* the page only: the SQL's
+    # (bucket, sla, severity) order remains the pagination key, so an alert's
+    # page is unchanged and the distortion is bounded to (bucket, sla)-ties
+    # that straddle a page boundary — stated in the queue doc rather than
+    # hidden.
+    page_alerts = [row[0] for row in rows]
+    asset_contexts = await resolve_asset_contexts(db, tenant_id, page_alerts)
+    # Depth 2 wave 2, 1.1. `score_alert_priority` has taken an `identity`
+    # since v16 and this call site passed `identity=None`, so the privilege
+    # factor and its whole table were unreachable from the only surface
+    # where prioritisation changes anything -- the built-but-unwired shape,
+    # in the module whose own docstring explains why an ordering nobody can
+    # interrogate stops being trusted.
+    identity_contexts = await resolve_identity_contexts(db, tenant_id, page_alerts)
+
+    scored: list[tuple[int, datetime, int, QueueItem]] = []
     for row in rows:
         alert: Alert = row[0]
         bucket_idx: int = int(row[1])
@@ -435,28 +662,42 @@ async def build_queue(
             first_seen = first_seen.replace(tzinfo=UTC)
         age = int((now - first_seen).total_seconds())
 
-        items.append(
-            QueueItem(
-                id=alert.id,
-                tenant_id=alert.tenant_id,
-                title=alert.title,
-                severity=alert.severity,
-                status=alert.status,
-                priority=alert.priority,
-                category=alert.category,
-                connector_type=alert.connector_type,
-                assigned_to_id=alert.assigned_to_id,
-                case_id=alert.case_id,
-                first_seen=first_seen,
-                sla_due_at=sla_due_at,
-                sla_remaining_seconds=remaining,
-                sla_breached=remaining < 0,
-                age_seconds=max(0, age),
-                asset=first_asset(alert),
-                suggested_action=first_action(alert),
-                bucket="mine" if bucket_idx == 0 else "unassigned",
-            )
+        priority_result = score_alert_priority(
+            severity=str(alert.severity or "medium"),
+            asset=asset_contexts.get(alert.id),
+            # Absent means no posture version covered this alert's event
+            # time. `IdentityContext()` defaults to `unknown`, which scores
+            # neutrally and says so in the rationale -- unlike `None`, which
+            # omits the question from the basis entirely.
+            identity=identity_contexts.get(alert.id, IdentityContext()),
         )
+
+        item = QueueItem(
+            id=alert.id,
+            tenant_id=alert.tenant_id,
+            title=alert.title,
+            severity=alert.severity,
+            status=alert.status,
+            priority=alert.priority,
+            category=alert.category,
+            connector_type=alert.connector_type,
+            assigned_to_id=alert.assigned_to_id,
+            case_id=alert.case_id,
+            first_seen=first_seen,
+            sla_due_at=sla_due_at,
+            sla_remaining_seconds=remaining,
+            sla_breached=remaining < 0,
+            age_seconds=max(0, age),
+            asset=first_asset(alert),
+            suggested_action=first_action(alert),
+            bucket="mine" if bucket_idx == 0 else "unassigned",
+            priority_score=priority_result.score,
+            priority_basis=priority_result.as_dict(),
+        )
+        scored.append((bucket_idx, sla_due_at, priority_result.score, item))
+
+    scored.sort(key=lambda entry: (entry[0], entry[1], -entry[2]))
+    items: list[QueueItem] = [entry[3] for entry in scored]
 
     pages = (total + page_size - 1) // page_size if total else 0
     return QueueResponse(

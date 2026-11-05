@@ -191,6 +191,39 @@ var connectorProfiles = map[string]connectorProfile{
 			"critical": 5, "high": 4, "medium": 3, "low": 2, "info": 1, "informational": 1,
 		},
 	},
+	// extrahop — ExtraHop RevealX 360 network detections (depth plan wave 2,
+	// item 8.2). Class 2001 (Security Finding, category 2) for the same
+	// reason the `splunk` profile above is: an NDR detection has already
+	// passed the vendor's own correlation, so the fusion promoter promotes
+	// it regardless of severity rather than dropping a mid-band detection.
+	//
+	// The field map reads the connector's own canonical envelope keys, not
+	// raw vendor field names: `fetch_alerts` normalises before publishing,
+	// so a map keyed on `risk_score` or `participants` would read nothing.
+	//
+	// Three severity entries and no `critical`, because ExtraHop publishes
+	// three risk bands and no fourth: red 80-99, orange 31-79, yellow 1-30.
+	// Adding a `critical` here would assert a tier the vendor never set,
+	// which is the mirror of collapsing a vendor's real `critical` into
+	// `high`. A detection with no risk score at all carries no severity
+	// key, scores severity_id 0, and still promotes on category.
+	"extrahop": {
+		product:   OcsfProduct{Name: "RevealX 360", VendorName: "ExtraHop"},
+		classUID:  2001,
+		className: "Security Finding",
+		fieldMap: map[string]string{
+			"title":       "message",
+			"description": "finding.desc",
+			"external_id": "finding.uid",
+			"src_ip":      "src_endpoint.ip",
+			"dst_ip":      "dst_endpoint.ip",
+			"hostname":    "device.name",
+			"created_at":  "time",
+		},
+		severityMap: map[string]int{
+			"high": 4, "medium": 3, "low": 2, "info": 1,
+		},
+	},
 	"okta_system_log": {
 		product:   OcsfProduct{Name: "Okta System Log", VendorName: "Okta"},
 		classUID:  3002,
@@ -922,25 +955,7 @@ func (n *Normalizer) Normalize(raw *RawEvent) (*NormalizedEvent, error) {
 	// it up loses information we were handed. `verified` says which is which
 	// so a reader is never told an unconfirmed id was confirmed.
 	if techIDs := extractTechniqueIDs(raw.Payload); len(techIDs) > 0 {
-		var enriched []map[string]interface{}
-		for _, tid := range techIDs {
-			if tech := attck.Lookup(tid); tech != nil {
-				enriched = append(enriched, map[string]interface{}{
-					"technique_id":   tech.ID,
-					"technique_name": tech.Name,
-					"tactic_ids":     tech.TacticIDs,
-					"tactic_names":   tech.TacticNames,
-					"url":            tech.URL,
-					"verified":       true,
-				})
-				continue
-			}
-			enriched = append(enriched, map[string]interface{}{
-				"technique_id": tid,
-				"verified":     false,
-			})
-		}
-		if len(enriched) > 0 {
+		if enriched := EnrichTechniqueIDs(techIDs); len(enriched) > 0 {
 			ocsf["mitre_attck"] = enriched
 		}
 	}
@@ -984,6 +999,75 @@ func (n *Normalizer) Normalize(raw *RawEvent) (*NormalizedEvent, error) {
 		NormalizationVersion:  n.version,
 		NormalizationWarnings: warnings,
 	}, nil
+}
+
+// EnrichTechniqueIDs builds the `mitre_attck` block from already-validated
+// technique ids. Corpus-confirmed ids carry the technique name, tactics and
+// URL with verified:true; a well-formed id the corpus cannot confirm is
+// carried with verified:false, because dropping a vendor's assertion over a
+// failed lookup loses information we were handed (issue #1244). Factored out
+// of Normalize so the inbox template path publishes the identical block —
+// one shape for fusion's _mitre() to read, however the event arrived.
+func EnrichTechniqueIDs(ids []string) []map[string]interface{} {
+	var enriched []map[string]interface{}
+	for _, tid := range ids {
+		if tech := attck.Lookup(tid); tech != nil {
+			enriched = append(enriched, map[string]interface{}{
+				"technique_id":   tech.ID,
+				"technique_name": tech.Name,
+				"tactic_ids":     tech.TacticIDs,
+				"tactic_names":   tech.TacticNames,
+				"url":            tech.URL,
+				"verified":       true,
+			})
+			continue
+		}
+		enriched = append(enriched, map[string]interface{}{
+			"technique_id": tid,
+			"verified":     false,
+		})
+	}
+	return enriched
+}
+
+// TechniqueIDsFromPaths collects ATT&CK technique ids from the given payload
+// dot-paths, each holding a single string or a list of strings, validated by
+// shape and deduplicated in encounter order.
+//
+// This is the inbox-template counterpart of extractTechniqueIDs below: the
+// template path maps only fields a template declares, so the template names
+// the exact paths its vendor uses (Agentmetry carries a list at
+// detection.technique_ids and a single id at tool.mitre.technique_id) rather
+// than scanning the flat candidate-key list a pushed payload uses. The shape
+// check is the same one, which is what keeps a MITRE ATLAS id (AML.T****) or
+// a tactic id (TA####) out of an ATT&CK-typed field on both paths.
+func TechniqueIDsFromPaths(payload map[string]interface{}, paths []string) []string {
+	seen := map[string]struct{}{}
+	var results []string
+	appendID := func(candidate string) {
+		tid := normalizeTechniqueID(candidate)
+		if tid == "" {
+			return
+		}
+		if _, dup := seen[tid]; dup {
+			return
+		}
+		seen[tid] = struct{}{}
+		results = append(results, tid)
+	}
+	for _, path := range paths {
+		switch v := getNestedField(payload, path).(type) {
+		case string:
+			appendID(v)
+		case []interface{}:
+			for _, item := range v {
+				if s, ok := item.(string); ok {
+					appendID(s)
+				}
+			}
+		}
+	}
+	return results
 }
 
 // extractTechniqueIDs scans common fields in a raw payload for ATT&CK technique IDs.

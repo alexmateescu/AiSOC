@@ -149,6 +149,13 @@ var classesWithNoProducerYet = map[int]string{
 type connectorClass struct {
 	classUID      int
 	genericReason string
+	// contextOnly marks a connector that emits no ingest events at all: its
+	// fetch_alerts returns an empty list and its data reaches the platform
+	// through a different writer. Such a connector carries no generic-mapping
+	// debt, because no event of its ever reaches the normalizer to be mapped,
+	// so it is counted apart from the ceiling. The gate verifies the claim
+	// against the connector's own fetch_alerts rather than believing it.
+	contextOnly bool
 }
 
 // connectorOCSFClass carries a decision for every connector type
@@ -196,6 +203,18 @@ var connectorOCSFClass = map[string]connectorClass{
 	// Flow records and network-monitoring telemetry.
 	"aws_vpc_flow":  {classUID: classNetworkActivity},
 	"zeek_suricata": {classUID: classNetworkActivity},
+	// extrahop is network-shaped and deliberately *not* 4001. RevealX reads
+	// /detections, not flows: each record has already passed the vendor's
+	// own correlation and carries a risk score, so it is a finding in the
+	// same sense a Splunk notable is, and 4001 would leave a mid-band
+	// detection archived to the lake and never alerted.
+	//
+	// Stated here rather than left to the 2001 default, which would reach
+	// the same uid by falling through. The connector's profile in
+	// `normalizer.go` already declares 2001 and its module docstring says
+	// so, and a class two files assert and this table omits is the drift
+	// this table exists to catch.
+	"extrahop": {classUID: classSecurityFinding},
 	// Sublime reads /v1/messages, which is every message rather than only
 	// the flagged ones, and defaults an unrecognised verdict to info.
 	"sublime_security": {classUID: classEmailActivity},
@@ -299,6 +318,22 @@ var connectorOCSFClass = map[string]connectorClass{
 	// correct outcome rather than an oversight. The reason is recorded so a
 	// reader can tell these apart from a connector nobody classified.
 	// ---------------------------------------------------------------
+	// ---------------------------------------------------------------
+	// Depth plan wave 2, item 1.3. HR and MDM connectors publish **no
+	// events at all**: `fetch_alerts` returns an empty list on each by
+	// design, and their output is slowly-changing context written to
+	// `workforce_members` and `workforce_devices` by the connector
+	// scheduler, never to ingest. So there is no class to assign, and a
+	// profile would be an entry nothing can reach.
+	//
+	// Recorded here rather than left absent precisely because this table
+	// exists to tell "decided to take the generic path" apart from "nobody
+	// looked", and an HR connector with no entry reads as the second.
+	// ---------------------------------------------------------------
+	"bamboohr":         {genericReason: "HR context, not events: fetch_alerts returns nothing and the scheduler writes workforce_members", contextOnly: true},
+	"rippling":         {genericReason: "HR context, not events: fetch_alerts returns nothing and the scheduler writes workforce_members", contextOnly: true},
+	"microsoft_intune": {genericReason: "MDM device context, not events: fetch_alerts returns nothing and the scheduler writes workforce_devices", contextOnly: true},
+
 	"crowdstrike":      {genericReason: "EDR detections: already judged by the vendor"},
 	"sentinelone":      {genericReason: "EDR threats: already judged by the vendor"},
 	"carbon_black":     {genericReason: "EDR alerts: already judged by the vendor"},

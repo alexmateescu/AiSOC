@@ -28,6 +28,7 @@ import structlog
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from app import closure as closure_policy
+from app.agents import reviewer
 from app.agents.dispositions import (
     AUTO_CLOSEABLE_DISPOSITIONS,
     BENIGN,
@@ -41,6 +42,9 @@ from app.closure import authorization as closure_authorization
 from app.closure.qa_sampling import ClosureQaSampler
 from app.confidence import eligibility
 from app.confidence.claim_support import score_claim_support
+from app.context import vendor_evidence as vendor_evidence_module
+from app.context.cloud_posture import basis as posture_basis
+from app.context.cloud_posture import render_for_prompt as render_posture
 from app.context.dispositions import basis as disposition_basis
 from app.context.dispositions import render_for_prompt as render_dispositions
 from app.context.identity import basis as identity_basis
@@ -48,11 +52,16 @@ from app.context.identity import render_for_prompt as render_identity
 from app.context.knowledge_base import citation_basis, unresolvable_citations
 from app.context.knowledge_base import render_for_prompt as render_runbooks
 from app.context.organisation_memory import render_for_prompt
+from app.context.privilege import basis as privilege_basis
+from app.context.privilege import render_for_prompt as render_privilege
+from app.core.model_attribution import extract_serving_attribution
 from app.investigator.prompt_sanitizer import sanitize_text, wrap_untrusted
 from app.llm import safe_ainvoke
 from app.llm.factory import make_chat_model
 from app.llm.prompt_registry import prompt_text
 from app.llm.structured_output import extract_json_block
+from app.memory.precedent import Precedent
+from app.memory.precedent import render_for_prompt as render_precedent
 from app.models.state import AgentStatus, InvestigationState
 from app.prompt_serialization import format_extra_fields_for_llm
 from app.prompting.envelope import make_nonce, scan_evidence_fields, system_rule
@@ -102,6 +111,10 @@ _metrics: dict[str, Any] = {
     # the groundedness scorer cannot see, because a marker is not an indicator
     # and would never appear in the evidence text it checks against.
     "kb_citations_unresolvable": 0,
+    # A business_impact element whose citations do not resolve to the rule ids
+    # that fired on this alert — including the fabrication case where no
+    # context was supplied at all. Dropped, counted, never rendered.
+    "business_impact_uncited": 0,
     # Depth plan 1.3. A rationale crediting one of this agent's tools with a
     # result, on a path that called no tool. Counted beside the unresolvable
     # citation it is the sibling of: both are a claim whose provenance resolves
@@ -197,9 +210,26 @@ def _scannable_fields(state: InvestigationState) -> list[tuple[str, Any]]:
         if isinstance(row, dict):
             fields.append((f"organisation_memory[{index}].statement", row.get("statement")))
 
+    # Depth-2 8.1, and a sixth channel for the same reason as the three above.
+    # A cloud resource name is chosen by whoever created the resource, which
+    # in a compromise is the attacker, and a CNAPP reads it verbatim; a rule
+    # title is vendor text but a custom rule's title is the customer's own
+    # free text. Both reach the preamble, so both are scanned.
+    for index, row in enumerate((state.cloud_posture_context or {}).get("findings") or []):
+        if isinstance(row, dict):
+            fields.append((f"cloud_posture.findings[{index}].rule_title", row.get("rule_title")))
+            fields.append((f"cloud_posture.findings[{index}].resource_name", row.get("resource_name")))
+
     skill = state.tenant_skill or {}
     if skill.get("triage_guidance"):
         fields.append(("tenant_skill.triage_guidance", skill.get("triage_guidance")))
+
+    # Business-context rule ids are console-authored free text that is now
+    # interpolated into the preamble — the same trust class as a disposition's
+    # scope_value, and the same reason: tenant-authored is not operator-typed.
+    bc = state.business_context or {}
+    for index, rule_id in enumerate(bc.get("matched_rule_ids") or []):
+        fields.append((f"business_context.matched_rule_ids[{index}]", rule_id))
 
     return [(name, value) for name, value in fields if isinstance(value, str | int | float | list | dict)]
 
@@ -308,6 +338,58 @@ def _build_alert_context(state: InvestigationState, *, nonce: str) -> str:
     who = render_identity(state.identity_context)
     if who:
         preamble.append(sanitize_text(who, max_len=_MAX_CONTEXT_BLOCK_CHARS))
+    # Depth-2 8.1. The state the resource was already in. A rule title and a
+    # resource name come from the tenant's own CNAPP reading their cloud
+    # estate, where a resource name is attacker-influenced in every provider,
+    # so this takes the same second sanitising pass as the blocks above.
+    posture = render_posture(state.cloud_posture_context)
+    if posture:
+        preamble.append(sanitize_text(posture, max_len=_MAX_CONTEXT_BLOCK_CHARS))
+
+    # Phase 4.4(a). In the preamble rather than the fence, on the same test
+    # the dispositions block passes: every value in it is first-party and
+    # from a closed vocabulary — a disposition the server owns, an author
+    # that is `human` or `ai`, a float, and field names drawn from this
+    # module's own weight table. No tenant or vendor free text reaches it.
+    prior_art = render_precedent(_precedent_of(state))
+    if prior_art:
+        preamble.append(sanitize_text(prior_art, max_len=_MAX_CONTEXT_BLOCK_CHARS))
+    # What that principal could do when it acted (depth 2 wave 2, 1.1).
+    # First-party like the block above -- it is the platform's own derivation
+    # over a posture snapshot, not vendor text -- but sanitised anyway,
+    # because the principal *name* inside it came from a connector and is
+    # attacker-influenceable on exactly the alerts where it matters.
+    can_do = render_privilege(state.privilege_context)
+    if can_do:
+        preamble.append(sanitize_text(can_do, max_len=_MAX_CONTEXT_BLOCK_CHARS))
+
+    # What the tenant's business-context rules did to this alert, told to the
+    # model rather than applied silently: a `set_severity` the model cannot
+    # see leaves it explaining a severity nobody chose in the evidence. The
+    # rule ids double as citation anchors for the optional `business_impact`
+    # element, whose instruction is injected HERE — conditionally, never in
+    # the registry-pinned system prompt — so a model with no business context
+    # is never invited to invent an impact statement. Rule ids and severity
+    # values are tenant-authored, so the block takes the same `sanitize_text`
+    # pass as the other first-party preamble blocks.
+    biz = _render_business_context(state.business_context)
+    if biz:
+        preamble.append(sanitize_text(biz, max_len=_MAX_CONTEXT_BLOCK_CHARS))
+
+    # Phase 4.3. The tenant's standing questions and the verdicts computed
+    # for them, which is what puts `app/context/triage_questions.py` on the
+    # path the console already writes questions for.
+    #
+    # Not re-sanitised: the renderer already put every tenant-authored label
+    # through `sanitize_text` and wrapped the block in an `<UNTRUSTED_DATA>`
+    # envelope, and running the sanitiser over the rendered block would
+    # rewrite the markers holding that envelope together — the same rule the
+    # runbook and vendor-evidence blocks below follow, and for the same
+    # reason. The verdicts beside each label were computed deterministically
+    # before this prompt existed, so the free text decides nothing.
+    questions = (state.triage_questions or {}).get("block")
+    if questions:
+        preamble.append(str(questions))
 
     # Not sanitised again on the way in: the retrieval already capped and
     # sanitised each chunk, and `render_runbooks` fences the result. Running
@@ -315,9 +397,80 @@ def _build_alert_context(state: InvestigationState, *, nonce: str) -> str:
     # it just placed, which is the one thing holding the fence together.
     runbooks = render_runbooks(state.knowledge_base, nonce=nonce)
 
-    if not preamble and not runbooks:
+    # Phase 4.5. Fenced here for the same reason and with the same rule: the
+    # renderer places the nonce markers, so re-sanitising this block would
+    # rewrite the one thing holding the fence together. A vendor's own
+    # description field carries attacker-influenced text — a file name, a
+    # command line, a repository somebody chose — so it belongs inside the
+    # fence rather than in the first-party preamble above.
+    vendor = vendor_evidence_module.render_for_prompt(_vendor_evidence_of(state), nonce=nonce)
+
+    blocks = [*preamble, *([runbooks] if runbooks else []), *([vendor] if vendor else []), telemetry]
+    if not preamble and not runbooks and not vendor:
         return telemetry
-    return "\n\n".join([*preamble, *([runbooks] if runbooks else []), telemetry])
+    return "\n\n".join(blocks)
+
+
+def _vendor_evidence_of(state: Any) -> Any:
+    """The pre-fetched vendor evidence carried on the state, if any.
+
+    Read through `getattr` so a state built by an older caller — a replay of
+    a run from before 4.5, or a test double — renders no block instead of
+    raising on the hot path.
+    """
+    return getattr(state, "vendor_evidence", None)
+
+
+def _precedent_of(state: Any) -> list[Precedent]:
+    """Rehydrate the precedent carried on the state.
+
+    Stored as plain dicts so the state stays serialisable, the same shape
+    the other context sources use; the renderer wants objects. Read through
+    `getattr` so a state built before 4.4 renders nothing rather than
+    raising on the hot path.
+    """
+    rows = getattr(state, "precedent", None) or []
+    out: list[Precedent] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        out.append(
+            Precedent(
+                disposition=str(row.get("disposition") or "unknown"),
+                author=str(row.get("author") or "ai"),
+                count=int(row.get("count") or 1),
+                score=float(row.get("score") or 0.0),
+                matched=[str(m) for m in (row.get("matched_fields") or [])],
+                last_seen=str(row.get("last_seen") or ""),
+            )
+        )
+    return out
+
+
+def _render_business_context(bc: dict[str, Any] | None) -> str:
+    """The applied-rules block, or empty when no rule fired.
+
+    Returns the prose the preamble carries plus the conditional invitation to
+    emit ``business_impact``. Absent context returns ``""`` — the caller adds
+    nothing, and the model never sees the element's name.
+    """
+    if not bc or not bc.get("matched_rule_ids"):
+        return ""
+    rule_ids = [str(r) for r in bc["matched_rule_ids"]]
+    lines = ["Business context (tenant-authored rules applied before triage):"]
+    before, after = bc.get("severity_before"), bc.get("severity_after")
+    if before is not None and after is not None and before != after:
+        lines.append(f"- Rules {', '.join(rule_ids)} set severity {before} -> {after}.")
+    else:
+        lines.append(f"- Rules matched: {', '.join(rule_ids)}.")
+    lines.append(
+        "If this business context informs the impact of the alert, you may add an "
+        'optional "business_impact" object to your JSON response: '
+        '{"statement": "<one sentence>", "citations": ["<rule id>"]}. '
+        f"Legal citation values are exactly these rule ids: {', '.join(rule_ids)}. "
+        "Omit the object entirely rather than citing anything else."
+    )
+    return "\n".join(lines)
 
 
 def _close_truncated_json(fragment: str) -> str:
@@ -452,10 +605,25 @@ def _parse_llm_response(text: str) -> dict[str, Any]:
 
     rationale = data.get("rationale", "No rationale provided by LLM.")
 
+    # Optional, and shape-checked only — whether its citations resolve is
+    # decided by the caller, which holds the anchors. A malformed element is
+    # dropped here rather than failing the verdict: the verdict/confidence/
+    # rationale triple is the contract, business_impact is an addendum.
+    business_impact: dict[str, Any] | None = None
+    raw_impact = data.get("business_impact")
+    if isinstance(raw_impact, dict) and isinstance(raw_impact.get("statement"), str):
+        citations = raw_impact.get("citations")
+        if isinstance(citations, list) and all(isinstance(c, str) for c in citations):
+            business_impact = {
+                "statement": raw_impact["statement"][:500],
+                "citations": citations[:10],
+            }
+
     return {
         "verdict": verdict,
         "confidence": confidence,
         "rationale": str(rationale),
+        "business_impact": business_impact,
     }
 
 
@@ -518,6 +686,13 @@ async def run_auto_triage(state: InvestigationState) -> InvestigationState:
             ],
         )
         raw_text = response.content
+        requested_model = getattr(llm, "model_name", None) or getattr(llm, "model", None)
+        # Who actually served the call, by the strongest party that said:
+        # the gateway's header, or the endpoint naming itself in the body.
+        # Never a copy of the requested alias — an unattributed call records
+        # exactly that, and the eligibility gate below treats it as a
+        # serving identity no measurement can be bound to.
+        attribution = extract_serving_attribution(response, requested=str(requested_model or ""))
         # Recorded before parsing, so a verdict that fails to parse still
         # leaves behind what the model was asked and what it said. The
         # ledger carries this onto the run (issue #1276): auto-triage is
@@ -526,7 +701,10 @@ async def run_auto_triage(state: InvestigationState) -> InvestigationState:
         state.record_llm_exchange(
             agent="auto_triage",
             purpose="triage.classify",
-            model=getattr(llm, "model_name", None) or getattr(llm, "model", None),
+            model=requested_model,
+            serving_model=attribution.serving_model,
+            serving_attribution=attribution.source,
+            system_fingerprint=attribution.system_fingerprint,
             prompt=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": alert_context},
@@ -594,6 +772,34 @@ async def run_auto_triage(state: InvestigationState) -> InvestigationState:
     state.confidence_basis.extend(citation_basis(state.knowledge_base))
     state.confidence_basis.extend(disposition_basis(state.recent_dispositions))
     state.confidence_basis.extend(identity_basis(state.identity_context))
+    state.confidence_basis.extend(posture_basis(state.cloud_posture_context))
+    # Depth 2 wave 2, 1.1. Every line here names the tool that produced
+    # it, so an auditor can match the claim to a `tool_call` row rather
+    # than taking the prompt's word for it.
+    state.confidence_basis.extend(privilege_basis(state.privilege_context))
+
+    # The business-impact element survives only when every citation it carries
+    # resolves to a rule id that actually fired on this alert — the same
+    # discipline as knowledge-base citations, pointing the other way: uncited
+    # (or mis-cited) impact is dropped and counted, never rendered. No context
+    # supplied means the instruction was never injected, so an element arriving
+    # anyway is a fabrication and is dropped by the empty anchor set.
+    impact = result.get("business_impact")
+    if impact:
+        anchors = set((state.business_context or {}).get("matched_rule_ids") or [])
+        cited = set(impact.get("citations") or [])
+        if cited and anchors and cited <= anchors:
+            state.business_impact = impact
+            state.confidence_basis.append(f"Business impact: cites rule(s) {', '.join(sorted(cited))}")
+        else:
+            _metrics["business_impact_uncited"] += 1
+            logger.warning(
+                "auto_triage.business_impact_dropped",
+                incident_id=str(state.incident_id),
+                cited=sorted(cited),
+                anchors=sorted(anchors),
+            )
+
     unresolvable = unresolvable_citations(rationale, state.knowledge_base)
     if unresolvable:
         # The model cited a runbook that was never retrieved. Named rather
@@ -613,13 +819,22 @@ async def run_auto_triage(state: InvestigationState) -> InvestigationState:
     # retrieved and as asserting an indicator the evidence does not contain —
     # a claim whose provenance resolves to nothing.
     #
-    # `called_tools` is empty and that is the point rather than a shortcut:
-    # this path is a single `safe_ainvoke` with no tool channel, so the
-    # Investigation Ledger holds no `tool_call` row for this run and can hold
-    # none. Every tool result in this rationale therefore came from the
-    # evidence or from the model, and in both cases the verdict is resting on
-    # something that did not happen.
-    fabricated_tools = unverified_tool_claims(rationale, called_tools=())
+    # `called_tools` was empty and that was the point rather than a shortcut:
+    # this path was a single `safe_ainvoke` with no tool channel, so the
+    # Investigation Ledger held no `tool_call` row for the run and could hold
+    # none. Every tool result in a rationale therefore came from the evidence
+    # or from the model, and in both cases the verdict rested on something
+    # that did not happen.
+    #
+    # Phase 4.5 gives it a bounded channel, so the list is now whatever a
+    # vendor really answered — and *only* that. A read that was attempted and
+    # failed is deliberately absent: the guard's question is whether a
+    # rationale credits a tool with a result, and a read that returned
+    # nothing produced no result to credit. An empty tuple when the pre-fetch
+    # is off restores the original behaviour exactly.
+    evidence = _vendor_evidence_of(state)
+    called_tools = evidence.executed_capabilities if evidence is not None else ()
+    fabricated_tools = unverified_tool_claims(rationale, called_tools=called_tools)
 
     # Phase 7. The third member of that family, and the one indicator
     # grounding is structurally blind to: a conclusion that reuses the
@@ -637,6 +852,10 @@ async def run_auto_triage(state: InvestigationState) -> InvestigationState:
         state.raw_alert,
         supporting_context=render_for_prompt(state.organisation_memory),
     )
+    # As structure, not only as the basis strings below: the decision
+    # contract reports supporting and contradictory evidence as lists a
+    # machine can read, and the strings alone cannot be split back apart.
+    state.claim_review = claim_support.as_dict()
 
     state.add_finding(f"Auto-triage: verdict={verdict}, confidence={confidence:.2f}, latency={elapsed_ms}ms")
     state.add_finding(f"Auto-triage rationale: {rationale}")
@@ -675,14 +894,26 @@ async def run_auto_triage(state: InvestigationState) -> InvestigationState:
     # by default and denied under AISOC_AUTONOMY_REQUIRE_MEASURED=1. The
     # verdict is recorded on the basis either way: "not measured" belongs in
     # front of whoever reviews the closure.
+    # Evaluated against the serving identity when some party vouched for one,
+    # because that is the thing a measurement names: a scorecard graded
+    # llama3.1:8b must not authorise closures served by whatever the gateway
+    # re-pointed the alias to since. Unattributed calls fall back to the
+    # requested name so the UNMEASURED default is unchanged — and the
+    # attribution travels into the decision, where a *matching* measurement
+    # with no attribution blocks rather than binds.
     autonomy = eligibility.evaluate_eligibility(
-        model=getattr(llm, "model_name", None) or getattr(llm, "model", None),
+        model=attribution.serving_model or requested_model,
         prompt_version=_triage_prompt().version,
         prompt_sha256=_triage_prompt().sha256,
         tenant_context=str(state.tenant_id) if getattr(state, "tenant_id", None) else "default",
         alert_class=_alert_class_of(state),
+        model_attribution=attribution.source,
     )
     state.confidence_basis.append(f"auto_closure_safety={autonomy.render_precision()} ({autonomy.state.value}: {autonomy.reason})")
+    state.confidence_basis.append(
+        f"serving_model={attribution.serving_model or 'unattributed'}"
+        f" (requested: {requested_model or 'unrecorded'}; attribution: {attribution.source or 'none'})"
+    )
     if should_auto_close and not autonomy.allows_auto_close:
         _metrics["autonomy_not_earned"] += 1
         should_auto_close = False
@@ -744,6 +975,32 @@ async def run_auto_triage(state: InvestigationState) -> InvestigationState:
             signals=len(injection.signals),
             max_severity=ledger.get("max_severity"),
         )
+
+    # Phase 4.2. A separate pass over the decision contract, after every
+    # existing demotion and before the closure branch, so it can only ever
+    # take a decision *away* from closure. Off by default: it was measured
+    # on the corpus and did not improve balanced accuracy or auto-close
+    # precision, which the plan's own condition says means it stays off.
+    # Kept rather than deleted because the measurement is the deliverable,
+    # and because a funded model makes it a drop-in behind this interface.
+    if reviewer.enabled():
+        should_auto_close, verdict_review = reviewer.apply_review(
+            {
+                "verdict": verdict,
+                "supporting_evidence": claim_support.as_dict().get("supported") if claim_support.scored else None,
+                "contradictory_evidence": claim_support.as_dict().get("contradicted") if claim_support.scored else None,
+                "groundedness": getattr(state, "groundedness", None),
+                "missing_prerequisites": [],
+            },
+            auto_closed=should_auto_close,
+        )
+        state.reviewer_outcome = verdict_review.as_payload()
+        # Recorded on every run, abstentions included: a reviewer that has
+        # silently stopped firing must not look identical to one that ran
+        # and found nothing to act on.
+        state.confidence_basis.append(verdict_review.summary())
+        if verdict_review.changes_decision:
+            state.add_finding(verdict_review.summary())
 
     if should_auto_close:
         _metrics["auto_resolved_count"] += 1

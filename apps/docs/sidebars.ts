@@ -30,9 +30,11 @@ const sidebars: SidebarsConfig = {
         "concepts/ai-estate",
         "concepts/ai-estate-discovery",
         "concepts/groundedness",
+        "concepts/real-vs-synthetic",
         "concepts/live-actions",
         "concepts/retro-hunts",
         "concepts/hunting-agent",
+        "concepts/scheduled-hunts",
         "concepts/automation-maturity",
         "concepts/self-play",
         "concepts/investigation-swarm",
@@ -90,6 +92,7 @@ const sidebars: SidebarsConfig = {
         "connectors/otlp-logs",
         "connectors/kafka-input",
         "connectors/osquery-extensions",
+        "connectors/agentmetry",
         "connectors/abnormal_security",
         "connectors/ai-gateway",
         "connectors/auditd",
@@ -103,6 +106,7 @@ const sidebars: SidebarsConfig = {
         "connectors/azure-defender",
         "connectors/azure-entra",
         "connectors/azure-event-hubs",
+        "connectors/bamboohr",
         "connectors/box",
         "connectors/carbon-black",
         "connectors/chronicle",
@@ -122,6 +126,7 @@ const sidebars: SidebarsConfig = {
         "connectors/elastic",
         "connectors/email-inbox",
         "connectors/exabeam",
+        "connectors/extrahop",
         "connectors/falco",
         "connectors/fleetdm",
         "connectors/gcp-cloud-audit",
@@ -138,6 +143,7 @@ const sidebars: SidebarsConfig = {
         "connectors/lacework",
         "connectors/llm_usage",
         "connectors/m365-audit",
+        "connectors/microsoft-intune",
         "connectors/microsoft-sentinel",
         "connectors/mimecast",
         "connectors/netskope",
@@ -153,6 +159,7 @@ const sidebars: SidebarsConfig = {
         "connectors/qradar",
         "connectors/qualys",
         "connectors/rapid7-insightidr",
+        "connectors/rippling",
         "connectors/salesforce",
         "connectors/securonix",
         "connectors/sentinelone",
@@ -178,6 +185,10 @@ const sidebars: SidebarsConfig = {
         "connectors/zeek_suricata",
         "connectors/zscaler",
         // END GENERATED CONNECTOR LIST
+        // Outside the markers on purpose: generate_connector_docs.py rewrites
+        // everything between them from the connector registry, so an overview
+        // page that is not a connector is silently dropped if it sits inside.
+        "connectors/cloud-security-depth",
       ],
     },
     {
@@ -188,7 +199,7 @@ const sidebars: SidebarsConfig = {
     {
       type: "category",
       label: "Benchmarks",
-      items: ["benchmarks/alert-reduction"],
+      items: ["benchmarks/alert-reduction", "benchmarks/retro-hunt-scale"],
     },
     {
       type: "category",
@@ -212,6 +223,7 @@ const sidebars: SidebarsConfig = {
         "operations/white-label",
         "operations/usage-metering",
         "operations/ingest-authentication",
+        "operations/ip-classification",
         "operations/airgap",
         "operations/air-gapped",
         "operations/sandbox-providers",

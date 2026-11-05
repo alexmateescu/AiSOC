@@ -61,7 +61,7 @@ curl -X POST http://localhost:8081/v1/ingest/batch \
 polls a vendor API on a schedule, decrypts that tenant's stored credentials
 through the vault at poll time, and forwards the result to the same ingest
 endpoint. It runs in **CORE**, so a default install can pull as well as receive.
-The registry is **now 87 connectors** — that figure is generated from
+The registry is **now 91 connectors** — that figure is generated from
 `services/connectors/app/connectors/__init__.py` by
 [`scripts/generate_connector_count.py`](https://github.com/beenuar/AiSOC/blob/main/scripts/generate_connector_count.py),
 which fails CI if this sentence disagrees with the tree.
@@ -124,14 +124,14 @@ block the front door, and the reason an event is not lost when fusion restarts.
 ## 4 · Fusion evaluates detections
 
 [`services/fusion`](https://github.com/beenuar/AiSOC/tree/main/services/fusion)
-(container port 8003) consumes the spine and runs **2,535 executable detection
+(container port 8003) consumes the spine and runs **2,966 executable detection
 rules** against each event.
 
 The rules the engine runs are compiled into
 [`app/data/detection_ruleset.json`](https://github.com/beenuar/AiSOC/blob/main/services/fusion/app/data/detection_ruleset.json)
 and its imported counterpart beside it. The YAML under `detections/` is a
-*projection* of those, not the engine's input — 7,015 rules are on disk and
-2,535 load, which is why the corpus figure and the executable figure are
+*projection* of those, not the engine's input — 7,407 rules are on disk and
+2,966 load, which is why the corpus figure and the executable figure are
 published separately. See
 [the detection truth table](https://github.com/beenuar/AiSOC/blob/main/docs/detections/truth-table.md).
 

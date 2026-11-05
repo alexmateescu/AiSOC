@@ -23,6 +23,7 @@ from app.services.confidence import ConfidenceScorer
 from app.services.correlator import Correlator
 from app.services.deduplicator import Deduplicator
 from app.services.entity_risk import EntityRiskEngine, EntityRiskRecord
+from app.services.identity_privilege_context import STAMP_KEY as PRIVILEGE_STAMP_KEY
 from app.services.ml_scorer import MLScorer
 from app.services.narrative import (
     NarrativeFactor,
@@ -125,7 +126,9 @@ class FusionEngine:
         ueba_cache: UebaSignalCache | None = None,
         chain_grouper: AttackChainGrouper | None = None,
         enricher: AlertEnricher | None = None,
+        asset_resolver: Any = None,
         memory_provider: Any = None,
+        privilege_resolver: Any = None,
     ) -> None:
         self._dedup = deduplicator
         self._correlator = correlator
@@ -141,6 +144,15 @@ class FusionEngine:
         self._chain_grouper = chain_grouper
         # Wave 1 — fuse-time TI/vuln enrichment (optional; None = no enrichment).
         self._enricher = enricher
+        # Business-context plan PR-3 — fuse-time asset-context stamp for the
+        # scorer's asset_criticality factor (optional; None = factor reads
+        # "unknown"). `app.services.asset_context.AssetContextResolver`.
+        self._asset_resolver = asset_resolver
+        # Depth 2 wave 2, 1.1 — the privilege the actor held at event time,
+        # for the scorer's `identity_privilege` factor and the console
+        # queue's priority basis (optional; None = every alert stamps
+        # "unknown", which is the honest state and not a silent default).
+        self._privilege_resolver = privilege_resolver
         # Confidence + explainability is intrinsic to a fused alert — every
         # alert leaves the engine with a high/med/low label and an evidence
         # chain. The scorer is pure / stateless so we instantiate a default.
@@ -208,6 +220,34 @@ class FusionEngine:
                     fused.enrichments.update(enrichments)
             except Exception as exc:
                 logger.warning("fuse_enrichment_failed", error=str(exc))
+
+        # --- Step 2.6: Asset context (business-context plan, PR-3) ---
+        # Stamp what the alert landed on BEFORE the scorer reads it, same
+        # contract as the TI stamp above: the scorer stays a pure projection,
+        # and a resolver miss/outage leaves the honest "unknown (no inventory
+        # match)" factor in place.
+        if self._asset_resolver is not None:
+            try:
+                asset_ctx = await self._asset_resolver.resolve(alert)
+                if asset_ctx:
+                    fused.enrichments["asset_context"] = asset_ctx
+            except Exception as exc:
+                logger.warning("fuse_asset_context_failed", error=str(exc))
+
+        # --- Step 2.7: Privilege at event time (depth 2 wave 2, 1.1) ---
+        # The actor half of the same question step 2.6 asks about the asset.
+        # Note the asymmetry with the stamp above, which is deliberate: that
+        # one writes only on a match, this one writes `unknown` too. An
+        # absent asset row means the tenant has no CMDB entry for a host,
+        # which is ordinary; an absent privilege fact can equally mean the
+        # provider's posture has never been collected, and the scorer and
+        # the queue both need to be able to tell that from an ordinary
+        # account.
+        if self._privilege_resolver is not None:
+            try:
+                fused.enrichments[PRIVILEGE_STAMP_KEY] = await self._privilege_resolver.resolve(alert)
+            except Exception as exc:
+                logger.warning("fuse_identity_privilege_failed", error=str(exc))
 
         # --- Step 3: ML scoring ---
         try:

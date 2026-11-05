@@ -7,7 +7,1180 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [22.1.0] - 2026-11-05
+
 ### Security
+
+- **A deployed demo signed session tokens with the default `SECRET_KEY`
+  published in this repository.**
+  ([GHSA-m57m-6p4p-cq6p](https://github.com/beenuar/AiSOC/security/advisories/GHSA-m57m-6p4p-cq6p),
+  critical, CVSS 9.1) `enforce_secure_defaults` refuses an insecure default at
+  boot, but only when `ENVIRONMENT=production`. `infra/railway/railway.toml`
+  sets `ENVIRONMENT = demo` and never set `SECRET_KEY`, and nothing in its
+  README told the operator to — so the documented one-click deploy came up on
+  the internet signing session tokens with a string anyone could read here.
+  Anyone who could read the repository could mint a token for any tenant in
+  any role on any deployment that followed the recipe.
+
+  `demo` is the only member of `DEV_ENVIRONMENTS` that denotes a *deployed*
+  environment; `development`, `dev`, `local` and `test` are on somebody's
+  machine, where the placeholder is the documented value and a per-process key
+  would break every local flow that signs something and reads it back. It had
+  been grouped with them for the secret check, which is the whole defect.
+
+  A deployed demo now substitutes a per-process key rather than refusing,
+  deliberately: refusing is what production does, but it would break the
+  one-click deploy for everyone following the documented path, and a security
+  default that breaks the documented path is one that gets patched out
+  downstream. The cost is said out loud at boot rather than discovered —
+  the key lives for one process, so sessions end at a restart, and a demo
+  running more than one replica must set `SECRET_KEY` itself or the replicas
+  reject each other's tokens. The whole `INSECURE_SECRET_KEY_DEFAULTS` set is
+  covered, not only the spelling the report named.
+
+- **The connector egress guard had two ways around it, both reachable by the
+  same authenticated tenant user that reproduced the original report.**
+  ([GHSA-32q9-5fvr-8wcx](https://github.com/beenuar/AiSOC/security/advisories/GHSA-32q9-5fvr-8wcx),
+  high, CVSS 7.7) GHSA-cq4g-g6wp-4m2w closed `POST /connectors/{id}/test` and
+  the scheduler poll path. Three construction sites still called
+  `cls(**kwargs)` directly rather than through `_instantiate_or_422`, where the
+  guard lives: `POST /connectors/{id}/query`, `POST
+  /connectors/{id}/resource_config` and the saved-instance resource-config GET.
+  The first two take the destination straight from the request body, so the
+  earlier fix had moved the vector one route sideways. There is now one
+  construction path and the guard is on it.
+
+  The guard also matched only values shaped like an `http(s)://` URL. Nine
+  connectors assemble their URL from a hostname instead, so
+  `api_hostname = 169.254.169.254` reached cloud metadata under a guard that
+  had looked at the value and called it not a URL. A value is now read as an
+  authority when `https://<value>` parses to a plausible host — an IP literal,
+  `localhost`, or a dot-bearing name obeying the DNS grammar.
+
+  The narrowness is the point. An opaque token, a saved-search name, a glob
+  index pattern and a bare label such as `prod-splunk` all fail the grammar and
+  are never looked up, and that floor is pinned by test: a guard that breaks a
+  working connector on upgrade is worse than the bug it closes.
+
+- **A password reset did not end existing sessions, and one TOTP code could
+  open more than one session.**
+  ([GHSA-6465-rp4f-ppj6](https://github.com/beenuar/AiSOC/security/advisories/GHSA-6465-rp4f-ppj6),
+  high, CVSS 7.4) `bootstrap_admin --reset-password` wrote `hashed_password`,
+  `is_active`, `is_verified` and `role` and left `sessions_revoked_at` alone,
+  so every token minted before the reset kept working — up to seven days for a
+  refresh token, which re-mints access on its own. The operator had done the
+  one thing the product offers for "somebody else has my password" and the
+  other session was untouched. `deps.get_current_user` and `POST /auth/refresh`
+  already read the column and SCIM already stamps it; one revocation site had
+  been missed.
+
+  `POST /auth/mfa/verify` read `last_used_step`, verified against it and issued
+  an unconditional `UPDATE`, so concurrent requests carrying one TOTP code all
+  read the same mark before any of them wrote. The step is now claimed with one
+  conditional `UPDATE` scoped by the prior state the verification depended on,
+  with the row count deciding — the same claim pattern a dispatched action uses
+  before it touches a vendor.
+
+- **Committed `.env` backups remain in history, and `.gitignore` did not cover
+  the namespace.**
+  ([GHSA-57rw-w33m-cp5v](https://github.com/beenuar/AiSOC/security/advisories/GHSA-57rw-w33m-cp5v),
+  medium, CVSS 5.9) Two backups of a working `.env` were committed and removed
+  a few commits later. A deletion is not a redaction: every clone and fork
+  still carries the blobs, and between them they hold a generated `SECRET_KEY`,
+  the Fernet `AISOC_CREDENTIAL_KEY` that unlocks the connector vault, and the
+  Postgres, Redis and ClickHouse passwords. No third-party vendor credential
+  was in them — every vendor key slot was empty — so the exposure is bounded to
+  any deployment that reused that file. **Rotate those four secrets if you
+  deployed from a clone that reused it.**
+
+  `.gitignore` named `.env`, `.env.local` and `.env.*.local` and nothing else,
+  so a backup written beside the real file was simply not ignored. That is now
+  a namespace deny with the published template as the one exception.
+  Enumerating the backup spellings would have closed the two names that
+  happened; denying the namespace closes the next one too. An ignore rule has
+  no effect on a file that is already tracked, so
+  `scripts/check_env_backup_files.py` asks the question the ignore rule cannot
+  — is one tracked right now — and asks the ignore rule's own question back at
+  it, so the two halves cannot drift apart.
+
+- **Agent tool arguments were not checked against the tool's own schema.**
+  ([GHSA-4hxg-m5rw-gw3x](https://github.com/beenuar/AiSOC/security/advisories/GHSA-4hxg-m5rw-gw3x),
+  medium, CVSS 5.9) `ToolRegistry.execute` resolved the tool, checked the agent
+  scope, then called `tool.fn(**args)` with whatever the model produced. Every
+  tool ships a JSON schema — it is what `bind_tools` sends the provider, so the
+  schema exists and is already authoritative about what the arguments are — and
+  nothing compared the two. Python enforces no annotation, so a wrong type
+  reached the body untouched: a tool declaring `indicator: str` ran on a list,
+  a dict or an integer. Where that value is interpolated into a query, a vendor
+  request or a lookup key, the tool's own reasoning about its input was the only
+  thing standing there, and the argument came from a model whose context
+  includes attacker-controlled alert text.
+
+  The check is a method on `Tool` rather than logic in the registry, because it
+  is a property of the tool's own contract, and it runs at the chokepoint every
+  call passes through. The refusal is a structured error rather than an
+  exception — the loop contract is that a tool failure reaches the model rather
+  than aborting the run — and it is audited as a denial with its reason, so a
+  model steered into malformed calls is visible in the same rows as one steered
+  out of scope rather than looking like a tool that happens to be failing.
+
+### Fixed
+
+- **The gate that proves published images match the tree compared `VERSION`,
+  which does not move after a release — so every post-release commit was
+  invisible to it.** `scripts/check_published_images.py --require-fresh` reads
+  `org.opencontainers.image.revision` off each image and then compares
+  `git show <revision>:VERSION` against the tree. `VERSION` changes on a
+  release commit and on no other, so two different commits of the same release
+  compare equal and the check passes.
+
+  That is not theoretical. `v22.0.0` was tagged at `95bad815c`; the jobs
+  publishing the moving tags then failed on a drained Actions token, leaving
+  `:latest` on all 16 images at `95e397f7b`, seven commits behind `main`.
+  `make up` served a stack missing three of the five security fixes published
+  hours earlier, two of them for advisories rated 9.1 and 7.7 — while the gate
+  printed `OK — all 42 first-party image reference(s) resolve ... and the
+  version inside each matches the tree` and exited 0, because `VERSION` at the
+  stale revision was already `22.0.0`.
+
+  `--require-current` compares the commit rather than the version, for tags
+  that move. An immutable `vX.Y.Z` is a snapshot of a past commit and still
+  answers to `VERSION`; comparing it against today's head would red every
+  release tag forever. A moving tag must hold the tip of `main`, and is
+  tolerated behind it only while both bounds hold: the head commit is inside a
+  240-minute publish window (above the slowest of the last 100 successful
+  publish runs, at 168 minutes) and the lag is at most 40 commits (above the
+  24 that is the most ever to land inside one such window — the window alone
+  has a hole, because publishes cancel in progress and a stream of merges
+  keeps the head young indefinitely). A tag *ahead* of the head is a race and
+  not drift. A revision that is off the branch, absent, or unplaceable by this
+  checkout is a finding and never a pass.
+
+  Passed by the daily `image-availability.yml` run, which is what can catch a
+  moving tag that went stale with no commit to trigger anything, and by
+  `publish-images.yml` after it pushes its manifests. Deliberately not passed
+  by `release.yml`, whose checkout is a release tag rather than a branch tip.
+  The gate's `--self-test` went from 30 assertions to 59, covering both
+  directions — stale must fail, current and ahead and in-window must pass —
+  and `docs/operations/publishing.md` documents the operator remedy.
+
+- **CrowdStrike polling 404'd on every deployment, and the investigation read
+  answered "no detections" rather than failing.** ([#1695](https://github.com/beenuar/AiSOC/issues/1695))
+  CrowdStrike decommissioned the `/detects/*` endpoints on 2025-09-30. Both
+  callers in this tree still used them, and they failed differently:
+
+  - `services/connectors` raised the 404 on each poll, so a saved connector
+    never synced. Visible, and the way the bug was reported.
+  - `services/actions`' `CrowdStrikeRTRClient.get_detections` logged a warning
+    and returned `[]`, so `CrowdStrikeGetDetections` reported `SUCCEEDED` with
+    `count: 0`. An investigation read that as the EDR having nothing on the
+    host — the strongest exonerating evidence there is — from a call that had
+    404'd. That one was silent, and is why this fix covers both.
+
+  Both now use `POST /alerts/combined/alerts/v1`, and a failed alerts read
+  raises instead of returning an empty list, matching the contract the
+  SentinelOne and Defender reads already held. A 403 names the **Alerts: Read**
+  scope rather than presenting as an empty result, because an API client
+  carrying only the RTR scopes authenticates perfectly well and is then
+  refused.
+
+  **Action required:** grant **Alerts: Read** to your CrowdStrike API client.
+  No reconfiguration can work around a removed endpoint, so an older build
+  cannot be made to poll CrowdStrike at all.
+
+- **Duo authentication polling never read the last two minutes of any window,
+  so roughly 40% of Duo authentication events were never ingested on any
+  deployment.** ([#1706](https://github.com/beenuar/AiSOC/pull/1706))
+  `DuoSecurityConnector.fetch_alerts` built a purely clock-derived window
+  `[now - since_seconds, now]` with no checkpoint or high-watermark anywhere in
+  the connector, and the scheduler passes the poll interval as `since_seconds`,
+  so consecutive windows are contiguous and non-overlapping. Duo documents an
+  intentional two-minute delay before a new authentication is served by the
+  logs API and answers a more recent range as empty, so the final 120 seconds
+  of every window came back empty — and the next poll's window started at
+  `now`, so those entries were never requeried. At the default 300-second
+  interval that is 120 seconds in every 300 lost on each poll.
+
+  The window now ends at `now - 120s`, which keeps consecutive polls contiguous
+  across the boundary Duo actually serves. The test drives the real
+  `fetch_alerts` through a transport that emulates Duo's availability cutoff
+  and asserts that two back-to-back polls between them read every
+  authentication — a path test rather than a source-inspection one.
+
+- **`cloudflare_zt` WAF mode polled a route that does not exist, so it could
+  never have returned an event on any deployment.**
+  ([#1691](https://github.com/beenuar/AiSOC/pull/1691), closes
+  [#1686](https://github.com/beenuar/AiSOC/issues/1686)) WAF mode called
+  `GET /zones/{zone_id}/security/events`, described in the module docstring as
+  a mid-2024 replacement for `firewall/events`. Measured against the live API,
+  both firewall paths answer **404 / code 10404 "No route for that URI"** for
+  any zone id, with or without a token, while an unrelated zone route answers
+  **9106 "Missing Authorization headers"** — an auth refusal, which is what an
+  existing route returns. So the probe discriminates, and the absence is a
+  fact rather than an inference. Access mode was and is unaffected.
+
+  WAF mode now posts a GraphQL query against `firewallEventsAdaptive`. The
+  scope changes with it to **Zone: Analytics: Read**, which is what the
+  analytics dataset reads — not `Zone: Firewall Services: Read`, which governs
+  rule management and is what every surface here had asked for. Paging is by
+  time because the dataset has no cursor, and since that bound is inclusive,
+  emitted `rayName` values are remembered for the poll so repeats are dropped
+  within a page as well as across one. A GraphQL scope failure arrives as a
+  **200** carrying `errors` and a null `data`, and is now read as the failure
+  it is.
+
+- **Two flushes of the event lake could run at once, and a cached triage
+  verdict was never persisted.** ([#1694](https://github.com/beenuar/AiSOC/pull/1694))
+  The periodic timer and the consumer both call `LakeWriter.flush`, and the
+  native client and the spool cursor had no single owner between the insert and
+  its disk commit; a flush is now serialized under a lock for the whole of that
+  window. `EBADF`, `ENOTCONN` and `EPIPE` are also now classified as connection
+  failures rather than data failures, so a socket torn down mid-insert retries
+  in the outage direction instead of counting against the data-failure budget.
+
+  Separately, when the deduplication cache answered an alert, the worker
+  assigned the cached verdict and confidence to locals while persistence and
+  source writeback read `state` — so the verdict was computed and then dropped.
+  The cached verdict is now written onto the state it is read from, normalised
+  through the same disposition vocabulary as a fresh one and clamped to
+  `[0, 1]`, and it carries an explicit basis recording that the evidence
+  fingerprint matched a previous assessment, that no new model call was made,
+  and that this is not evidence of remediation or authorization to close the
+  alert.
+
+- **A tenant could not be created without naming every column the schema fills
+  in, so a brand-new database failed its seed.**
+  ([#1696](https://github.com/beenuar/AiSOC/pull/1696), closes
+  [#1693](https://github.com/beenuar/AiSOC/issues/1693)) `tenants.mssp_role`
+  has been `NOT NULL DEFAULT 'standalone'` since migration 012 while the ORM
+  declared it `nullable=True` with no default. Those two statements look
+  compatible and are not: a column the ORM believes is nullable is named in the
+  `INSERT` with an explicit `NULL`, and a column named in an `INSERT` does not
+  receive the column `DEFAULT`. The database's own default could therefore
+  never fire, and every caller that constructed a `Tenant` without naming the
+  field got `NotNullViolationError`. The seed was simply the first thing to
+  insert a tenant, so it was the first caller to find out.
+
+  Both `default=` and `server_default=` are now stated — the first covers the
+  ORM path, the second covers inserts that bypass it, and either alone leaves
+  one path to rediscover this. `scripts/check_orm_nullability.py` gates the
+  class, because nothing had compared a model against its own table.
+
+- **Five surfaces published an ATT&CK figure and none said which measurement it
+  was, so any two of them contradicted each other.**
+  ([#1668](https://github.com/beenuar/AiSOC/pull/1668)) On one deployment at
+  one moment: 392/392 on SOC Operations and the Coverage Advisor, 1/201 on the
+  Operations Funnel, 22.22% on SLA Tracking, 494 in the Marketplace facet and
+  14 in the agents health probe. Each surface now names what it counted. The
+  operations card also shipped "100% of known techniques have an enabled rule",
+  which is false: `GET /detection/coverage` returns one row per technique that
+  at least one of the tenant's rules already references, so a technique with no
+  rule never appears — and the Coverage Advisor states that scope correctly for
+  the identical number.
+
+  The Advisor also rendered every one of 392 rows as Tactic "unmapped" while
+  the alert detail page resolved `T1059.001` to Execution on the same
+  deployment. The API reads its tactic from `rule.mitre_tactics[0]` and the
+  compiled built-in corpus carries no tactic key, so the column could never be
+  populated from the response alone, while `mitreTactics.ts` had the
+  technique-to-tactic map all along one directory from the heatmap that uses
+  it. `displayTactic` now prefers the rule's own declaration — an author who
+  placed a technique in a specific tactic knows something a parent-technique
+  table does not — and still answers `null` when neither can place it, so
+  "unmapped" keeps meaning genuinely unknown.
+
+- **Three console figures described a different set from the one measured.**
+  ([#1669](https://github.com/beenuar/AiSOC/pull/1669)) `_correlate_stage` set
+  `backlog` to the number of alerts that absorbed exactly one event, and the
+  strip rendered "Backlog 7", telling an operator seven items were queued when
+  nothing was. That count is a correlation outcome, not a queue depth, and
+  fusion emits no per-correlation queue depth for the stage to read; `backlog`
+  now joins `unmeasured` and the observation travels in `detail` under its own
+  description, so the number is not lost with the wrong label.
+
+  `landing/Hero.tsx` and `onboarding/StartHero.tsx` both rendered a hardcoded
+  `value="26"` against a registry of 91 — the second 35 lines below a correct
+  dynamic use of `CONNECTOR_COUNT` in the same file. The gate that owns this
+  figure reconciled markdown prose and had never opened a `.tsx`, so it
+  reported OK throughout; it now scans every component under `apps/web/src` and
+  refuses a numeric literal rendered as a connector count, with a self-test
+  proving it catches that shape, leaves a dynamic use and an unrelated number
+  alone, and refuses a scan that walked no components. `DashboardView` also
+  paired a live `activeSourceCount` with the fixed caption "EDR, SIEM, Cloud,
+  IAM, SaaS", which did not describe what had been counted.
+
+- **A required connector select submitted an empty value while showing the
+  operator a chosen option.**
+  ([#1688](https://github.com/beenuar/AiSOC/pull/1688), closes
+  [#1685](https://github.com/beenuar/AiSOC/issues/1685)) A required select with
+  no schema default started on an empty form value but rendered no blank
+  placeholder, so the browser displayed the first option as selected. Leaving
+  it as it appeared submitted an empty value — `cloudflare_zt mode=''`, for
+  one — and **Test connection** failed with an opaque API 502. Such selects now
+  start on their first option so the submitted value matches what the operator
+  sees, pinned by a test that a required select starts on a value it can submit
+  ([#1692](https://github.com/beenuar/AiSOC/pull/1692)).
+
+- **The sandbox demo aborted part-way on a console with a legacy encoding.**
+  ([#1679](https://github.com/beenuar/AiSOC/pull/1679)) The investigation
+  ledger writes non-ASCII separators, and a Windows console exposing a legacy
+  encoding such as cp1252 raised `UnicodeEncodeError` mid-render, so a reader
+  on that terminal saw a traceback instead of the rest of the demo. Glyphs the
+  console cannot represent are now replaced so the complete ledger still
+  prints.
+
+- **A transient GitHub 502 reddened `main` as though a gate could not read its
+  input.** ([#1698](https://github.com/beenuar/AiSOC/pull/1698))
+  `check_required_check_substance.py` read the Actions API once per workflow
+  with no retry, so a single 502 from GitHub's own side failed the job with
+  `could not read runs for ci.yml` — for a reason no commit caused and no
+  author could act on. It happened twice in a row on the same commit, while the
+  identical endpoint answered 200 three times in a row from outside the runner
+  at the same moment, which is what places the fault on GitHub's side rather
+  than on the query. `_get` now retries only while the failure is transient —
+  500/502/503/504, `URLError` and `TimeoutError` — over four attempts with a
+  bounded backoff.
+
+  This does not weaken the refusal the gate exists for. A durable answer is
+  raised immediately and never waited on: a 403 from a token without the scope,
+  or a 404, is a fact about this token or this resource, and retrying it would
+  only delay reporting it. A 502 that persists still fails after the attempts
+  are spent — "could not read" remains a failure, never a pass.
+
+## [22.0.0] - 2026-11-04
+
+### BREAKING
+
+- **`GET /posture/summary` now returns `null` rather than `0` for every count
+  when nothing has collected.** The eight integer fields on `PostureSummary`
+  — `total`, `critical`, `high`, `medium`, `low`, `open`, `resolved` and
+  `suppressed` — become nullable, which changes their generated SDK types
+  from `int` to `int | None`.
+
+  The break could not be preserved, because the old type *was* the defect.
+  `posture_findings` had no production writer at all, so the endpoint counted
+  an empty table and answered `total: 0, critical: 0` on every deployment —
+  a sentence that reads "your cloud estate is clean" about an estate nobody
+  has looked at. No integer can carry that distinction: `0` has to mean
+  "collected, and found nothing", which leaves `null` as the only honest
+  value for "nothing has collected". Keeping the type and adding `collected`
+  beside it would have left the old fields still saying zero, so every client
+  that did not adopt the new flag would keep reading the same false clean
+  bill.
+
+  Migrating a client is reading `collected` first: when it is false the
+  counts are absent and the correct render is "not scanned", not a zero.
+
+### Security
+
+Seven advisories, all in the approval and authorization path. The unifying
+shape is that the control existed and compared the wrong thing: a value the
+caller supplied rather than one the credential proved.
+
+**Three of these refuse calls that used to succeed.** If a deployment relies
+on any of them, it needs a change before upgrading:
+
+- An `aisoc_` API key can no longer enrol or remove an authentication factor.
+- A `tenant_admin` can no longer reach the deployment-wide tenant and
+  waitlist surfaces; those now need `admin:tenants` / `admin:waitlist`, which
+  only the wildcard roles hold.
+- A `viewer` can no longer create, update, delete or run a playbook. Listing
+  is unchanged.
+
+- **[GHSA-fm3f-p5jv-6hcg](https://github.com/beenuar/AiSOC/security/advisories/GHSA-fm3f-p5jv-6hcg)
+  (critical) — a tenantless approver could approve another tenant's action,
+  and an ungraded dispatch executed.** `approve_action` took `approver` and
+  `requester` from the request *body*, so separation of duties compared two
+  strings the caller chose; both now come from the verified principal. A
+  principal with no tenant skipped the tenant comparison entirely — and
+  `_tenant_of` returns `None` for that same principal, leaving the record
+  read unscoped too, so one identity could approve any tenant's containment.
+  An approver with no tenant is not "all tenants", it is an identity nobody
+  scoped, and it is refused with the configuration to fix named in the
+  message. A request with no tenant was also governed by the environment tier
+  rather than failing closed, so a tenant's kill switch did not apply to it.
+  Finally, a live capability with no contract bypassed the autonomy gate, and
+  a test pinned that as intended behaviour.
+
+- **[GHSA-vf98-8367-45mp](https://github.com/beenuar/AiSOC/security/advisories/GHSA-vf98-8367-45mp)
+  (critical) — ChatOps approval decisions were accepted unauthenticated,
+  replayable and unaudited.** With `SLACK_SIGNING_SECRET` empty the Slack
+  interactions route accepted a `block_actions` payload carrying no
+  signature and answered 200. The Teams bot took the approver from
+  `from.aadObjectId` in the card callback and validated no Bot Framework JWT.
+  Replay protection lived in process memory, so the same payload was accepted
+  again after a restart; the claim is now a durable conditional write scoped
+  by `(tenant_id, action_id)`, because an unscoped claim lets one tenant's
+  reply consume another's. And `build_audit_sink` resolved a path that exists
+  in a source checkout and not inside the built image, so the shipped
+  container recorded **no approval decisions at all**, silently, while every
+  developer running from source saw them recorded.
+
+- **[GHSA-jfvq-94hv-4wrj](https://github.com/beenuar/AiSOC/security/advisories/GHSA-jfvq-94hv-4wrj)
+  (high) — a scoped API key could enrol a passkey on its owner's account and
+  sign in with it.** An `aisoc_` key, however narrow its scopes — even `[]` —
+  was accepted at the passkey and TOTP enrolment routes. The key resolves to
+  a `CurrentUser` carrying its owner's id and role, so a key scoped to
+  `alerts:read` registered a passkey bound to the owner's account and signed
+  in with it, receiving a console session with the owner's full role. Driven
+  to completion before the fix: the sign-in carried no `Authorization` header
+  at all and answered 200 at `GET /connectors`, the exact route the key
+  itself is refused on. `require_interactive_session` refuses by **credential
+  type**, not by permission, because a permission would be mintable onto the
+  very credential it refuses.
+
+- **[GHSA-6cwm-cx8p-h7f5](https://github.com/beenuar/AiSOC/security/advisories/GHSA-6cwm-cx8p-h7f5)
+  (high) — a `settings:write` fallback exposed every tenant and all waitlist
+  PII to any `tenant_admin`.** The deployment-wide tenant-provisioning and
+  waitlist routes gated on `admin:tenants` / `admin:waitlist` **or**
+  `settings:write`, documented as a bridge until a seed migration landed. It
+  never landed, so neither permission existed, no role could resolve either,
+  and the fallback was the only reachable branch — while `tenant_admin` holds
+  `settings:write` and `GET /admin/tenants` selects every tenant with no
+  predicate. Migration 159 seeds both permissions, granted to no
+  tenant-scoped role.
+
+- **[GHSA-8cpf-mchw-jpf2](https://github.com/beenuar/AiSOC/security/advisories/GHSA-8cpf-mchw-jpf2)
+  (high) — any tenant member could create and run response playbooks, and a
+  revoked session kept working.** The playbooks router authenticated every
+  caller and then required no permission to author a playbook or to run one,
+  while the API gates the same step dispatch on `actions:execute`. Separately,
+  `verify_console_token` consulted no user record, so a token minted before an
+  operator deactivated that user stayed valid on these routes until it
+  expired — while the API refused the same token. An unreadable user record
+  is a 503, never a pass.
+
+- **[GHSA-q388-w896-9jr2](https://github.com/beenuar/AiSOC/security/advisories/GHSA-q388-w896-9jr2)
+  (high) — approval decisions lacked separation of duties, a named-approver
+  check and an expiry check.** A requester could approve their own request,
+  any eligible user could decide an approval addressed to a named approver,
+  and a decision was accepted after `expires_at`. One principle governs the
+  fix: approving is the governed act and denying executes nothing, so every
+  rule narrows who may *approve* and leaves denial open.
+
+- **[GHSA-xhmc-69rh-h3rr](https://github.com/beenuar/AiSOC/security/advisories/GHSA-xhmc-69rh-h3rr)
+  (medium) — one person could request and approve an MCP tool call, and one
+  approval could be spent twice.** Separation of duties compared the API-key
+  prefix with the session email rather than the person, so the key's owner
+  could approve their own key's request. The decision was a read-then-write
+  rather than a conditional update, so approve and deny could both succeed on
+  one request, and consuming an approval was keyed by a `(tenant, tool)`
+  fingerprint rather than by approval id.
+
+### Fixed
+
+- **The syslog LEEF parser truncated every attribute value at its first `|`
+  and dropped every attribute after it.** `parseLEEF` cut the header with
+  `splitEscaped(body, '|', 7)`, but a LEEF header has five fields (1.0) or
+  six (2.0), so the extra cuts landed inside the attribute string — where
+  `|` is legal. `cmd=powershell -enc AAA | iex` reached detection as
+  `cmd=powershell -enc AAA`, and a `sev=5` following it was lost outright.
+  The half a rule reads is the half past the pipe, so this was silent
+  evidence loss on the syslog ingest path rather than a formatting nit.
+
+  The sibling CEF parser on the HTTP route already re-joined its extension
+  under a comment naming this exact hazard; the syslog LEEF path missed it.
+  `splitEscaped`'s own doc comment promised "at most `limit` fields" when it
+  returns at most `limit`+1, which is how the off-by-one came to be written,
+  and now states the separator semantics instead.
+
+  Found while resolving CodeQL `go/index-out-of-bounds` at `kv.go:125`, which
+  was itself a **false positive** — the flagged read was guarded by
+  `len(fields) >= 7` inside a tagless `switch` case the query does not model,
+  proven by walking every one-byte truncation of four real CEF/LEEF lines
+  through the parser without a panic. The alert is dismissed as such; the
+  truncation bug it led to is the real defect.
+
+- **The offline sandbox read two spellings of "timestamp" and silently
+  computed nothing for the rest.** Found by writing a payload the way a
+  stranger would: the same benign login as the previous report, timed with
+  `"ts"` instead of `"published"`, returned `not_computable` on every
+  time-based signal. The behaviour was honest — it named the missing input
+  rather than inventing a verdict — but
+  `_parse_timestamp(event.get("published") or event.get("timestamp"))`
+  accepted exactly two spellings while the actor reader accepted four and
+  the address reader four, which is backwards: a timestamp has *more*
+  ordinary spellings than an actor, not fewer. Measured over the spellings
+  a stranger would plausibly write, **13 of 63 probes passed**. Since the
+  package is used by running it against your own alert file, that is the
+  difference between a tool that works and one that appears to do nothing.
+
+  No existing test could have caught it, and that is the part worth
+  keeping: every bundled fixture says `published`, so replaying the corpus
+  could only ever confirm that `published` works. A corpus written in its
+  parser's own dialect cannot reveal a dialect gap.
+
+  All field reads now go through one declared table, `FIELD_VOCABULARY`,
+  covering event time (16 spellings, ISO-8601 or epoch), actor (14, plus 4
+  honoured only when nested), source address (13), city, country,
+  coordinates, domain age and destination. Actor, address and position are
+  also read through declared container objects up to three levels deep, so
+  the shapes Okta, Microsoft Entra and Elastic Common Schema actually ship
+  resolve without reshaping. Position now **prefers coordinates the payload
+  carries** over a city centroid: explicit `lat`/`lon` is not a weaker
+  input than the table but a strictly better one, while the table stays
+  narrow and still names a city it cannot resolve rather than substituting
+  a country centroid. 63 of 63 probes pass after.
+
+  Widening was not allowed to buy a new confident answer, which took three
+  guards. Two events timed only to a calendar date both land on midnight,
+  so the elapsed time is zero and the implied speed infinite — without a
+  precision guard the sandbox reports "one actor was in two places at once"
+  from a payload that never carried an hour, proven by reverting the guard
+  alone and watching it fire. Event times are read from the top of the
+  event only, so a nested `user.created_at` can never stand in for the time
+  of the event. And `0,0`, out-of-range coordinates and half a coordinate
+  pair are refused or fall back to the city table, never plotted. An
+  unrecognised spelling still returns `not_computed` naming the field.
+  Gated by a new vocabulary arm in `scripts/check_sandbox_honesty.py` that
+  generates its fixtures from the vocabulary table itself, plus
+  `test_field_vocabulary.py` (134 cases). Signal output for all five
+  bundled scenarios is unchanged, byte for byte.
+
+- **The offline sandbox's verdict followed the label on the input file, not
+  the events.** Reported by a community reviewer who fed `aisoc-sandbox` a
+  harmless login — same user, same address, New York both times, eight hours
+  apart, tagged `T1078` at severity `high` — and got back "the geo pivot
+  between sequential events is physically impossible", high confidence,
+  **83/100**. Relabelling genuine impossible-travel events `info` returned
+  "L4 — fully autonomous closure" and "auto-execute eligible". Every claim
+  reproduced against `main`, and the cause was visible in three signatures:
+  `_confidence_band(*, severity, technique_count)`, `_automation_tier(severity)`
+  and `explain(*, technique)` — **none of the three decision functions could
+  see the events**. The rationale came from a fixed table keyed on the MITRE
+  technique, so `T1078` always produced that sentence; 83 is
+  `75 (high) + 4 x 2 techniques`; and the tier was a dict keyed on severity,
+  so a self-declared label in an input file selected the autonomy posture.
+  Several canned rationales also asserted measurements nothing had taken —
+  a Welford-online baseline, a domain registration age, a file-extension
+  churn rate — and the class docstring named the goal outright: that a reader
+  "can't tell the rendered ledger apart at a glance" from the live demo. This
+  is the family the project deletes rather than rewords, so all of it is gone
+  rather than reworded.
+
+  What replaces it: `aisoc_sandbox.signals` computes what the event payload
+  genuinely allows — impossible travel is a great-circle distance over an
+  elapsed time, so the sandbox performs that division and prints it. The
+  reporter's benign payload now reports `0.0 km apart, implied speed
+  0.0 km/h` and says the `T1078` tag is **not supported by anything computed
+  here**; their relabelled payload still identifies the travel as impossible
+  from the arithmetic, and determines no tier at all. Everything the sandbox
+  cannot compute — confidence score, L0–L4 tier, approval posture,
+  related-case count, entity risk, hunt matches — is now an explicit
+  `not_computed` carrying its reason, never a plausible figure and never a
+  zero (a hunt that did not run reports `unknown`, since it looked nowhere
+  rather than finding nothing). Tool calls are marked `executed: false`; the
+  ruleset figure is derived from `corpus-stats.json` by
+  `scripts/sync_sandbox_corpus_figures.py` instead of the hand-typed `"800+"`
+  that had gone stale by a factor of three; and the synthetic-run notice
+  moved onto every decision line, because the reporter read the verdict
+  several screens below the banner. Guarded by
+  `scripts/check_sandbox_honesty.py`, which also refuses the *shape* — a
+  table mapping a technique id or a severity name to a sentence or a score —
+  and which reports **222 problems against the pre-fix tree and 0 after**.
+  Thanks to the reporter for a careful, well-scoped report that was right on
+  every count, including about what they had not tested.
+
+### Added
+
+- **A CNAPP's findings reach a verdict as context about the resource, not as
+  more alerts** (depth plan wave 2, item 8.1). The Wiz connector read
+  `issues` and nothing else; it now also reads vulnerability findings,
+  configuration findings and runtime detections, each off until the tenant
+  enables it, and none of them becomes an alert.
+
+  What was absent, and it was not the connector. `posture_findings` has
+  shipped since migration `017` with RLS, six indices, a REST surface and a
+  compliance-evidence mapper, and its only writer in the whole tree was
+  `POST /posture/findings` — a route a human calls by hand. No connector, no
+  scanner and no scheduler had ever written a row. `posture_scan_runs` had no
+  writer at all. A module-reachability gate passes on both, because the code
+  does run; what it reads is a table nothing fills.
+
+  So the measurable consequence was a confident zero: `GET /posture/summary`
+  counted an empty table and answered `total: 0, critical: 0` on every
+  deployment, which says "your cloud estate is clean" about an estate nobody
+  has looked at. The summary now carries `collected`, derived from a run row
+  the collector writes on every poll *including* a poll that found nothing,
+  and returns null rather than `0` when nothing has collected. The same
+  distinction reaches the prompt: a tenant with no CNAPP gets no posture
+  block at all rather than a line saying the resource has no findings, which
+  a model would reasonably read as exculpatory.
+
+  Where each class lands is the design. Vulnerabilities go to
+  `asset_vulnerabilities` through the `fetch_vulnerability_findings` hook
+  that already existed and was implemented by two connectors — a second home
+  for per-asset CVE state would be a second answer to "are we exposed".
+  Configuration findings and runtime detections go to `posture_findings`,
+  which a verdict queries by resource. Matching is an array overlap over
+  every identifier a resource answers to, because an alert knows a bucket by
+  its ARN while the CNAPP knows it by its own graph id and a display name.
+
+  Read through Postgres rather than the graph, deliberately: the five
+  incident-context dimensions are 100% Neo4j, which is a `full`-profile
+  service, so a posture finding that only reached a verdict there would be a
+  capability most deployments do not have, described as one they do.
+
+  **Secrets are refused rather than built.** Wiz detects exposed secrets, but
+  no public reference documents a top-level secrets query the way it
+  documents the other three, and writing one from the product's marketing
+  surface would be inventing an endpoint. The three queries that did ship
+  were verified against two independently maintained, shipped third-party
+  integrations that drive the same shapes.
+
+  One vendor quirk worth recording: Wiz applies a default type filter of
+  `GENERATED_THREAT` the moment any filter is sent, silently dropping
+  `MATCH_ONLY` detections — the weak signals the read exists to supply. Both
+  types are named explicitly and a test asserts it on the *request*, because
+  a tenant missing the filter still gets rows, just the wrong subset.
+
+  Proven live: eight cases against real Postgres as the DML-only `aisoc_app`
+  role, with a negative control that makes a re-poll reset `first_detected_at`
+  and requires the suite to go red. A sixth channel was added to the
+  injection scan, because a cloud resource name is chosen by whoever created
+  the resource. `apps/docs/docs/connectors/cloud-security-depth.md` records
+  the same depth check across all five registered cloud-security connectors,
+  naming six further gaps and the one refusal.
+- **ExtraHop RevealX 360 network detections, with the vendor's own risk
+  bands intact** (depth plan wave 2, item 8.2). Detections arrive as alerts
+  on a schedule, and two read-only verbs -- `lookup_network_flows` and
+  `lookup_network_device` -- let an investigation pull the flows and the
+  device record around one address.
+
+  What was absent: no NDR connector beyond Zeek/Suricata and Darktrace. The
+  reproduction had two halves, because this is an item that can be wired
+  wrong in two places. The connector half was an import error. The ingest
+  half was quieter and worse: with no `connectorProfiles` entry the
+  normalizer logs `Using generic profile for unknown connector`, files the
+  event at `class_uid: 4001`, and `should_promote()` then drops every
+  mid-band detection. The connector would have polled successfully,
+  reported healthy and produced an empty queue.
+
+  **This connector never emits `critical`, deliberately.** ExtraHop
+  publishes three risk bands and no fourth; from the vendor's own
+  documentation the score is "color coded by severity as red (80-99),
+  orange (31-79), or yellow (1-30)". Promoting the top band would assert a
+  tier the vendor does not publish, which is the same defect as collapsing
+  a vendor's real `critical` into `high`, in the other direction. Nothing
+  is lost: these are OCSF Security Findings at category 2, which promote
+  regardless of severity.
+
+  A read that could not happen is not an empty result. RevealX 360 record
+  search needs a cloud recordstore with Premium Investigation, and a
+  deployment without one gets a refusal naming the reason rather than a
+  list of no flows -- because an investigation reporting an address was
+  quiet when nothing was ever searched has stated a fact it did not
+  establish.
+
+  The gate that keeps it fixed is the ingest profile test, proven against
+  the pre-fix tree: removing the profile fails all three assertions and the
+  normalizer logs the generic-profile warning again.
+
+  **Not built:** Corelight. Its documentation answers 401, so no honest
+  mock payload can be written. Recorded as blocked with exactly what it
+  needs rather than substituting the Zeek-log connector that already
+  exists, which reads different data for a different purpose.
+
+### Fixed
+
+- **The enrichment service's rate limit is applied** (depth plan wave 2,
+  item 8.3, first half). `RATE_LIMIT_RPS` and `RATE_LIMIT_BURST` were parsed
+  into config, assigned to struct fields, and read by nothing else in the
+  service. That is worse than a missing setting, because an operator reading
+  the environment believed the service was bounded.
+
+  A token bucket per tenant, applied on `/enrich` and on `/enrich/bulk`,
+  with one token per *item* on the bulk path so a hundred-indicator call
+  cannot be the way around the limit. An unset rate means unlimited rather
+  than blocked: a malformed environment variable parses to 0, and reading
+  that as "allow nothing" would turn enrichment off across a deployment
+  with no message anywhere. A request with no tenant shares one bucket
+  rather than bypassing the limit.
+
+  Six tests, every grant with a partner refusal, because a limiter asserted
+  only on the allowed path is indistinguishable from no limiter, which is
+  exactly what shipped.
+
+  The enrichment cache key is now tenant-scoped as well. Two tenants
+  legitimately enable different providers, so a shared key would serve
+  tenant A's verdict from a provider tenant B switched off straight to
+  tenant B.
+
+### Added
+
+- **Response reaches the cloud, SaaS and code-platform estate.** The live
+  action surface covered hosts, user sessions, mail, network blocks, SIEM
+  and tickets, and stopped there: an AWS key in an attacker's hands, a
+  compromised GCP service account, a leaked GitHub token, a Slack or
+  Salesforce or Snowflake or 1Password account under someone else's
+  control, or a phishing page on a shared host all ended with "open a
+  ticket for the cloud team". Measured before the change by the new gate,
+  the tree carried **89 executor arms over 39 verbs**; it now carries
+  **151 over 60 verbs across 34 vendors**, including AWS access-key
+  deactivation, role-session revocation keyed on `aws:TokenIssueTime`,
+  agentless instance quarantine and IAM-user containment; GCP and Entra
+  service-identity containment; Workspace, Entra and Okta OAuth-grant and
+  application-password revocation; GitHub member, deploy-key and workflow
+  containment plus credential revocation through GitHub's own revocation
+  API; Slack, Salesforce, Snowflake and 1Password user and session
+  containment; and single-URL blocks at Cloudflare Gateway, Zscaler and
+  Netskope. Each verb declares a capability contract, and the conservative
+  answer wins at verb level rather than the most capable vendor's:
+  `revoke_token` declares no platform rollback because GitHub states a
+  revoked credential cannot be reactivated, even though GCP can re-enable
+  a key — which has its own verb an operator dispatches deliberately.
+  Verification is a **recorded gap, not a claim**: every client here has a
+  real read-back and `PostActionVerifier` is keyed on `ActionType`, which
+  live-action capabilities do not have, so none of these verbs is
+  automatic at any confidence and the read-backs ship as dispatchable read
+  verbs instead.
+- **An arm count that cannot be quoted three ways.**
+  `scripts/check_executor_arm_count.py` counts by the declared rule —
+  class-level `capability = "..."` declarations under
+  `services/actions/app/live_actions/` — rather than the looser grep that
+  also matches `reverse_capability` arguments and reports 22 arms that do
+  not exist. It cross-checks the declared set against
+  `builtins._BUILTIN_ADAPTERS` **in both directions**, so a class that
+  declares a capability and never registers cannot pad the headline while
+  answering `executor_not_found` at dispatch. The artefact at
+  `docs/audit/executor-arms.json` is generated, and a hand edit fails the
+  gate. `make stats` now carries the line.
+
+- **A playbook can ask the model one bounded question and cannot be steered
+  into an action by the answer.** A new `ask_model` step asks a
+  multiple-choice question about the evidence and branches on it. The
+  answer set is closed and written by the playbook author; an answer
+  outside it takes a declared fallback branch, which is required, because
+  the case that matters is the one where the model does not decide. The
+  answer selects a key in the author's own branch map, so the model's text
+  never becomes a step id. It cannot call a verb, pinned three ways: it is
+  routed through the control-flow table rather than the handler table that
+  reaches the action bridge, an AST test asserts the module imports
+  nothing that can dispatch, and a tripwire test makes the model answer
+  with the name of a containment verb and watches the step decide nothing.
+  The step type is in sync across all five vocabularies the parity gate
+  reads.
+- **Time gates on automatic response.** A tenant may declare when
+  automatic execution is acceptable — outside business hours, with nobody
+  on call, or during a change freeze — each opt-in, each applying from a
+  declared impact floor. The direction is fixed and asserted over every
+  impact and requirement the approval matrix emits: a schedule may only
+  raise AUTOMATIC to ANALYST and returns a decision that already requires
+  a human untouched. An on-call state the platform could not read counts
+  as nobody on call, because a failed rota lookup must not silently
+  re-enable containment at three in the morning. A tenant with no schedule
+  configured is byte-identically unaffected.
+- **Approval deadlines that do something.** Until now every approval
+  behaved identically at its deadline: the action did not happen and
+  nothing else happened either, which for the step that isolates a host
+  believed to be exfiltrating is a decision nobody made on purpose. A step
+  may now declare `stay_paused` (the existing behaviour, chosen rather
+  than implied), `rollback`, or one **named** limited containment verb.
+  The named verb is graded by its own contract through the ordinary
+  governed path, so a timeout is not a tier promotion: a verb the tenant's
+  autonomy tier would not auto-execute queues here exactly as it would
+  anywhere else.
+- **AI-estate containment.** The AI inventory could score a provider key's
+  exposure and nothing could act on it, so a key found in a public
+  repository was a finding with a recommendation and no verb. Fourteen
+  arms across OpenAI, Anthropic and an AI gateway now cover key
+  revocation, role demotion, workspace removal and spend caps where the
+  provider API offers them, with an approved kill-switch playbook
+  composing them. The three providers give three different answers to "can
+  this be undone" and the arms carry each honestly rather than claiming
+  the most capable vendor's.
+
+### Fixed
+
+- **A vendor retry no longer reopens a closed case.** Inbound ITSM sync
+  compared the mapped status to the current one with an exact equality, so
+  a case a human had closed in AiSOC, receiving an ordinary Jira
+  redelivery of `Done` — which maps to the *intermediate* `resolved` — was
+  moved backwards out of its terminal state. No unusual sequence was
+  needed, only a close followed by a retry, and Jira retries up to five
+  times while ServiceNow retries until it gets a 2xx. Found by driving the
+  production handler end to end for the first time: four correct unit
+  tests could not see it because each mocks the next layer. The guard is
+  scoped to terminal states only, because an ITSM moving a ticket from
+  Resolved back to In Progress is a real transition this product should
+  mirror.
+- **HR and managed-device context, kept current by a connector on a
+  schedule** (depth plan wave 2, item 1.3). Three new connectors --
+  BambooHR, Rippling and Microsoft Intune -- feed employment status, start
+  and last-day dates, manager, department, worker type, device owner,
+  compliance state, OS version, encryption and threat-defence agent state
+  into triage.
+
+  What was absent, measured: 88 registered connectors and not one of them
+  HR or MDM, and `import_context` with exactly one production caller, a
+  manual POST route. A tenant's HR context was only ever as current as the
+  last file somebody uploaded.
+
+  The wiring is the half that makes it real. The connector scheduler calls
+  the workforce sync on every poll, in its own `try`, modelled on the
+  vulnerability sync beside it: a context sync that fails must not cost the
+  poll its events.
+
+  Migration 131 puts the context in Postgres so it exists on CORE. The graph
+  import stays and is richer, but Neo4j is a `full`-profile service, so on
+  the deployment `make up` produces the HR dimension did not exist at all
+  and every triage input reading it was silently dead.
+
+  Tenure, departing-within-30-days, contractor status and device compliance
+  are derived and cited in the confidence basis as well as rendered in the
+  prompt, because a fact in one and not the other is either invisible to a
+  reviewer or absent from the model. Every absence keeps its direction: a
+  missing start date is not a new joiner, a missing end date is not
+  "staying", an unmapped employment type is not an employee, and a device
+  the MDM never evaluated is not a compliant one.
+
+  Data minimisation is in the request and in the schema rather than in a
+  filter. All three vendors return compensation, date of birth and home
+  address; none is requested, and migration 131 has no column that could
+  hold one. The BambooHR directory endpoint, which would have been the
+  obvious single read, is deliberately not used for the facts: its own
+  reference says it never includes employment status or history in any
+  configuration and excludes former employees entirely, which removes every
+  field this item needs and the whole population it exists to see.
+
+  **Not built:** Workday and Kandji, recorded as blocked with exactly what
+  each needs rather than built against an invented payload shape.
+
+### Added
+
+- **Anonymizer and hosting classes stamped on public addresses at ingest**
+  (depth plan wave 2, item 1.6). An event's source address now carries
+  `tor_exit` or `hosting_provider` where a pinned local dataset has a record
+  for it, along with the dataset version that answered.
+
+  What was absent: nothing in the tree classified an address at all. The
+  reproduction was a Go test driving the real `Normalize` entry point, which
+  failed to compile because `activity.Location` had no such field.
+
+  How it works: the dataset is embedded in the ingest binary, so CORE and an
+  air-gapped install classify with no enrichment service and no network call
+  of any kind. It is built by `scripts/fetch_ip_class_dataset.py` from the
+  Tor Project's own bulk exit list (CC BY 3.0 US) and from seven cloud
+  providers' own published range endpoints, with per-source provenance,
+  terms link and upstream digest recorded in the manifest. The snapshot is
+  21,726 records: 1,228 `tor_exit` and 20,498 `hosting_provider`.
+
+  **Three of the five classes ship with no records.** `vpn`, `public_proxy`
+  and `residential_proxy` have no redistributable source - the widely cited
+  community list carries no licence file at all, verified as a 404 on its
+  default branch - so they are tenant-supplied only and tenant-supplied
+  lists are not yet implemented. An unclassified address therefore means the
+  dataset had no entry and never that the address is ordinary: the column is
+  NULL, the rail renders nothing, and no surface says "not an anonymizer".
+  Reasoning and alternatives in ADR 0018.
+
+  Carried end to end: three ClickHouse columns (fresh-volume DDL and lake
+  migration `005_ip_class` moved together, because a column added to one
+  alone lands on new deployments and silently not on existing ones), two
+  `alerts` columns (migration 130), the alert API response, and a rail
+  section that renders only when there is a class to show.
+
+  The gate that keeps it fixed: `scripts/check_ip_class_dataset.py` runs the
+  Go classifier and the Python one over 400 sampled addresses and requires
+  identical answers. They answer in different places - Go stamps live events
+  at ingest, Python classifies committed fixtures during detection replay -
+  and if they disagreed, a rule matching `ip_class` would pass its fixtures
+  and never fire on real traffic. A missing Go toolchain fails the gate
+  rather than reporting "not checked", because a gate that skips silently is
+  indistinguishable from one that passed.
+
+### Fixed
+
+- **The only throughput gate a pull request runs is now derived from a
+  published figure** (depth plan wave 2, item 8.4). `perf.yml` asserted
+  `--assert-floor 1000` on the in-process fusion hot path, under a comment
+  claiming a ">200x margin below the measured number" — a number that
+  appeared on no page, so nobody could check either figure or say what
+  regression the gate would catch. The end-to-end job whose floors *are*
+  bound to the published page is nightly, so on a pull request this was the
+  only throughput assertion running at all.
+
+  The harness was measured at 140,692 events/s and published with hardware,
+  date and commit; the floor moved to 7,000, a stated 20.1x. Two negative
+  controls: reverting the floor fails at 140.7x against a 25x ceiling, and
+  deleting the published section fails with the reason rather than passing
+  over an absent claim.
+
+  The performance page also separated two gaps it had been conflating: no
+  cloud-hardware run and no managed-Kubernetes run are different missing
+  things, and the `kind` table is neither of them.
+
+- **The Wiz connector's documented severity ladder was wrong.** The page said
+  AiSOC collapses Wiz's five tiers into four with `CRITICAL` mapping to
+  `high`; the connector has mapped `CRITICAL` to `critical` all along. Wiz
+  was also the only one of the five cloud-security connectors shipping
+  without a marketplace manifest.
+
+## [21.0.0] - 2026-10-31
+
+### BREAKING
+
+- **Correlation grouping narrows on missing identifiers** (the Changed
+  entry below). On upgrade, *future* alerts that carry no tactic group
+  per rule instead of per entity, and alerts with no identifiers at all
+  stop cross-rule merging entirely. Existing incidents are untouched;
+  the measured effect on a detection-shaped cohort is reduction moving
+  42.6% → 24.5% because unrelated alerts stop counting as grouped.
+  There is no API change in this release; the major marks this grouping
+  change plus the redefinition of published evaluation semantics
+  (serving-model provenance, full-cohort denominators, closure
+  contamination) that older scorecards do not carry.
+
+### Added
+
+- **Serving-model attribution, end to end.** Every published verdict-eval
+  row had `resolved_models: []` — 72 calls placed, answered, and
+  unattributable, because the only serving-identity reader was the LiteLLM
+  gateway header and the measured runs talked to an OpenAI-compatible
+  endpoint directly. The extractor now reads the gateway header first
+  (*verified*) and the response body's own `model` second
+  (*self-reported*), credited only with evidence it came from the body —
+  langchain falls back to the requested name when the body carries none,
+  and a requested alias is never copied into serving metadata. Scorecards
+  carry a `provenance_status` (`verified` / `self_reported` /
+  `unattributed` / `serving_mismatch` / `no_calls`); a live run whose
+  serving identity mismatches the requested model is refused as that
+  model's performance and preserved as a diagnostic; the benchmark table
+  gained an Attribution column with the five historical rows reading
+  "unverified" rather than receiving invented attribution; and a measured
+  auto-closure precision can no longer be bound to a call whose serving
+  model no party vouched for — a clearing measurement over an unattributed
+  call now **blocks** instead of authorising.
+
+- **Full-cohort and closure accounting in the replay scorer.** Selective
+  malicious recall silently dropped errored cases from its denominator; the
+  scorer now also publishes full-cohort recall over every labelled
+  malicious case with the four buckets that sum to it (caught, abstained,
+  errored, answered-as-negative), the four proposed-closure cuts
+  (malicious closure rate, closure contamination, benign closure coverage,
+  unknown-label share — `closures_executed` pinned at zero because replay
+  executes nothing), request reliability as five visible counts
+  (requested / attempted / completed / failed / unattempted), per-severity
+  segments, and per-source attribution counts.
+
+- **The reflex path reports its stages and its decision contract.**
+  Auto-triage summaries, logs and replay decisions now carry named stage
+  timings (queue delay, business context, context fetch, decide,
+  verification, persist, escalate, approvals, writeback) plus a structured
+  decision contract — verdict, operational disposition, supporting and
+  contradictory decisive claims, groundedness, missing prerequisites, and
+  the escalation reason — assembled from signals that already ran, with
+  `None` for a signal that never ran rather than an empty list pretending
+  the check happened.
+
+- **Retro-hunt rehearsal mode.** `RETRO_HUNT_DRY_RUN` runs every sweep
+  exactly as live (the warehouse scan still consumes the tenant's sweep
+  budget) and withholds every mutation at the write boundary inside
+  `sweep_tenant`: matches come back as recorded proposals, no alert opens,
+  no sighting row lands, and the dedup branch leaves its counters
+  untouched — so a re-hunt can be rehearsed over history with no ability
+  to touch production state.
+
+- **A live-Redis proof for the correlator, and the suite that was wired to
+  nothing.** `integration.yml` gains a `fusion-redis-live` job (keyed on
+  the existing spine filter) running `services/fusion/tests/integration/`
+  against a real server — window expiry, tenant boundaries, restart
+  continuity, per-rule fallback grouping and concurrent-creator
+  convergence — which also gives the windowed engine's claim-protocol
+  suite its first workflow. An all-skipped run is refused rather than
+  green.
+
+- **The verdict model matrix.** `run_model_matrix.py --task verdict`
+  grades the balanced corpus per model through `run_verdict_eval.py`
+  (still a thin collator defining no scoring), records each row's
+  configuration — pins, endpoint, prompt provenance, corpus digest,
+  provenance status, serving models — and the runtime in
+  comparable-but-unidentifying terms, and renders the constant-answer
+  baselines beside the table. The committed verdict scorecard gained the
+  deterministic-fallback baseline row: balanced accuracy exactly at the
+  0.250 constant floor, zero of 36 malicious cases caught — the rules
+  floor every measured model is read against.
+
+- **An annotated unsupported-claim measurement.** Sixteen hand-annotated
+  (rationale, evidence, label) cases measure `score_claim_support` with an
+  exactly-pinned confusion matrix (TP 7, FP 0, FN 1, TN 8), a recorded
+  known miss that must stay missed until the pins move with it, and the
+  annotation-independence limit stated where the number lives. The
+  measurement found and drove a real detector fix: the claim pattern
+  recognised "scheduled scan" while the support keys did not, so an alert
+  whose evidence recorded `scheduled_scan` could state the claim and still
+  be refused support.
+
+- **Agentmetry ingest template: AI coding-agent activity as an input**
+  (GitHub Discussion #1577). [Agentmetry](https://github.com/blitzcrieg1/agentmetry)
+  records the tool calls Claude Code, Cursor, Codex and Copilot make through
+  their own hooks and correlates them into ATT&CK/ATLAS-mapped detections;
+  its webhook sink posts one canonical JSON event per request, routine
+  activity and detections down one URL. The discussion asked whether
+  generic-json "should land" them — checked against the real template with
+  real captured events: they land, but severity flattens to Unknown on every
+  event including critical detections (generic-json reads a top-level
+  `severity`; theirs lives at `action.outcome` / `detection.severity`),
+  every routine tool call is promoted to an alert (class 2001 is always
+  promoted — one busy agent is a queue flood), and titles, technique ids and
+  the event timestamp are lost. The bundled `agentmetry` template fixes
+  exactly that: the template language gains `class_field`/`class_map` (one
+  URL, per-event-kind class: tool calls stay 6003 API Activity in the lake,
+  `action.type: detection` routes to 2001 Security Finding, always promoted)
+  and `technique_fields` (vendor-supplied ATT&CK ids carried as supplied
+  through the same `mitre_attck` block the connector path emits, shared via
+  the newly exported `EnrichTechniqueIDs`/`TechniqueIDsFromPaths`; ATLAS
+  `AML.T****` ids are preserved in evidence fields and refused from
+  ATT&CK-typed ones, matching Agentmetry's own warning). The five-tier
+  severity ladder survives end to end — critical maps to its own tier,
+  never high. Agentmetry-observed coding agents feed the AI-estate
+  inventory and graph (`agentmetry` joins the `ai-runtime`/`ai-finding`
+  source-type branch in both consumers), the template is mintable from the
+  console catalog, and the docs page states plainly what was verified
+  against captured events versus what remains unexercised live. Also fixes
+  the `ai-estate.md` table row that claimed `ai-finding` is class 6003 —
+  the template is and was 2001.
+
+- **Asset criticality reaches fusion confidence and action approval —
+  tighten-only.** Fusion stamps what each alert landed on at fuse time
+  (`enrichments["asset_context"]`, resolved from the tenant's own `assets`
+  inventory by name/FQDN/IP with the highest criticality winning) and the
+  confidence scorer gains a bounded `asset_criticality` factor (weight 0.06,
+  weights rebalanced to keep summing to 1.0) — an absent stamp contributes
+  exactly 0.0 and the rationale row says `unknown (no inventory match)`
+  rather than being omitted, because "we do not know what this host is" is a
+  fact an analyst needs. On the response side, `evaluate_contract` grades a
+  verb one impact rank higher when the target asset is critical/high in the
+  tenant's inventory — never lower, with two deliberate non-raises:
+  READ_ONLY stays READ_ONLY (a read against a domain controller is still a
+  read) and SEVERE never becomes IRREVERSIBLE (context can demand a human,
+  it cannot make an undoable action undoable). The positive control is the
+  point: unknown criticality grades every verb identically, so a deployment
+  with no CMDB loses nothing. Both approval doors thread the resolution;
+  the console's vendored copy stays byte-identical.
+- **Business context reaches the triage model, and impact statements must
+  cite it.** The business-context applier's result used to die in the
+  worker's local variable: a tenant `set_severity` mutated the alert
+  silently, the model explained a severity nobody chose in the evidence,
+  and the persisted verdict carried no record of which rules fired. The
+  triage prompt now names the rules that fired and the mutation they made;
+  the verdict may carry one optional `business_impact` sentence whose
+  citations must resolve to those rule ids (uncited or fabricated elements
+  are dropped and counted, never rendered — and the instruction is injected
+  only when context exists, so an uninformed model never sees the element's
+  name); both travel to the ledger event and surface in the Investigation
+  Rail's new **Business context** section, which renders nothing when no
+  rule fired. Rule ids join the injection-scanned prompt channels.
+
+- **Asset criticality orders the investigation queue.** The priority scorer
+  (severity as base, asset criticality / exploited-vulnerability / internet
+  exposure as bounded multipliers) existed with zero callers, so two alerts
+  of equal severity — one on a domain controller, one on a meeting-room
+  display — arrived in the order they were raised. `build_queue` now
+  resolves each page against the tenant's own `assets` inventory in two
+  batched queries (hostname/FQDN/IP-overlap match; `is_exploited AND NOT
+  remediated` as the KEV signal) and orders within (bucket, SLA) by the
+  score. Every row carries `priority_score` and a factor-by-factor
+  `priority_basis`; no inventory means severity alone, and the basis says
+  so. Proven on live Postgres with a negative control that removes the
+  resolver and watches the order collapse.
+- **An opt-in ack-clock escalation bridge** (`services/escalations`, compose
+  profile `escalations`; externally contributed). The native outbound-webhook
+  subsystem is complete but its `enqueue_event` has no production callers, so
+  a CRITICAL case nobody acknowledged produced no notification at all. The
+  bridge watches `aisoc_cases.acknowledged_at`: unacknowledged CRITICAL cases
+  get a Teams card after a grace period with capped re-nags, unacknowledged
+  HIGH cases arrive as one daily digest with a pipeline-health line, and
+  dedup/nag state survives restarts. Deployment-wide by design (one
+  operator-configured webhook; per-tenant routing stays the native
+  subsystem's job, into which this retires when the emitters are wired) and
+  the webhook must be https. The sweep's cross-tenant reads are recorded on
+  the tenant-predicate ratchet with that reasoning, the service is
+  SLO-exempt with its reason, and its status filter is pinned against the
+  case table's own CHECK constraint by test.
+
+### Changed
+
+- **A missing identifier narrows the correlation group instead of widening
+  it.** Neither detection engine has ever emitted `mitre_tactics` (the
+  ruleset carries technique ids only), so every detection alert's
+  correlation key fell back to the literal `unknown` tactic and all of an
+  entity's detection alerts collapsed into one incident per window;
+  entity-less alerts merged tenant-wide. The fallback now scopes to the
+  detection rule with an entity, never groups across rules without one,
+  and groups only exact fingerprint repeats with no identifiers at all.
+  Measured on a fixed detection-shaped cohort: 42.6 % reduction with 36
+  cross-rule incident groups before, 24.5 % with zero after — the honest
+  direction, because the difference was unrelated alerts counted as
+  grouped. The tactic-carrying headline cohort is unchanged at 33.3 %. The
+  correlator's creation race is closed with `SET NX` (concurrent first
+  arrivals converge on one incident instead of orphaning an alert); the
+  narrower merge/merge window is documented, not closed.
+
+- **Verdict scorecards disclose the model-knowledge limit.** Evidence
+  cutoffs constrain supplied context only; each scorecard now records the
+  model's training cutoff when the operator states one and `unknown`
+  otherwise, with the disclosure that pretrained weights may postdate the
+  replayed events.
+
+### Fixed
+
+- **The rail's business-context leg reads the event the writer actually
+  writes.** Its query filtered `kind LIKE 'auto_triage:%'` while the ledger's
+  verdict INSERT hardcodes `kind = 'triage_verdict'` (the `auto_triage:{tier}`
+  string lives in the `agent` column) — so the section could never render on
+  a real deployment while every suite stayed green, because the live test had
+  seeded the assumed shape rather than the writer's. Found by the end-to-end
+  QA slice (console rule row -> real worker -> real ledger -> rail), fixed,
+  and the literal is now pinned on both sides: the writer's recording-pool
+  test asserts the executed INSERT carries `'triage_verdict'` and the
+  business keys land in the payload, and the reader's live test seeds that
+  same literal.
+
+- **The context graph's business dimension authenticates.** The bundle's
+  incident-context fetch sent `X-Tenant-ID` (a header the API's auth never
+  reads) with an optional `AISOC_AGENTS_API_KEY` bearer that no compose
+  file, `.env.example` or Helm value delivers — so the graph's
+  identity/asset/cloud/business/threat dimensions answered 401 on every
+  default deployment and the prompt said "unavailable" forever. It now
+  presents `AISOC_AGENTS_SERVICE_TOKEN` (or `AISOC_SERVICE_TOKEN`) with
+  `X-AiSOC-Tenant-ID`, and an unconfigured token refuses without dialing so
+  the dimension reads *unavailable*, never *empty*. A vestigial copy of the
+  dead credential block was removed from the investigation tool client.
+- **The rule builder could only author rules that never match.** Every
+  field it suggested was prefixed `alert.` against engines that resolve
+  plain dotted paths (`hostname`, `severity`, `raw_event.*`), its starter
+  rule used an invented `target`/`time` structure, it offered a `neq`
+  operator neither engine implements (the term is `ne`) — and the preview
+  endpoint *manufactured* a nested `alert.{target,time}` shape so the
+  broken paths previewed as working and then never fired in production.
+  The suggestion list is now the fused alert's real vocabulary, pinned on
+  both sides (a web test and an api test naming the same literals), and
+  the preview sample is shaped exactly like the alert the worker evaluates
+  (`raw_event` under its real key, not `metadata`).
+### Security
+
+- **Dependencies:** the Oct-31 `minimatch` / `glob` advisory wave worked
+  across all three npm lockfiles (root pnpm, `apps/mobile` pnpm,
+  `services/realtime` npm). Both overrides are **range-scoped to `>=9.0.0`**,
+  which is the crux of the fix rather than a detail: `minimatch` floors at
+  **11.0.1** (resolves 11.0.3) for
+  [GHSA-g3hv-75wg-m249](https://github.com/advisories/GHSA-g3hv-75wg-m249)
+  (CVE-2026-118764, medium — globparts-amplification ReDoS) and `glob` at
+  **14.0.2** (resolves 14.0.3) for
+  [GHSA-3g3m-2fjr-6pw4](https://github.com/advisories/GHSA-3g3m-2fjr-6pw4)
+  (medium) — but the legacy `glob@7.2.3` (not vulnerable; <9) and its
+  `minimatch@3.1.5` are left in place, because `glob@7 + minimatch@11` is
+  broken (a blanket minimatch floor forced that pairing and broke
+  react-native 0.81's iOS codegen with a `charAt` TypeError). The
+  still-`<11` `minimatch` copies that remain (3.1.5, 5.1.9) are all
+  **lint/build tooling** — eslint 9 and its plugins, `@redocly/openapi-core`,
+  `glob@7` via react-native/expo codegen, `test-exclude`, `serve-handler` —
+  none shipped in a runtime bundle, none fed attacker-controlled patterns,
+  and none upgradable without breaking the toolchain that pins them;
+  tracked for a tolerable-risk dismissal pending upstream support. Verified:
+  all three frozen installs pass and `services/realtime` (the one runtime
+  service touched) builds clean on `minimatch@11`.
 
 - **Dependencies:** the Oct-30 npm advisory wave cleared across both
   lockfiles. Root: `follow-redirects` floored at **1.16.2**
