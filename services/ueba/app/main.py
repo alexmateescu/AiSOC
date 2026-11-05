@@ -119,7 +119,7 @@ async def _start_kafka() -> None:
     from app.services.kafka_consumer import UEBAKafkaConsumer
 
     _consumer = UEBAKafkaConsumer()
-    _consumer_task = asyncio.create_task(_consumer.run(), name="ueba-kafka-consumer")
+    _consumer_task = asyncio.create_task(_consumer.run_forever(), name="ueba-kafka-consumer")
     _consumer_task.add_done_callback(_log_consumer_exit)
 
     # Readiness depends on the consumer still being attached, not on this

@@ -63,8 +63,11 @@ container.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import os
+import time
 import uuid
 from typing import Any
 
@@ -78,6 +81,21 @@ from app.services.peer_group import PeerGroupService
 from app.services.scoring import ScoringService
 
 LOG = logging.getLogger(__name__)
+
+
+#: Failures no retry can fix, mapped to the operator action that says so.
+#: Everything absent from this table is transient and retried — a wrong
+#: "permanent" verdict keeps a recoverable service down.
+_PERMANENT_FAILURE_ACTIONS = {
+    "TopicAuthorizationError": "grant the service principal access to aisoc.raw_events / ueba.anomalies",
+    "GroupAuthorizationError": "grant the service principal Read on the UEBA consumer group",
+    "SaslAuthenticationFailed": "fix the SASL credentials in .env and restart",
+}
+
+
+def _permanent_failure_action(exc: BaseException) -> str | None:
+    return _PERMANENT_FAILURE_ACTIONS.get(type(exc).__name__)
+
 
 
 class UEBAKafkaConsumer:
@@ -269,6 +287,74 @@ class UEBAKafkaConsumer:
         )
         if recorded:
             self._stats["dead_lettered"] += 1
+
+    async def run_forever(
+        self,
+        initial_backoff_seconds: float = 1.0,
+        max_backoff_seconds: float = 60.0,
+        stuck_after_seconds: float | None = None,
+    ) -> None:
+        """Supervise :meth:`run`: retry transient Kafka failures, stop on permanent ones.
+
+        Parity with the fusion worker (PR #1725). The Oct-31 outage was this
+        exact gap: a broker blip raised out of the ``async for``, ``run``
+        returned, and the service served /readyz 200 for days with nothing
+        scored. Transient faults retry with capped backoff; an unrecoverable
+        fault says so once with the operator action and lets readiness go 503;
+        a failure that outlives any transient explanation escalates to error
+        while still retrying.
+        """
+        stuck_after = stuck_after_seconds or float(os.getenv("AISOC_UEA_SUPERVISOR_STUCK_AFTER_SECONDS", "600"))
+        backoff = max(0.1, initial_backoff_seconds)
+        failing_since: float | None = None
+        # Not `while self._running`: stop() clears _running and then run()
+        # returns cleanly, so a running-guard here would exit before the first
+        # attempt ever started. The loop exits on run()'s clean return, on
+        # cancellation, and on a permanent classification.
+        while True:
+            attached_before = self._attached
+            try:
+                await self.run()
+                return  # clean stop — stop() cleared _running
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — classified below, not swallowed
+                if not self._running and not attached_before:
+                    return
+                action = _permanent_failure_action(exc)
+                if action is not None:
+                    LOG.error(
+                        "UEBA consumer failed permanently; supervision stopped. error=%s: %s operator_action=%s",
+                        type(exc).__name__, exc, action,
+                        exc_info=True,
+                    )
+                    return
+
+                now = time.monotonic()
+                if self._attached or attached_before:
+                    failing_since = None
+                if failing_since is None:
+                    failing_since = now
+                failing_for = now - failing_since
+
+                if failing_for >= stuck_after:
+                    LOG.error(
+                        "UEBA consumer not resolving; still retrying but this has outlived any transient "
+                        "explanation. error=%s: %s failing_for_seconds=%.0f backoff_seconds=%.1f "
+                        "operator_action=check AISOC_KAFKA_BOOTSTRAP_SERVERS names a reachable broker",
+                        type(exc).__name__, exc, failing_for, backoff,
+                        exc_info=True,
+                    )
+                else:
+                    LOG.warning(
+                        "UEBA consumer crashed; retrying in %.1fs. error=%s: %s",
+                        backoff, type(exc).__name__, exc,
+                        exc_info=True,
+                    )
+
+                self._attached = False
+                await asyncio.sleep(backoff)
+                backoff = min(max_backoff_seconds, backoff * 2)
 
     def stop(self) -> None:
         self._running = False
