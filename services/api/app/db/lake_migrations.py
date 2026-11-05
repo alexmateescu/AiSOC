@@ -30,6 +30,7 @@ migration that would need it rather than assumed.
 """
 
 from __future__ import annotations
+import inspect
 
 import logging
 from collections.abc import Awaitable, Callable
@@ -254,9 +255,19 @@ async def _execute(client: Any, sql: str, params: dict[str, Any] | None = None) 
     does not run in half the deployments.
     """
     if hasattr(client, "execute"):
-        return await client.execute(sql, params or {})
+        result = client.execute(sql, params or {})
+        # clickhouse-connect's Client.execute is synchronous; aiohttp-based
+        # wrappers return coroutines. Await only when the driver is actually
+        # async, otherwise `await list` raises TypeError and the whole lake
+        # migration pass aborts at startup (live-caught 2026-11-05).
+        if inspect.isawaitable(result):
+            result = await result
+        return result
     if hasattr(client, "command"):
-        return await client.command(sql)
+        result = client.command(sql)
+        if inspect.isawaitable(result):
+            result = await result
+        return result
     raise TypeError(f"{type(client).__name__} exposes neither execute() nor command(); the lake migration runner cannot drive it")
 
 
