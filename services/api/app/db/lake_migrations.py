@@ -300,15 +300,23 @@ async def applied_ids(client: Any) -> set[str]:
 
 
 async def _record(client: Any, migration: LakeMigration, statements: int) -> None:
+    # clickhouse-driver's native-protocol INSERT takes `data` as a list of
+    # rows/tuples; a dict is interpreted as column-STREAMing and the driver
+    # then waits forever for the rest of the stream (server sits in
+    # ClientWriteUntilFlush, code 394 — live-caught 2026-11-05 on
+    # fra-hq-soc-01: every lake migration applied its DDL but aborted at
+    # the ledger write, so pending_ids stayed non-empty forever).
     await _execute(
         client,
         f"INSERT INTO {MIGRATION_TABLE} (migration_id, description, applied_at, statements) VALUES",
-        {
-            "migration_id": migration.id,
-            "description": migration.description,
-            "applied_at": datetime.now(UTC),
-            "statements": statements,
-        },
+        [
+            (
+                migration.id,
+                migration.description,
+                datetime.now(UTC),
+                statements,
+            ),
+        ],
     )
 
 
