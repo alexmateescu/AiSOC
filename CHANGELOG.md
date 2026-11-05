@@ -7,6 +7,296 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A connector must now read its poll window to the end, and CI enforces it.**
+  ([#1714](https://github.com/beenuar/AiSOC/pull/1714))
+  `scripts/check_connector_paging.py` requires every connector whose
+  `fetch_alerts` issues an HTTP request to either follow a continuation — the
+  shared `app/connectors/_paging.py` helpers, its own paging loop, or a boto3
+  paginator that is not cut short by `MaxItems` — or carry a written reason in
+  `_REVIEWED` recording what the vendor's own documentation says it returns.
+  Six connectors shipped the same defect inside two days, so this stopped
+  being a review question.
+
+  The gate has no silent third state, which was the design problem worth
+  solving. "I could not find a page cap" and "this vendor returns the whole
+  window" are different statements and only the second is a reason, so a
+  connector that neither pages nor carries a reason is **named in the output
+  on every run** and counted. `MAX_UNCLASSIFIED` is a debt balance rather than
+  a target: it may only be lowered, and lowering it means somebody read a
+  vendor's document and wrote down what they found. Twenty of the connectors
+  it names were identified by the audit as matching the data-loss shape but
+  could not be confirmed against a citable vendor document — `slack_audit`,
+  `carbon_black`, `cloudflare`, `cortex_xdr`, `cortex_xsiam`, `github`,
+  `gitlab`, `salesforce`, `servicenow`, `crowdstrike` and the two AWS
+  connectors whose paginators carry a silent `MaxItems` cap among them. A
+  change that cites the vendor contract for any one of them and then fixes or
+  clears it is exactly the contribution that is wanted.
+
+  The detector keys on loop *shape* rather than on a vocabulary of cursor
+  names. The first cut matched `nextLink`, `pageToken` and their siblings and
+  flagged every connector that pages by page number or offset — Auth0,
+  CrowdStrike and Cisco Umbrella among them, all correct — and a gate that
+  flags correct code is switched off within a week.
+
+### Fixed
+
+- **A fusion worker that lost its broker reported the loss and could never
+  undo it.** ([#1725](https://github.com/beenuar/AiSOC/pull/1725), closing
+  [#1724](https://github.com/beenuar/AiSOC/pull/1724) — thanks
+  [@alexmateescu](https://github.com/alexmateescu) for the analysis and the
+  original patch.) `FusionWorker.start()` ran one start/consume/stop cycle, so
+  any exception that escaped the consume loop — a broker not up yet at cold
+  boot, a connection lost mid-stream — ended the task, and nothing started it
+  again. Recovery meant a human noticing and restarting the container.
+
+  Reporting the death and healing from it are separate properties and only the
+  first was in place: `app/main.py` already registers `attached` as a
+  readiness subscription and `broker_reachable` as a bounded dependency
+  probe, so `/readyz` has answered 503 with `detached: ["alerts+raw_events"]`
+  since those landed. Verified rather than assumed, by driving the real worker
+  and the real route: healthy reads 200, dead reads 503, and the dead one
+  never came back. The missing half was the coming back, and no second probe
+  was added — `attached` is already false for the whole of a backoff window,
+  so one probe covers both directions and a second reading the same flag would
+  publish the same answer under a different name.
+
+  `start()` now supervises, retrying with capped exponential backoff, and
+  readiness returns to 200 on its own when consumption resumes. Three
+  properties a bare retry loop would have got wrong, each with a test that
+  fails when it is reverted:
+
+  - **A retry is attempted only where retrying can help.** The same three
+    classes `streamhealth` gives the Go consumer in `services/ingest`: a
+    transient fault backs off; a permanent one — a refused credential, a
+    missing ACL, an unsupported SASL mechanism — stops and names the operator
+    action, because a loop retrying a misconfiguration every 60 seconds turns
+    it into churn an operator reads as ordinary noise; a poison message is
+    still dead-lettered by the consume loop, which is the right place for it.
+    An unrecognised error is treated as transient and escalated to an error
+    naming where to look once it has outlived any transient explanation.
+  - **Teardown runs exactly once per attempt.** A bootstrap failure is the
+    commonest retry there is, and the next attempt reassigns the Kafka
+    handles, so an attempt that raised before reaching the consume loop left
+    both clients open and unreachable — measured at six leaked consumers and
+    six leaked producers over seven attempts. Teardown now covers the
+    bootstrap as well as the loop, and is idempotent so the two callers that
+    legitimately race on shutdown do not stop the alert sink twice.
+  - **A healthy worker is unaffected.** It attaches, builds exactly one
+    consumer and is never restarted — a supervisor stuck retrying reads as
+    working caution, which has shipped here before.
+
+- **The cancelled-run gate on `main` overstated the window it graded by about
+  100x, so it went green by forgetting.**
+  `scripts/check_main_run_cancellations.py` printed `graded window created at
+  or after 2026-09-29` — about five weeks — on a fetch of 300 push runs, which
+  at this push rate is **8.8 hours**. Roughly sixty workflows run on every
+  push, so the constant and the fetch were describing completely different
+  spans and only the constant was printed. The finding logic was never wrong;
+  the coverage it claimed was. The consequence is the one that matters: a
+  cancelled run ages out of reach within a day, so the gate reports clean
+  because the evidence scrolled past rather than because anyone fixed
+  anything — a passing condition that is not the property it claims, inside
+  the gate written to catch exactly that.
+
+  `SINCE` turned out to be **unreachable by construction**. The Actions
+  workflow-runs API refuses any result past offset 1,000 for this query —
+  `per_page=100` page 11 and `per_page=50` page 21 both answer empty, the
+  same boundary from two page sizes, so it is a result-offset cap and no
+  paging strategy gets past it — and 1,000 push runs reaches **20.6 hours**.
+  No value of `FETCH_LIMIT` could ever have made the printed claim true.
+
+  The window is now derived from the oldest run actually returned and printed
+  with both durations it has: the span those runs cover, which is the rate
+  that decides how fast a finding ages out, and how far back that reaches
+  from now. `SINCE` is kept as a declared floor and **reported as reached or
+  NOT REACHED** rather than printed as though it had been graded, because the
+  relationship is not permanent — if push volume fell, 1,000 runs would reach
+  past it again. The warning against moving the date to silence a finding is
+  unchanged and now sits beside a separate note on why the date is currently
+  out of reach. `FETCH_LIMIT` is raised 300 → 1,000, taken once the backlog in
+  reach was measured at zero: over the full depth there were 3 cancelled runs,
+  all `publish-images.yml`, already excepted with a written justification.
+
+  Two things the output now says that it could not before. The **horizon** is
+  printed every run — a cancellation has to be noticed and re-run inside about
+  a day or it is not findable here at all, which is an operational deadline
+  rather than a footnote — and a populated fetch whose runs carry no readable
+  `created_at` now **fails** instead of reporting clean. Those runs were
+  previously dropped inside `classify`, leaving a count of zero that was read
+  as a young window and exited 0: a window that cannot be established is an
+  unknown, and an unknown is never a pass.
+
+- **Google Workspace OAuth token grants and revocations had never once been
+  ingested, on any deployment.**
+  ([#1713](https://github.com/beenuar/AiSOC/pull/1713)) Google withholds a
+  Reports API log event until it has published it, and that delay is
+  documented per application across three orders of magnitude: Admin, Drive,
+  Devices and Login events are "near real time (couple of minutes)" while
+  **Token** log events are "a couple of hours". `fetch_alerts` sent only
+  `startTime`, and with `endTime` unset the report "returns all activities
+  from the startTime until the current time" — a window pinned to `now`. The
+  next poll began where that one ended, so the unpublished tail of every
+  window was read once while empty and never requeried. For Token, whose lag
+  exceeds the default 300-second interval by a factor of about twenty-four,
+  no poll ever overlapped the published part of the timeline at all: the loss
+  was not a fraction of that feed, it was the whole of it.
+
+  Each window now ends where Google has published rather than at `now`, per
+  application, and keeps its length so consecutive polls stay contiguous
+  across that boundary. Each figure sits above the documented one, because
+  the same page warns that some events are delayed beyond the stated times
+  and undershooting puts the window back inside the band Google has not
+  published. An application absent from the table takes a conservative
+  default rather than a window pinned to `now`, so adding one cannot silently
+  reintroduce the defect. The cost is latency; the alternative was silence.
+
+- **Microsoft Entra directory audits and risky sign-ins never followed
+  `@odata.nextLink`, and what truncation discarded was the *oldest* part of a
+  burst.** ([#1708](https://github.com/beenuar/AiSOC/pull/1708)) Graph returns
+  `$top` entries and an `@odata.nextLink` while more of a collection remains.
+  Both feeds read the first page at `$top=200` and stopped. `fetch_alerts`
+  derives its window from the clock with no checkpoint and the scheduler
+  passes the poll interval as `since_seconds`, so consecutive windows abut
+  exactly and nothing re-reads an earlier one — anything past the first page
+  fell below the next window's lower bound and was never requested again.
+  Both queries are ordered newest-first (`activityDateTime desc` for directory
+  audits, `createdDateTime desc` for risky sign-ins), so what went missing was
+  the *beginning* of whatever burst overflowed the window, which is the part
+  an investigation needs. Both feeds now follow the link as-is through a
+  shared `_read_pages()` helper, bounded and logged when the bound binds.
+
+  Independently diagnosed and fixed by
+  [@rudycelekli](https://github.com/rudycelekli).
+
+- **Microsoft Defender and Sentinel each read one page of every poll window.**
+  ([#1711](https://github.com/beenuar/AiSOC/pull/1711)) Graph answers
+  Defender's `$top=200` alerts request with a first page and an
+  `@odata.nextLink`; Azure Resource Manager answers Sentinel's `$top=100`
+  incidents request with a first page and a `nextLink` carrying a
+  `$skipToken`. Neither was followed, and the contiguous-window argument above
+  applies unchanged: the remainder of the window was never requested again.
+  Defender's query is ordered `createdDateTime desc`, so there too it was the
+  earliest alerts of a burst that went missing.
+
+  Both now use `read_linked_pages()` from the new
+  `services/connectors/app/connectors/_paging.py`, which holds three
+  properties, each of which is a defect somebody has shipped: a partial read
+  is kept rather than thrown away when a later page fails, the page cap is
+  announced when it binds rather than silently cutting the result, and the
+  link is requested verbatim — Graph states outright that the `$skiptoken`
+  must not be extracted and reused in a different request.
+
+- **Google Cloud Audit, Security Command Center and Workspace each read one
+  page per window, and Cloud Logging could return nothing at all from a window
+  that was full of events.**
+  ([#1712](https://github.com/beenuar/AiSOC/pull/1712)) All three page by
+  `nextPageToken` and none of them followed it. Cloud Audit read 200 entries
+  of a `timestamp desc` query; SCC read one `listFindings` page; Workspace's
+  loop walked a fixed set of applications issuing one request each, so a
+  single noisy application — `drive` on a busy tenant — displaced the rest of
+  the window behind it.
+
+  Cloud Logging's variant is worse than truncation, and it is why the loop
+  ends on the token rather than on an empty page. Its reference states that a
+  `nextPageToken` returned with an empty `entries` field means the search
+  "found no log entries so far but it did not have time to search all the
+  possible log entries", and that the method should be retried with that
+  token. A connector that stopped at the first empty response therefore
+  returned **zero** events from a full window, which reads downstream as a
+  quiet estate rather than as a read that did not finish.
+
+  All three now go through a shared `read_token_pages()` in the same
+  `_paging.py`. The Google Workspace half of this was independently diagnosed
+  and fixed by [@rudycelekli](https://github.com/rudycelekli) in
+  [#1715](https://github.com/beenuar/AiSOC/pull/1715); that fix was correct
+  and lost only to the shared-helper version landing first as `595ab1aa7`.
+
+- **Wiz issues past the first 100 of a poll window were never ingested.**
+  ([#1720](https://github.com/beenuar/AiSOC/pull/1720))
+  `WizConnector.fetch_alerts` sent `first: 100`, read `data.issues.nodes`
+  once and returned. There was no `pageInfo` in the query, no cursor and no
+  loop — while the same module already defined a correct `_paginate()` that
+  walks `pageInfo` to the end, and the three context reads added later all
+  used it. The alert path was the one read that did not. The window is clock
+  derived and contiguous like every other connector in this family, so a
+  tenant raising more than one page of issues in a poll interval lost the
+  remainder permanently; `apply_checkpoint()` cannot recover it, because it
+  de-duplicates rows the vendor already returned and never widens a later
+  request.
+
+  `fetch_alerts` now goes through that same `_paginate()`, so the alert path
+  inherits the cursor walk, the page cap and the behaviour of raising on a
+  GraphQL `errors` block rather than reading a missing scope as a clean cloud
+  estate. The issues query gains `$after` and a `pageInfo` selection, which
+  the request needs in order to mean anything: a GraphQL server coerces only
+  the variables an operation declares, so sending `after` to a query that did
+  not declare it would have been silently ignored. The test drives the real
+  `fetch_alerts` through a transport serving three pages and asserts both the
+  issues returned and the cursor the connector sent, because a canned page
+  sequence will answer any request and cannot by itself tell a correct
+  implementation from a wrong one. `MAX_UNCLASSIFIED` in the paging gate
+  falls from 59 to 58 with it.
+
+- **Entra directory-audit alerts named the Microsoft service that performed a
+  change, never the user, group or device that changed.**
+  ([#1722](https://github.com/beenuar/AiSOC/pull/1722), reported in
+  [#1718](https://github.com/beenuar/AiSOC/issues/1718) by
+  [@gdncomm-dika-wibowo](https://github.com/gdncomm-dika-wibowo))
+  Measured across ten alerts from one tenant: an "Add member to group" alert
+  read `affected_users: ["Microsoft Teams Services"]` and named neither the
+  member added nor the group, and a device update carried no host at all. Six
+  causes across four layers, and a fix in any one of them reaches nothing —
+  the fusion promoter builds an alert's `username` from OCSF
+  `actor.user.name` and its `hostname` from `device.name`, so a target
+  sitting anywhere else reached no column, no entity and no correlation key.
+
+  `azure_entra.normalize()` now prefers `initiatedBy.user.userPrincipalName`
+  for the actor: Graph puts a first-party client in `user.displayName` when a
+  person acts through one, so the display name named Teams, Intune or the
+  password-reset service as the actor on events a person performed. The
+  display name is carried as `actor_display_name` rather than dropped,
+  because nothing downstream can tell from the value alone whether that slot
+  held a person or a client. `_target_fields` keeps every target and every
+  modified property — `modifiedProperties[0]` on a device update is the empty
+  `Included Updated Properties` marker, so a device's id, OS and trust type
+  were lost on every device event. Its docstring had refused `target_user_2`
+  on the reasoning that a rule written against it would pass its fixture and
+  miss the real shape; that hazard is **position, not plurality**, so nothing
+  added is positional — `targets` and `modified_properties` are keyed by what
+  a thing is, and `target_group_name` / `target_hostname` are found by
+  searching for the group or the device wherever Graph put it. The original
+  flat fields still describe `targetResources[0]` byte for byte.
+
+  The ingest normalizer maps `target_user` onto OCSF `target_user.name` and
+  `target_hostname` onto `device.name` (not `target_name`, which is the
+  display name of whatever the target is and would put a person in the host
+  column), and the fusion sink lists the target beside the actor in both
+  `affected_users` and `entities` from one shared helper, so the two can
+  never name a different set of people. A device change now also correlates
+  per device instead of collapsing every device event in the tenant onto the
+  Intune client that performed them.
+
+  `det-identity-210` ("Entra User Password Reset By An Administrator", high)
+  required only `activity == "Reset user password"`, so every self-service
+  reset raised a high-severity administrator reset. It now also requires
+  `initiator_type == "user"`. One rule with a clause rather than a split: the
+  defect is that the condition did not match the rule's own name, and an SSPR
+  rule would be new coverage rather than a fix. The id is unchanged, no new
+  id was allocated, and the negative fixture is a real self-service reset
+  rather than a flipped literal. `method_execution_result` additionally
+  surfaces the directory's own result, so an "add member" that returned
+  `DirectoryValueExistsException` is distinguishable from a real add without
+  rewriting Graph's own `result: success`.
+
+  Not fixed, and recorded as such: the group is available to rules and on the
+  alert's raw event but is **not** an entity chip, because the Investigation
+  Rail's entity vocabulary has no group kind and adding one is an API change
+  the report did not ask for. Nothing here was exercised against a live Entra
+  tenant; the fixtures are the anonymised shapes from the report and Graph's
+  published schema.
+
 ## [22.1.0] - 2026-11-05
 
 ### Security
@@ -206,6 +496,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `fetch_alerts` through a transport that emulates Duo's availability cutoff
   and asserts that two back-to-back polls between them read every
   authentication — a path test rather than a source-inspection one.
+
+  Independently diagnosed and fixed by
+  [@rudycelekli](https://github.com/rudycelekli).
 
 - **`cloudflare_zt` WAF mode polled a route that does not exist, so it could
   never have returned an event on any deployment.**
