@@ -408,7 +408,7 @@ async def discover_chat_models(
         )
 
     try:
-        validate_outbound_url(url, allow_private=True)
+        safe_url = validate_outbound_url(url, allow_private=True)
     except SSRFError as exc:
         return Discovery(outcome="refused", detail=f"The base URL was refused: {exc}")
 
@@ -423,7 +423,7 @@ async def discover_chat_models(
                 follow_redirects=False,
                 transport=transport,
             ) as client:
-                raw = await _read_bounded(client, url, headers)
+                raw = await _read_bounded(client, safe_url, headers)
     except _DiscoveryError as exc:
         return Discovery(outcome=exc.outcome, detail=exc.detail)
     except (TimeoutError, httpx.TimeoutException):
