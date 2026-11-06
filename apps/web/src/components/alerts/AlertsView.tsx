@@ -172,7 +172,7 @@ function FiltersBar({
   total: number;
 }) {
   const severities = ['all', 'critical', 'high', 'medium', 'low', 'info'] as const;
-  const statuses = ['all', 'new', 'investigating', 'triaged', 'resolved', 'false_positive'] as const;
+  const statuses = ['all', 'pending_review', 'new', 'investigating', 'triaged', 'resolved', 'false_positive'] as const;
 
   return (
     <div className="flex items-center gap-3 flex-wrap py-3 px-4 bg-gray-900/40 border border-gray-800/60 rounded-xl">
@@ -205,7 +205,7 @@ function FiltersBar({
                 : 'text-gray-500 hover:text-gray-300 hover:bg-gray-800/60'
             )}
           >
-            {s === 'all' ? 'All statuses' : STATUS_CONFIG[s].label}
+            {s === 'all' ? 'All statuses' : s === 'pending_review' ? 'Needs Review' : STATUS_CONFIG[s].label}
           </button>
         ))}
       </div>
@@ -311,16 +311,19 @@ export function AlertsView() {
   // its SDK clients, and in a console that is the wrong default: a noisy
   // low-severity source emitting faster than an analyst pages pushes a
   // critical off page one and keeps it there.
+  // Standing console default (operator preference, never silently revert):
+  // the operator queue opens on `pending_review` — alerts the agent has
+  // already triaged but nobody has closed yet (`status=triaged`, incl.
+  // escalated needs_review rows). `new` items are agent-pending, not
+  // operator-pending, so they are deliberately NOT in the default view.
+  // Re-apply after upstream rebase — an upstream merge reverted the
+  // default once already.
   const [filters, setFilters] = useState<AlertFilters>({
     page: 1,
     pageSize: 25,
     sort: 'priority',
-    status: 'new',
+    status: 'triaged',
   });
-  // Standing console default (operator preference, never silently revert):
-  // triage starts from the raw alerts grid with `new` pre-filtered; the
-  // entity-centric RBA queue stays one click away. Re-apply after upstream
-  // rebase — an upstream merge reverted this to 'entities' once already.
   const [viewMode, setViewMode] = useState<ViewMode>('alerts');
 
   const { data, error, isLoading } = useSWR(
