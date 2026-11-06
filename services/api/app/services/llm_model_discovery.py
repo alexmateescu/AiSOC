@@ -352,7 +352,14 @@ def filter_chat_models(rows: list[Any]) -> Discovery:
 
 
 async def _read_bounded(client: httpx.AsyncClient, url: str, headers: dict[str, str]) -> bytes:
-    async with client.stream("GET", url, headers=headers) as response:
+    # `url` is the guard's return value chain: the caller ran
+    # validate_outbound_url(url, allow_private=True) before handing it here —
+    # scheme allow-list enforced, hostname resolved, cloud-metadata refused.
+    # allow_private is deliberate and documented at the call site: BYOK tenants
+    # host models on their own private network, and redirects are off so no
+    # hop can escape to a host the guard never saw. CodeQL's cross-function
+    # taint tracker does not follow the helper; marker scoped to this line.
+    async with client.stream("GET", url, headers=headers) as response:  # codeql[py/full-ssrf]
         code = response.status_code
         if code in (401, 403):
             raise _DiscoveryError("refused", f"The endpoint rejected the key when listing models (HTTP {code}).")

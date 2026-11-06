@@ -517,6 +517,8 @@ class CostTracker:
                 try:
                     _current_tracker.reset(self._token)
                 except (LookupError, ValueError):
+                    # Token already reset by a nested scope or different context;
+                    # the tracker is per-call anyway, so nothing leaks.
                     pass
                 self._token = None
 

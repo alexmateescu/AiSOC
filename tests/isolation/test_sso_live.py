@@ -340,7 +340,7 @@ class _OidcProvider:
                     # gate. The fixture is a loopback provider that answers
                     # only the test which starts it.
                     location = f"{registered}?code={code}&state={raw_state}"
-                    self.send_header("Location", location)  # codeql[py/http-response-splitting]
+                    self.send_header("Location", location.replace("\r", "").replace("\n", ""))  # codeql[py/http-response-splitting]
                     self.send_header("Content-Length", "0")
                     self.end_headers()
                 elif path == "/userinfo":

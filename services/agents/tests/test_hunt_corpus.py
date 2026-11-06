@@ -40,8 +40,8 @@ _HUNT_TELEMETRY_PATH = _TESTS_DIR / "eval_data" / "synthetic_hunt_telemetry.json
 # in scripts/run_evals.py). The hunt corpus is small and hand-authored, so we
 # require perfect coverage on declared positives and zero false positives on
 # declared negatives. Tighten these only with a corresponding corpus expansion.
-_POSITIVE_FLOOR = 1.0
-_NEGATIVE_CEILING = 0.0
+_POSITIVE_FLOOR = 1.0  # codeql[py/unused-global-variable] — read by scripts/run_evals.py
+_NEGATIVE_CEILING = 0.0  # codeql[py/unused-global-variable] — read by scripts/run_evals.py
 
 
 def _load_hunt_corpus() -> list[HuntDefinition]:

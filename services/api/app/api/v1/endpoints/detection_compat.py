@@ -217,6 +217,7 @@ def _parse_sample_events(sample: str | None) -> list[dict[str, Any]]:
             if isinstance(data, list):
                 return [d if isinstance(d, dict) else {"_raw": d} for d in data]
         except Exception:
+            # Not a valid JSON array — fall through to the NDJSON parser below.
             pass
 
     # Try NDJSON (one JSON object per line).

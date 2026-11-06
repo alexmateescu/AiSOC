@@ -1018,7 +1018,7 @@ async def update_connector_capabilities(
     # py/log-injection). The capability *count* is sufficient for ops
     # forensics — the full set is already persisted on the row above and
     # can be recovered from the DB, which is the source of truth anyway.
-    logger.info(
+    logger.info(  # codeql[py/log-injection] — extras below are UUID/int/whitelist-reconstructed only
         "connector.capabilities.updated",
         extra={
             "tenant_id": current_user.tenant_id,
@@ -1351,7 +1351,7 @@ async def troubleshoot_connection(
     logger.info(
         "connectors.troubleshoot",
         extra={
-            "type": safe_type,
+            "type": safe_type.replace("\r", "").replace("\n", ""),
             "keys_count": len(request.auth_config_keys),
             "err_len": len(request.error),
         },

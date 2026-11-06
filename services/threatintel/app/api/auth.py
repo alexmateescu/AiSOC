@@ -60,7 +60,7 @@ async def require_actor_auth(authorization: str | None = Header(default=None)) -
                     "beyond the private network."
                 ),
             )
-            _warned_unconfigured = True
+            _warned_unconfigured = True  # codeql[py/unused-global-variable] — read via `global` guard at line 53
         return
 
     presented = ""

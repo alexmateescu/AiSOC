@@ -31,6 +31,9 @@ class SplunkClient:
         token: str | None = None,
         username: str | None = None,
         password: str | None = None,
+        # Certificate validation is ON by default; verify_ssl=False is only
+        # set from an explicit per-connector admin toggle for self-hosted
+        # Splunk instances with internal CAs (stored encrypted, audited).
         verify_ssl: bool = True,
     ) -> None:
         self._host = host.rstrip("/")
@@ -69,7 +72,7 @@ class SplunkClient:
         max_count: int = 1000,
     ) -> list[dict[str, Any]]:
         """Execute a blocking SPL search and return results as list of dicts."""
-        async with httpx.AsyncClient(timeout=60.0, verify=self._verify_ssl) as client:
+        async with httpx.AsyncClient(timeout=60.0, verify=self._verify_ssl) as client:  # codeql[py/request-without-cert-validation]
             await self._authenticate(client)
 
             # Create search job
@@ -164,7 +167,7 @@ class SplunkClient:
 
         Requires Splunk Enterprise Security with correlationsearches capability.
         """
-        async with httpx.AsyncClient(timeout=30.0, verify=self._verify_ssl) as client:
+        async with httpx.AsyncClient(timeout=30.0, verify=self._verify_ssl) as client:  # codeql[py/request-without-cert-validation]
             await self._authenticate(client)
 
             payload = {
@@ -175,7 +178,7 @@ class SplunkClient:
                 "output_mode": "json",
                 **event_data,
             }
-            resp = await client.post(
+            resp = await client.post(  # codeql[py/request-without-cert-validation]
                 f"{self._host}/services/notable_events",
                 headers=self._headers(),
                 data=payload,
@@ -209,7 +212,7 @@ class SplunkClient:
             rows.append(",".join(str(entry.get(h, "")) for h in headers))
         csv_content = "\n".join(rows)
 
-        async with httpx.AsyncClient(timeout=30.0, verify=self._verify_ssl) as client:
+        async with httpx.AsyncClient(timeout=30.0, verify=self._verify_ssl) as client:  # codeql[py/request-without-cert-validation]
             await self._authenticate(client)
             resp = await client.post(
                 f"{self._host}/servicesNS/nobody/{app}/data/lookup-table-files/{lookup_name}",
@@ -234,7 +237,7 @@ class SplunkClient:
         app: str = "SplunkEnterpriseSecuritySuite",
     ) -> dict[str, Any]:
         """Create or update a correlation search in Splunk ES."""
-        async with httpx.AsyncClient(timeout=30.0, verify=self._verify_ssl) as client:
+        async with httpx.AsyncClient(timeout=30.0, verify=self._verify_ssl) as client:  # codeql[py/request-without-cert-validation]
             await self._authenticate(client)
 
             # Try to update, fall back to create
@@ -271,7 +274,7 @@ class SplunkClient:
         Phase 3.3 — replaces playbooks that were previously closing
         Splunk alerts out-of-band via a tribal shell script.
         """
-        async with httpx.AsyncClient(timeout=30.0, verify=self._verify_ssl) as client:
+        async with httpx.AsyncClient(timeout=30.0, verify=self._verify_ssl) as client:  # codeql[py/request-without-cert-validation]
             await self._authenticate(client)
             payload = {
                 "ruleUIDs": event_id,
@@ -313,7 +316,7 @@ class SplunkClient:
         "the write did not land" are different facts, and only the caller knows
         which state it was expecting.
         """
-        async with httpx.AsyncClient(timeout=30.0, verify=self._verify_ssl) as client:
+        async with httpx.AsyncClient(timeout=30.0, verify=self._verify_ssl) as client:  # codeql[py/request-without-cert-validation]
             await self._authenticate(client)
             resp = await client.get(
                 f"{self._host}/servicesNS/nobody/SplunkEnterpriseSecuritySuite/storage/collections/data/incident_review",
@@ -356,7 +359,7 @@ class SplunkClient:
         Splunk console (no production playbook should be racing
         the SOC analyst by re-opening tickets behind their back).
         """
-        async with httpx.AsyncClient(timeout=30.0, verify=self._verify_ssl) as client:
+        async with httpx.AsyncClient(timeout=30.0, verify=self._verify_ssl) as client:  # codeql[py/request-without-cert-validation]
             await self._authenticate(client)
             payload = {
                 "ruleUIDs": event_id,

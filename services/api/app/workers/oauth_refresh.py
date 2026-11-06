@@ -500,7 +500,13 @@ async def run_forever(*, stop_event: asyncio.Event | None = None) -> None:
     deterministically without raising ``CancelledError``.
     """
     interval = max(5, settings.OAUTH_REFRESH_INTERVAL_SECONDS)
-    logger.info(
+    # CodeQL flags the two `settings.OAUTH_REFRESH_*` arguments below as
+    # "logs sensitive data (password)": the taint tracker associates any name
+    # containing a config-key-shaped suffix with credentials. They are plain
+    # integers (seconds, alarm count) read from Settings — no secret flows
+    # here. Marker sits on the call, not the file, so real clear-text logging
+    # elsewhere still fails the query.
+    logger.info(  # codeql[py/clear-text-logging-sensitive-data]
         "oauth_refresh.started interval=%ds lead=%ds threshold=%d",
         interval,
         settings.OAUTH_REFRESH_LEAD_TIME_SECONDS,

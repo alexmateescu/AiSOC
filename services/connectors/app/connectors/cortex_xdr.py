@@ -75,7 +75,12 @@ class CortexXDRConnector(BaseConnector):
         nonce = "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(64))
         timestamp = str(int(datetime.now(UTC).timestamp()) * 1000)
         auth_string = f"{self._api_key}{nonce}{timestamp}"
-        api_key_hash = hashlib.sha256(auth_string.encode()).hexdigest()
+        # Cortex XDR "Advanced" auth: the vendor protocol signs each request by
+        # SHA-256'ing (api_key + nonce + timestamp). This is a per-request
+        # signature over an ephemeral 64-char nonce — NOT password-at-rest
+        # hashing, so bcrypt/argon2 does not apply. SHA-256 is mandated by the
+        # Cortex XDR API; mirrors CortexXdrClient in services/actions.
+        api_key_hash = hashlib.sha256(auth_string.encode()).hexdigest()  # codeql[py/weak-sensitive-data-hashing]
 
         return {
             "x-xdr-auth-id": str(self._api_key_id),

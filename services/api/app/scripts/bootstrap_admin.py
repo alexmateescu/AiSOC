@@ -451,7 +451,12 @@ def _print_credentials(email: str, password: str, *, generated: bool) -> None:
     print(bar)
     print(f"  Email     {email}")
     if generated:
-        print(f"  Password  {password}")
+        # Intentional: this is the ONLY place the generated admin password
+        # exists — it is never stored, and this operator console output is the
+        # delivery mechanism (the panel below says so). stdout of a one-shot
+        # bootstrap CLI is not a log sink; removing this line strands the
+        # operator with no credential. Marker scopes to this print only.
+        print(f"  Password  {password}")  # codeql[py/clear-text-logging-sensitive-data]
         print(bar)
         print("  This password was generated now and is not stored anywhere.")
         print("  Copy it before closing this terminal. Lost it? Re-run with")
