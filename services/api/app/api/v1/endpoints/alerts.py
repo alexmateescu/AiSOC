@@ -801,6 +801,12 @@ async def list_alerts(
     ),
     severity: str | None = Query(default=None),
     status: str | None = Query(default=None),
+    disposition: str | None = Query(
+        default=None,
+        description="Exact-match on the triage disposition (e.g. 'needs_review'). "
+        "Composable with `status`; the operator queue uses status-less + "
+        "disposition=needs_review to span new+triaged escalated rows.",
+    ),
     category: str | None = Query(default=None),
     assigned_to_me: bool = Query(default=False),
     search: str | None = Query(default=None),
@@ -858,6 +864,8 @@ async def list_alerts(
         filters.append(Alert.severity == severity)
     if status:
         filters.append(Alert.status == status)
+    if disposition:
+        filters.append(Alert.disposition == disposition)
     if category:
         filters.append(Alert.category == category)
     if assigned_to_me:

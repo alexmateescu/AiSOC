@@ -1952,6 +1952,8 @@ function normalizeAlertFacets(raw: unknown): AlertFacets | undefined {
 export interface AlertFilters {
   severity?: string;
   status?: string;
+  /** Exact-match triage disposition (e.g. 'needs_review'); server-side. */
+  disposition?: string;
   source?: string;
   assignee?: string;
   startTime?: string;

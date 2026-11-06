@@ -1052,7 +1052,10 @@ class FusedAlertTriageWorker:
             verdict=verdict,
             confidence=float(confidence or 0.0),
             tier=tier,
-            auto_closed=state.status is AgentStatus.COMPLETED,
+            # Operator-review mode (Alexandru, 06-Nov): a completed triage
+            # records its verdict but does NOT close the alert. Everything
+            # stays open in the operator queue until a human dispositiones it.
+            auto_closed=False,
             escalated=escalated,
         )
         logger.info(
@@ -1747,7 +1750,9 @@ class FusedAlertTriageWorker:
             # pre-fetch is off, which writes no rows and restores the
             # previous shape exactly.
             vendor_reads=(state.vendor_evidence.as_state()["reads"] if getattr(state, "vendor_evidence", None) is not None else None),
-            auto_closed=state.status is AgentStatus.COMPLETED,
+            # Operator-review mode — see contract note above: verdict persists,
+            # alert stays open ('triaged') for the operator.
+            auto_closed=False,
             iterations=state.iteration_count,
             tokens=tokens,
             cost_usd=(cost or CostSummary()).measured_usd,

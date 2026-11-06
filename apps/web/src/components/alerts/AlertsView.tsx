@@ -166,12 +166,10 @@ function FiltersBar({
   filters,
   onChange,
   total,
-  needsReviewOnly,
 }: {
   filters: AlertFilters;
   onChange: (f: AlertFilters) => void;
   total: number;
-  needsReviewOnly: boolean;
 }) {
   const severities = ['all', 'critical', 'high', 'medium', 'low', 'info'] as const;
   const statuses = ['all', 'pending_review', 'new', 'investigating', 'triaged', 'resolved', 'false_positive'] as const;
@@ -199,19 +197,10 @@ function FiltersBar({
         {statuses.map((s) => (
           <button
             key={s}
-            onClick={() => {
-              if (s === 'pending_review') {
-                setNeedsReviewOnly(true);
-                onChange({ ...filters, status: undefined, page: 1 });
-              } else {
-                setNeedsReviewOnly(false);
-                onChange({ ...filters, status: s === 'all' ? undefined : s, page: 1 });
-              }
-            }}
+            onClick={() => onChange({ ...filters, status: s === 'all' ? undefined : s === 'pending_review' ? 'triaged' : s, page: 1 })}
             className={clsx(
               'text-xs px-2.5 py-1 rounded-lg transition-colors',
-              (s === 'pending_review' && needsReviewOnly) ||
-                (s !== 'pending_review' && !needsReviewOnly && ((s === 'all' && !filters.status) || filters.status === s))
+              (s === 'all' && !filters.status) || filters.status === s
                 ? 'bg-gray-700 text-gray-200'
                 : 'text-gray-500 hover:text-gray-300 hover:bg-gray-800/60'
             )}
@@ -333,6 +322,7 @@ export function AlertsView() {
     page: 1,
     pageSize: 25,
     sort: 'priority',
+    status: 'triaged',
   });
   // Operator queue default (Alexandru, standing preference — never silently
   // revert): the page opens on NEEDS REVIEW = alerts the agent triaged but
@@ -340,7 +330,6 @@ export function AlertsView() {
   // needs_review). Client-side view flag: the server has no disposition
   // query param, so the raw status filter is cleared while this chip is
   // active and rows are filtered here. 'New' stays one click away.
-  const [needsReviewOnly, setNeedsReviewOnly] = useState(true);
   const [viewMode, setViewMode] = useState<ViewMode>('alerts');
 
   const { data, error, isLoading } = useSWR(
@@ -366,10 +355,7 @@ export function AlertsView() {
     setFilters(newFilters);
   }, []);
 
-  const openRows = (data?.alerts || []).filter(
-    (a) => !['resolved', 'closed', 'false_positive', 'fp', 'dismissed'].includes(a.status),
-  );
-  const alerts = needsReviewOnly ? openRows.filter((a) => a.status === 'triaged') : openRows;
+  const alerts = data?.alerts || [];
   const total = data?.total || 0;
 
   // These used to be `alerts.filter(...)` over `data.alerts`, which is one
@@ -444,7 +430,6 @@ export function AlertsView() {
         <EntityRiskQueue />
       ) : (
         <AlertsTable
-          needsReviewOnly={needsReviewOnly}
           alerts={alerts}
           total={total}
           facets={facets}
@@ -468,7 +453,6 @@ function AlertsTable({
   isLoading,
   error,
   onFilterChange,
-  needsReviewOnly,
 }: {
   alerts: Alert[];
   total: number;
@@ -538,7 +522,7 @@ function AlertsTable({
         }
       />
 
-      <FiltersBar filters={filters} onChange={onFilterChange} total={total} needsReviewOnly={needsReviewOnly} />
+      <FiltersBar filters={filters} onChange={onFilterChange} total={total} />
 
       <BulkTriageBar
         selectedIds={[...checkedIds]}
