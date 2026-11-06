@@ -92,6 +92,20 @@ logger = structlog.get_logger()
 #: indefinitely is not.
 _COMMIT_WINDOW_SECONDS = 5.0
 
+#: Escalation dedupe window (seconds). An alert that escalates onto the full
+#: investigation graph and is not auto-closeable can be re-delivered by the
+#: producer within seconds; without a gate it re-runs the graph inline every
+#: time and monopolises its entity lane for seconds at a stretch, starving
+#: the cold backlog. First escalation runs normally; repeats inside this
+#: window keep the durable escalated verdict but skip the graph re-run.
+#: Override with AISOC_AGENT_ESCALATION_DEDUPE_SECONDS (0 disables the gate).
+def _escalation_dedupe_seconds() -> float:
+    raw = os.getenv("AISOC_AGENT_ESCALATION_DEDUPE_SECONDS", "3600").strip()
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 3600.0
+
 _NAMESPACE = uuid.uuid5(uuid.NAMESPACE_URL, "tryaisoc.com/agents/auto-triage")
 
 # Idempotency key component (issue #571): the deterministic run_id is derived
@@ -423,6 +437,8 @@ class FusedAlertTriageWorker:
         self._max_attempts = max(1, max_attempts)
         self._consumer: Any | None = None
         self._producer: Any | None = None  # lazily created for the DLQ
+        #: incident_id -> monotonic ts of last graph escalation (dedupe gate)
+        self._last_escalation_at: dict[uuid.UUID, float] = {}
         self._running = False
         self._attached = False
         # Phase B4 — environment-specific noise reduction applied post-fusion →
@@ -1558,6 +1574,25 @@ class FusedAlertTriageWorker:
         # graph node records itself to the ledger.
         if not _escalation_enabled() or not writer.escalation_allowed:
             return
+        # Dedupe gate: a hot alert that cannot auto-close is re-delivered by
+        # the producer every few seconds. Re-running the full graph on every
+        # delivery is pure lane starvation (measured: one alert escalated 190
+        # times in 30 minutes). The escalated verdict is already durable, so
+        # a skipped re-run loses nothing an analyst would not see anyway.
+        window = _escalation_dedupe_seconds()
+        now = time.monotonic()
+        last = self._last_escalation_at.get(state.incident_id)
+        if window > 0 and last is not None and (now - last) < window:
+            _METRICS["escalation_deduped"] = _METRICS.get("escalation_deduped", 0) + 1
+            logger.info(
+                "auto_triage_worker.escalation_deduped",
+                alert_id=str(state.incident_id),
+                run_id=str(state.run_id),
+                since_last_seconds=round(now - last, 1),
+                window_seconds=window,
+            )
+            return
+        self._last_escalation_at[state.incident_id] = now
         # Pre-fetch the same context an analyst-initiated investigation gets.
         # The manual orchestrator has built a ContextBundle since T2.1; the
         # escalation path never did, so the high-volume automatic route
