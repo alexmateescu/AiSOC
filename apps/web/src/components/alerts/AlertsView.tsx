@@ -200,7 +200,7 @@ function FiltersBar({
             onClick={() => onChange({ ...filters, status: s === 'all' ? undefined : s === 'pending_review' ? 'triaged' : s, page: 1 })}
             className={clsx(
               'text-xs px-2.5 py-1 rounded-lg transition-colors',
-              (s === 'all' && !filters.status) || filters.status === s
+              ((s === 'all' || s === 'pending_review') ? filters.status === (s === 'pending_review' ? 'triaged' : undefined) : filters.status === s)
                 ? 'bg-gray-700 text-gray-200'
                 : 'text-gray-500 hover:text-gray-300 hover:bg-gray-800/60'
             )}
