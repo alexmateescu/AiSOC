@@ -27,3 +27,12 @@ already in place). Fork history confirmed clean of .env* (scan all refs).
 Old secret dead once Auth0-side rotation completes on their dashboard.
 TODO owner: rotate OPENAI_API_KEY + AISOC_AGENTS_API_KEY from same blob;
 ask beenuar to filter-repo upstream + delete Prasanth595 fork.
+
+## Post-rotation verification (06-Nov ~14:20 UTC)
+SSO verified live end-to-end: OIDC token exchange succeeded with the rotated
+secret in container (hash match), 0 oidc errors, readyz ok. Leaked Auth0
+secret is dead. AISOC_AGENTS_API_KEY in the blob was a DEAD variable —
+compose never passed it, agents/tools use per-user API keys since b8c903089;
+nothing to rotate there. REMAINING: OPENAI_API_KEY in the leaked blob is
+still live (placeholder 'wadsadasfd' causes embedding 401s anyway) — needs
+new key from platform.openai.com -> .env -> recreate agents.
