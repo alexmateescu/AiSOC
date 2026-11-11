@@ -36,3 +36,12 @@ compose never passed it, agents/tools use per-user API keys since b8c903089;
 nothing to rotate there. REMAINING: OPENAI_API_KEY in the leaked blob is
 still live (placeholder 'wadsadasfd' causes embedding 401s anyway) — needs
 new key from platform.openai.com -> .env -> recreate agents.
+
+## Upstream sync plan (06-Nov, awaiting GO)
+Upstream 68 commits ahead of our base (v23.0.0+v23.1.0). 7 overlap files,
+dry-run merge: conflicts ONLY in AlertsView.tsx (i18n #1747 vs our operator
+queue) + alerts.py (copilot scoping #1828 vs our search/disposition).
+Workers untouched upstream. High-value pulls: connector cursor paging suite,
+METRICS_TOKEN fix (#1823 = our /metrics 401 noise), session renewal (#1818).
+Recipe ready: backup tag -> merge -> resolve 2 -> tests -> rebuild api/web/
+connectors -> verify queue/search/SSO.
