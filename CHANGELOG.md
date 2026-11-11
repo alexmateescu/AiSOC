@@ -7,6 +7,1447 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Sophos Central connector.** `sophos_central` reads Sophos Central alerts
+  — endpoint and server threats, exploit and ransomware protection, intrusion
+  prevention — through `GET /siem/v1/alerts`, the feed Sophos's own SIEM
+  integration reads (#356). There is no region to configure: the client
+  credential is exchanged at Sophos ID, `whoami` names the tenant and its data
+  region host, and a partner or organization credential reads the one tenant
+  its `tenant_id` names, found through the tenant lookup. A data region host
+  outside `sophos.com` is refused rather than sent the token, because it
+  comes from a response and the egress guard only vets configured values.
+  The window is read to the end through `read_token_pages`, which gains a
+  `more_field`: Sophos returns `next_cursor` on its last page too and says
+  whether more follow with `has_more`, so ending on the token alone would
+  re-request the last page up to the page cap. The SIEM API refuses a
+  `from_date` older than 24 hours, which the scheduler's outage backfill asks
+  for, so a longer window is shortened to fit and logged as
+  `sophos_central.window_shortened`. Severity keeps the vendor's LOW, MEDIUM
+  and HIGH and never emits `critical`; events are filed as OCSF 2001 Security
+  Findings, so the generic-mapping count stays at 42. Setup, partner tenants
+  and troubleshooting are on the new
+  [Sophos Central](apps/docs/docs/connectors/sophos-central.md) page.
+
+- **A released CHANGELOG section is now frozen to its tag.**
+  `scripts/check_changelog_frozen.py` compares the newest five released
+  sections byte-for-byte against the `CHANGELOG.md` committed at each
+  section's own tag, with a unified diff on mismatch, an explicit refusal
+  when a tag cannot be resolved, and a vacuous-pass refusal when nothing
+  could be compared. It exists because the same drift shipped three times in
+  two days: a fix PR writes its entry under an empty `[Unreleased]`, the
+  release promotes that section, and when the PR merges after the tag the
+  three-way merge anchors the entry by context — inside the released
+  section, claiming a fix the tagged artifact does not contain (Datadog into
+  `[23.0.0]`, then Cortex and Trend into `[23.1.0]`). Run against the
+  pre-fix tree the gate exits 1 naming `[23.1.0]` and showing both drifted
+  entries; this change also moves those entries back where they belong,
+  below. Writing the gate found a fourth, older instance: a post-tag credit
+  line appended to the released `[22.1.0]` section. That section is restored
+  to its tag's bytes and the credit lives in `.github/CREDITS.md`, the
+  surface built to stay current.
+
+### Fixed
+
+- **Cortex XDR and Cortex XSIAM read 100 incidents per poll and lost the
+  rest.** Both connectors asked `POST /public_api/v1/incidents/get_incidents`
+  for `search_from: 0, search_to: 100` and stopped there. The endpoint pages by
+  offset — a request returns the incidents from `search_from` up to
+  `search_to`, at most 100 of them, with no link or token to the next page —
+  and Palo Alto's own integration reads page *n* as `search_from = n * 100`.
+  A poll window opens where the last one closed, so a window holding more than
+  100 incidents lost the rest for good. Both now move the offsets on until a
+  page comes back short, through a new shared `read_offset_pages` in
+  `app/connectors/_paging.py`, which keeps what was read when a later page
+  fails and announces the 25-page bound when it binds, as the link and token
+  readers do. The read is now ordered oldest-first (`creation_time asc`): an
+  incident created during the read joins the end of the list instead of
+  shifting every offset beneath the pages still to be read. A refused opening
+  request behaves as before — Cortex XDR raises so the scheduler records a
+  failed poll, Cortex XSIAM logs `cortex_xsiam.fetch_failed` and returns
+  nothing. The paging gate recognises the new helper, and `MAX_UNCLASSIFIED`
+  falls from 52 to 50.
+
+- **Trend Vision One read one page of each feed per poll and lost the rest.**
+  `TrendVisionOneConnector.fetch_alerts` read the first response of
+  `GET /v3.0/workbench/alerts` and of `GET /v3.0/oat/detections` and ignored
+  `nextLink`, the complete URL of the next page that both feeds return. Trend's
+  own clients — `get_items` in its API cookbook and the `pytmv1` SDK — keep
+  requesting that URL until a response no longer carries one. A poll window
+  opens where the last one closed, so a window holding more workbench alerts or
+  OAT detections than one page lost the rest for good. Both feeds now read
+  through `read_linked_pages`, which requests the link verbatim with the same
+  token, keeps what was read when a later page fails and announces the 25-page
+  bound when it binds. A refused or failed opening request on either feed is
+  logged as `trend_vision_one.feed_failed` / `trend_vision_one.feed_exception`
+  with the feed named, and the other feed is still read; a refused OAT request
+  was previously dropped without a log line. `MAX_UNCLASSIFIED` falls from 50
+  to 49.
+
+- **Settings, Case and Responder deep links now survive navigation.**
+  `/settings?tab=deployment` opened Profile because the section was a
+  hardcoded `useState('profile')`; the case workspace read `?tab=` only as a
+  mount-time initializer, so tab clicks, query changes and browser history
+  drifted apart; and `/responder` redirected every installed-PWA shortcut to
+  Triage, eating the `?tab=queue|cases|oncall` the manifest publishes. A
+  shared `useUrlTab` hook validates tab values against each surface's
+  allowlist in both directions, dedups history entries, and preserves other
+  query parameters and the fragment. Contributed by @knowlet
+  ([#1817](https://github.com/beenuar/AiSOC/pull/1817)).
+
+- **The agents service never received `METRICS_TOKEN`, so `:15002/metrics`
+  answered 401 on every default deployment.** The endpoint gates on the
+  token exactly as the api service's does, but only the api block in
+  `docker-compose.yml` carried the passthrough — the Prometheus triage
+  counters were unreachable out of the box. Reported by @pitimon with the
+  confirming override ([#1822](https://github.com/beenuar/AiSOC/issues/1822),
+  fixed in [#1823](https://github.com/beenuar/AiSOC/pull/1823)).
+
+- **A connector's `error_count` now means "consecutive failed polls since
+  the last success".** `record_poll_failure` incremented it and
+  `record_poll_success` never reset it, so the fleet panel rendered a
+  lifetime total beside a fresh `last_sync` as if the connector were failing
+  right now — the reported case showed a static "19 errors" for days on a
+  connector that ingested 237k events during the observation window.
+  Success writes 0; failure still increments; both writers are pinned by
+  tests. Reported by @pitimon
+  ([#1821](https://github.com/beenuar/AiSOC/issues/1821), fixed in
+  [#1824](https://github.com/beenuar/AiSOC/pull/1824)).
+
+- **The Wazuh indexer reads follow `search_after` to the end of the
+  window.** Both fetch paths sent one `size: 1000` search and stopped,
+  under a docstring calling the bound deliberate — but the cut was silent,
+  and because the next poll's window opens where this one closed, the
+  overflow was never re-requested by anything. The shared `_search` now
+  follows OpenSearch's documented continuation with a `_doc` tiebreaker so
+  equal timestamps cannot skip or repeat rows, keeps partial reads when a
+  later page fails, stops rather than looping when a full page carries no
+  sort values, and announces the 25-page bound when it binds.
+  `MAX_UNCLASSIFIED` falls from 49 to 48. Reported by @pitimon from code
+  inspection, stated as such
+  ([#1820](https://github.com/beenuar/AiSOC/issues/1820), fixed in
+  [#1825](https://github.com/beenuar/AiSOC/pull/1825)).
+
+- **The console discarded usable refresh tokens when access expired.**
+  Protected JSON, streaming and download requests now renew the session through
+  the existing refresh endpoint, share concurrent renewal, and retry a rejected
+  access token once. Temporary refresh failures preserve the session; rejected
+  credentials still require sign-in. Late responses cannot restore a logged-out
+  session or replay an action under a different login. Desktop and responder
+  guards recognize recoverable sessions, and the responder no longer lets a
+  stale expiry cache overrule a renewed JWT. The Explain stream also receives
+  its missing proxy rule to the agents service. Token lifetimes and server-side
+  revocation checks are unchanged.
+
+## [23.1.0] - 2026-11-10
+
+### Added
+
+- **The first community detection rule: an AI agent's file tool reading a
+  credential-bearing file.**
+  `community-toufiqtoufiqbo-ai-agent-credential-file-read` (high,
+  `application`, T1552.001) matches the `ai_runtime` fields the
+  `aisoc-ai-sdk` actually emits (`tool_name`, `resource`), names the files
+  that hold long-lived credentials — `id_rsa`, `.aws/credentials`,
+  `/etc/shadow` and their kin — and excludes public-key reads (`*.pub`,
+  `authorized_keys`). Prompt-level secret scanning cannot see this path: the
+  prompt is clean, and the disclosure happens on the way out — into the
+  model context, a tool argument, or a second call. It ships
+  `enabled: false` with a `quarantine_reason`, which is what the truth-table
+  gate requires of a tier the engine does not load, with positive and
+  negative fixtures alongside. The published counts follow: 7408 rules on
+  disk, and the community tier moves 1 → 2. Contributed by @Toufiqtoufiqbo
+  (#1804).
+
+### Fixed
+
+- **The first `make up` on a fresh install built the schema and then refused
+  to start the stack it had just built.** The Postgres initdb hook
+  (`infra/postgres/initdb/10_apply_migrations.sh`) applied the whole migration
+  chain but recorded none of it, so to `scripts/pending_migrations.py` the
+  database it produced — every table present, no `aisoc_schema_migrations` —
+  read as *behind the entire chain*. `make up`'s schema guard then stopped the
+  very first run with "behind — 157 migration(s) pending" and sent the
+  operator to `make upgrade`, which re-applied all ~160 files under strict
+  mode. The hook now records each migration as it lands, in the same table the
+  runtime runner (`app.scripts.run_migrations`) uses, so a fresh install reads
+  as up to date, an interrupted chain leaves an accurate record of what did
+  apply, and the first in-place upgrade starts from the truth instead of from
+  zero. A live regression test boots a container with the repository's own
+  init hooks mounted and asserts the detector's verdict — and CI executes it
+  rather than skipping it: the docker guard is for machines without a
+  daemon, and the merge's `Python — Tests` job ran it to a pass. Reported by
+  @Dhanu188 on #353.
+
+- **Datadog Cloud SIEM read 100 signals per poll and lost the rest.**
+  `DatadogCloudSIEMConnector.fetch_alerts` sent `page[limit]=100` with
+  `sort=-timestamp` and ignored `meta.page.after`, which Datadog documents as
+  "the cursor used to get the next results" and its OpenAPI document declares as
+  the `x-pagination` cursor for `GET /api/v2/security_monitoring/signals`. A poll
+  window opens where the last one closed, so a window holding more than 100
+  signals lost its oldest ones for good, and those are the start of whatever
+  caused the burst. It now reads through `read_token_pages`, sending the cursor
+  back as `page[cursor]` with the window, order and page size unchanged.
+  `read_token_pages` gains `empty_page_ends`, off by default: Datadog's
+  generated Python, Go and TypeScript clients all end this read on an empty page
+  as well as on an absent cursor, so a cursor beside an empty page must not
+  spend the page cap on a quiet window. Every existing caller keeps the rule that
+  an empty page carrying a token is followed. `MAX_UNCLASSIFIED` falls from 54
+  to 53. Contributed by @officialasishkumar (#1801).
+
+- **`make demo` failed before seeding anything — the demo seeder wrote case
+  statuses the schema refuses.** The two random case makers in
+  `app.scripts.seed_demo` drew from the pre-consolidation `cases` vocabulary
+  ("open" / "in_progress" / "pending", 75% of the weighted draw), while
+  migration 083 repointed the ORM `Case` model at `aisoc_cases`, whose CHECK
+  constraint (migration 012) admits only the console's states. The first
+  invalid case aborted the whole seed transaction, so nothing landed — not the
+  catalogue, not the `INC-RT-001` LockBit showcase the contributor guide tells
+  newcomers to open. The makers now draw from `app.services.case_status`, and
+  `_alert_status_for_case` keys on the live vocabulary instead of answering
+  its default for every real status. New tests pin the seeder's vocabulary to
+  the constants, the constants to the CHECK constraint text in migration 012,
+  and the incident specs to both; verified live both ways against a
+  schema-complete Postgres (unfixed: `CheckViolationError` on the first batch;
+  fixed: 43 cases including `INC-RT-001`, only schema-valid statuses on disk).
+  Reported by @Dhanu188 on #353.
+
+- **Duo authentication logs read 100 entries per poll and lost the rest.**
+  `DuoSecurityConnector.fetch_alerts` read the first response of
+  `GET /admin/v2/logs/authentication` and ignored `metadata.next_offset`. Duo
+  documents that endpoint as a paged list, 100 entries by default, and says "to
+  fetch all results, call repeatedly with the next_offset paging parameter as
+  long as the result metadata has next_offset values". A poll window opens where
+  the last one closed, so a window holding more than 100 authentications lost
+  the rest for good. It now asks for Duo's documented maximum of 1,000 per page
+  and follows `next_offset`, sent back as the timestamp and txid "separated by a
+  comma" with the window unchanged and each page signed for its own parameters.
+  A failed later page keeps what was read, the 25-page bound is announced when
+  it binds, and a refused opening request still raises so the scheduler records
+  a failed poll. `MAX_UNCLASSIFIED` falls from 53 to 52. Contributed by
+  @officialasishkumar (#1802, carried as #1805).
+
+- **The marketplace builder asserted `enabled: false` about rule files it
+  never opened.** `build_marketplace.py`'s fallback `quarantine_reason` told
+  every non-quarantined, non-executable row it was "disabled in the rule
+  file (`enabled: false`)" — a claim reached precisely when the builder had
+  not looked. The reason now names the real cause per tier, a rule file's
+  own `quarantine_reason` still wins when it carries one, and a new test
+  walks every published entry whose reason quotes `enabled: false` (99
+  today), reads the rule file it cites, and fails if the flag disagrees — or
+  if it ever ends up checking nothing. (#1804)
+
+- **Five artefact generators' `--check` modes compared text that line-ending
+  translation had already corrected.** The marketplace, curation,
+  corpus-stats, truth-table and llms generators wrote the platform's line
+  endings and `str(Path)` separators, and their checks read in text mode —
+  so a CRLF artefact and an LF template agreed with each other and the drift
+  was invisible, while `pnpm marketplace:curate --check` could never pass on
+  Windows at all (601 backslashed paths, rewritten on every regenerate).
+  Every artefact write is now explicit `\n` with `.as_posix()` manifest
+  paths, and the checks compare bytes and reject `b"\r"`. (#1804)
+
+- **Every in-run IOC enrichment failed during a deep investigation.** The
+  investigator's `enrich_ioc` tool defaulted to `http://enrichment:8080` —
+  the host-published port, not the `8082` the enrichment service listens on
+  inside the compose network — and posted `type` where `POST /enrich`
+  requires `ioc_type`. The agents service sets no `ENRICHMENT_SERVICE_URL`
+  override in compose, so the broken default is what ran: every
+  investigation IOC enrichment raised "All connection attempts failed" and
+  the case recorded "IP enrichment failed", while fusion, which pins the
+  correct URL, enriched the same IP correctly. The tool now defaults to
+  `:8082` like the two other in-process consumers and sends `ioc_type`,
+  pinned by a respx test that drives the module's default URL against the
+  real `/enrich` contract and fails on either the old port or the old field
+  name. Contributed by @43n51c (#1806).
+
+- **A federated Splunk search against a self-hosted index returned nothing
+  useful.** `SplunkConnector.query` kept the configured `saved_search` whole
+  when it began with `index=`, so `index=main` — the common self-hosted case
+  — rendered as `search index=index=main …`, which Splunk parses as a
+  literal and answers with zero rows; a connector on the default `notable`
+  index was unaffected, which is why it slipped through. And the SPL
+  translator emitted no field projection, so even matching events came back
+  carrying only Splunk's default fields, missing the `signature` / `src_ip`
+  / `dest_ip`-class fields the pivot exists to show. The `index=` prefix is
+  now stripped before the name reaches `to_spl` (falling back to `notable`
+  only when none is configured), and the rendered SPL appends `| fields *`
+  before `| head N`. Both halves are pinned by tests that fail on the
+  pre-fix tree. Contributed by @43n51c (#1807).
+
+- **The Hello, hunt tutorial claimed community rules are replay-graded; they
+  are not.** `scripts/validate_detections.py` replays fixtures only for
+  native-tier rules (the ones with a compiled spec) — community-tier fixtures
+  ship alongside the rule and are first replayed at promotion. The tutorial's
+  `enabled` bullet now says exactly that instead of promising a grading that
+  never runs at that tier.
+
+### Security
+
+- **The Splunk connector validates the operator-supplied `index=` token
+  before splicing it into SPL.** Both ad-hoc search paths — `_dispatch()` on
+  the polling side and `query()` on the federated side — strip `index=` from
+  the configured `saved_search` and interpolated the remainder unquoted, so a
+  value like `main | collect index=other` dispatched a two-stage pipeline the
+  configuration never meant to write. Not exploitable across a trust boundary
+  (the operator holds the Splunk token already), but nothing downstream
+  re-validated, so the connector now holds the same line the AQL translator
+  holds: a token outside `[A-Za-z0-9_*:-]` falls back to the default
+  `notable` index with a warning naming the rejected value. Wildcards,
+  cluster prefixes, underscores and dashes pass through unchanged, pinned by
+  tests on both paths.
+
+### Documentation
+
+- **The Wazuh guide said the connection test needs no cluster permissions;
+  it calls `GET /_cluster/health`.** The connector page now documents the
+  minimal `cluster:monitor/health` permission and the Indexer role-mapping
+  steps that grant it, notes that the default `cluster_composite_ops_ro`
+  does not include health monitoring, explains the 401/403 error message the
+  two causes share, adds a CA-verified cURL probe, and says plainly that a
+  successful health probe does not prove alert-index search permission.
+  Contributed by @knowlet (#1800).
+
+- **The Hello, hunt tutorial told contributors to ship community rules
+  `enabled: true` — the one thing `detection_truth_table.py --check`
+  rejects.** Nothing loads a community rule into the compiled set, so the
+  tutorial's claim that community rules run in production by default was
+  false on both halves. The `enabled` bullet now says what the gate
+  enforces: `enabled: false` plus a `quarantine_reason` naming what
+  promotion would take. (#1804)
+
+## [23.0.0] - 2026-11-10
+
+### BREAKING
+
+- **`DeploymentConfig` and `DeploymentConfigUpdate` drop the self-update
+  fields, and `telemetry_enabled` becomes read-only.**
+  ([#1732](https://github.com/beenuar/AiSOC/pull/1732))
+  Removed from the published spec: `DeploymentConfig.update_channel`,
+  `DeploymentConfig.auto_update`, `DeploymentConfigUpdate.update_channel`,
+  `DeploymentConfigUpdate.auto_update`, `DeploymentConfigUpdate.telemetry_enabled`,
+  and the `UpdateChannel` schema.
+
+  They could not be preserved because each was a published promise that
+  something acts on them and nothing does. `update_channel` and `auto_update`
+  are deleted rather than wired: AiSOC does not update itself, so there is no
+  implementation to point them at and leaving them settable would keep
+  advertising one. `telemetry_enabled` was worse than unread — it was
+  published as `true`, so an API consumer reading `docs/openapi.yaml`
+  concluded this platform phones home by default, which
+  `docs/trust/data-flows.md` and three CI gates say it does not. It is kept on
+  the response, typed `Literal[False]`, so the question stays answerable and
+  the spec cannot drift back; it is gone from the update model because
+  accepting `true` would have the API assert something no code here can do.
+
+  Consumers were checked before removal: no reader anywhere in the tree
+  outside the module, and the console never calls `/api/v1/deployment/*`.
+  `DeploymentConfigUpdate` now rejects unknown keys, so a client still sending
+  `auto_update: true` gets a 422 rather than a 200 and a false belief that it
+  configured something.
+
+### Added
+
+- **One file now says what version a build is, and a gate holds every surface to it.** `scripts/check_single_version_source.py` reads a registry of the five surfaces that report the application's version and asserts two rules: *agreement* — a surface resolving to a concrete version must resolve to the tree's `VERSION`, with the failure naming the real number on both sides — and *single-origin* — a surface may not restate the version, however it chooses to deliver it. A `'0.0.0'` fallback counts as restating, because it renders as a plausible version and turns a failed read into a confident claim; `'unknown'` is accepted as the honest sentinel, which is the shape `runtime-config/route.ts` already used. Importing the number from `apps/web/package.json` is refused as a second origin rather than a second copy. Wired as `Version source` on every pull request and every push to `main`, with no `paths:` filter — deliberately, because the defect is a literal going stale while nothing edits it, so a filter would switch the gate off at exactly the moment it is needed.
+
+  **It is green on arrival, and that is the intended end state rather than a sign it measures nothing.** It was written against a live defect — `Settings.APP_VERSION` was the literal `"0.1.0"` on a tree several majors past it, and because that value is the `version=` handed to the FastAPI application it was also the version in the published OpenAPI document and on the root route, three surfaces carrying one wrong number in perfect agreement. That was fixed separately before this landed, so what ships here is prevention. Re-measured on the current tree: all five surfaces derive, none restates. The gate's `--self-test` runs ahead of the tree read, and reverting the one line it guards reproduces the original finding naming both numbers. The script's own docstring, which claimed the agreement arm was "red today", is corrected to read as history — a stale problem statement taken for a live finding is a mistake this repository has made before.
+
+- **A language switcher in Settings, and the parity gate now fails when the
+  catalogue has no reader
+  ([#1729](https://github.com/beenuar/AiSOC/issues/1729), reported by
+  NiuBlibing).** The console was English-only, and the reason was not that
+  i18n had never been built: `apps/web/src/lib/i18n/` shipped a working
+  `translate()`, a `direction()` returning `rtl`, locale-aware `Intl`
+  formatting, two catalogues and a CI gate — and **no component imported any
+  of it**. The gate stayed green throughout because it compared the locales
+  with each other and never asked whether anything rendered them, which is
+  this repository's most-repeated defect shape sitting inside the control
+  that exists to catch it.
+
+  `LocaleProvider` is the reader, mounted in the root layout and shaped like
+  `ThemeProvider` deliberately — same storage-then-profile reconciliation,
+  same pre-paint bootstrap script, same default in `useState` so the first
+  client render matches the server's markup. The switcher lives in Settings
+  beside Theme and Density. **Direction is applied to the document**, by the
+  bootstrap script before first paint and by the provider on every change:
+  `direction()` returning `rtl` while `<html dir>` stays `ltr` renders Arabic
+  glyphs in a left-to-right page, which is the one outcome that looks
+  translated and reads wrong, and it is invisible to any test that only
+  compares text. There is **no automatic negotiation** from
+  `navigator.languages`: coverage is partial, so resolving an Arabic browser
+  into a partly-Arabic console nobody asked for is a worse first impression
+  than English.
+
+  `scripts/check_i18n_keys.py` gained the arm it was missing, and the unit is
+  the **key**, not the module — a count of importers is the same proxy one
+  level up, satisfied by one import while forty-seven keys stay unrendered. A
+  key is read when a non-test file outside the catalogue's own directory
+  passes it to `translate()`, `t()` or `hasTranslation()` as a literal, or
+  names its surface in a template prefix. Three scopes are excluded and each
+  exclusion is the point: the module itself (a module calling itself is what
+  being unread looks like from the inside), tests (a key exercised only by a
+  test is the defect, not the evidence against it), and build output (the one
+  match outside the module on the pre-fix tree was a TypeScript artifact).
+  Unread is **fatal rather than ratcheted**, unlike untranslated: an
+  untranslated key waits on a native speaker who may never arrive, while an
+  unread one waits on nobody who is not already in the commit. Its exemption
+  is a named key with a reason rather than a number, checked in both
+  directions, and holds exactly one entry — `common.unknown`, which
+  `formatDate()` really does render for an unparseable timestamp, from inside
+  the module the scan excludes by design.
+
+  **Four keys were deleted rather than exempted**, and finding them was the
+  more interesting half of the work: `hunt.queryShown`, `hunt.noStore`,
+  `hunt.unsupportedFilters` and `cases.closedAt` named a query-provenance
+  label, a store-unreachable notice, an unsupported-filter disclosure and a
+  case close timestamp that **no component has ever shown**. The catalogue
+  had been written against the surfaces as imagined rather than as built, so
+  roughly a fifth of it could never render. An exemption is for a key that is
+  rendered and cannot be seen; a key that is not rendered at all is not
+  exempt, it is wrong. They return with the UI that needs them.
+
+  **Coverage is a pilot and the switcher says so.** Fifty-two keys is a
+  fraction of the console's text, so the panel states its scope by
+  *measuring* the catalogue rather than by a sentence that goes stale: each
+  navigation destination is listed as translated, falling back to English, or
+  not covered at all, derived per surface, with a note that the counts are
+  catalogue strings and not a share of the product. A surface the catalogue
+  has never heard of reads "not translated" and never 100%, because zero of
+  zero is not full coverage. The deliberate gap is deliberate still —
+  `settings.*` stays untranslated in Arabic so the fallback runs on a real
+  screen — and the switcher now explains that instead of leaving an operator
+  wondering why the page they are standing on stayed English. **The
+  untranslated ceiling did not move**: it is 6, it was 6, and the eight keys
+  added for the switcher's own copy were translated in the same commit so it
+  could not drift.
+
+- **An optional, off-by-default VAID badge plugin for agent identity
+  ([#1741](https://github.com/beenuar/AiSOC/pull/1741), closing
+  [#1739](https://github.com/beenuar/AiSOC/issues/1739)), contributed by
+  Allan Smeyatsky.** `services/agents/app/security/agent_identity.py` gives
+  each agent an identity, a role scope, a short expiry and monotonic
+  narrowing, and contains no cryptography at all — so the Investigation
+  Ledger records what an agent did, and an auditor reading it is trusting
+  AiSOC's account of itself. The plugin mints a signed badge *from* that
+  existing identity rather than introducing a second one, and verifies it at
+  the two boundaries where it would matter: `ToolRegistry.execute` in the
+  agents service, and `live_actions.dispatch()` in `services/actions`, which
+  is a different process and therefore sees only what travels with the
+  request.
+
+  This does not make VAID the project's agent identity format, and nothing
+  in the shipped product depends on it. `AISOC_VAID_PLUGIN_ENABLED` is unset
+  by default; `ToolRegistry.identity_verifier` defaults to `None`;
+  `vaid-mint` is an optional extra that `poetry export --only main` does not
+  install, so it is absent from both service images. With the flag unset,
+  `dispatch()` and `ToolRegistry.execute` were measured byte-identical to
+  the previous commit across a fixed input matrix — including a request
+  carrying a deliberately malformed badge, which is ignored rather than
+  refused — and both suites return the same pass counts with the package
+  absent as with it installed.
+
+  Enabled, it fails closed on every input that is not a currently-valid
+  badge for the calling identity: no badge, an unparseable one, a bad
+  signature, a tampered signed field, an expired badge, a revoked one, a
+  badge issued for a different agent, a badge issued under a different
+  tenant's authority, a delegated child badge this service cannot resolve
+  the ancestry of, and a revocation list that is absent, unreadable or
+  malformed. That last one is three-state rather than two: unavailable is
+  refused, never collapsed into "nothing is revoked" — the posture an
+  air-gapped deployment needs, where the list ships with the deployment and
+  the badge's own one-hour expiry is what bounds exposure between
+  deployments of a fresher one.
+
+  Known gap at the time, closed by the entry below: nothing minted a badge
+  on a real agent path, so `services/agents/app/security/vaid_plugin.py` was
+  allowlisted in `scripts/check_module_reachability.py` with that recorded
+  and with the change that removes the entry named. The actions-service half
+  was reachable from `dispatch()` and was not allowlisted.
+
+- **A VAID badge is minted on the real agent path, and a plugin that cannot
+  do its job now refuses at boot instead of at 3am
+  ([#1746](https://github.com/beenuar/AiSOC/pull/1746), follow-up to the
+  entry above), contributed by solara-associates.**
+  `run_deep_investigation` holds the one production call to
+  `issue_identity` in `services/agents`, and with the plugin enabled it now
+  mints a `VaidBackedIdentity` there. The MCP grant a few lines below
+  re-mints the badge for the widened scope with no branch of its own,
+  because `with_granted_tools` was already duck-typed across both identity
+  types; `IdentityLike`, a `Protocol` in `agent_identity.py`, is what lets
+  `ToolRegistry.execute` and `run_with_tools` accept either without that
+  module importing the optional plugin built on it. `vaid_plugin.py`'s
+  reachability allowlist entry is removed and the gate is green without it.
+
+  With the flag unset — the default — this is the `issue_identity(...)` call
+  it was before. Three fixed-input matrices were run against this tree and
+  against the previous commit under one interpreter and compared byte for
+  byte: `ToolRegistry.execute` (114 lines), `live_actions.dispatch()` (30
+  rows) and `run_deep_investigation` itself (6 rows), the last being where
+  the new branch lives and the one the original proof did not cover. That
+  harness replaces every plugin entry point with one that raises if reached,
+  so identical there also means untouched.
+
+  `vaid_plugin.preflight_or_raise()` and `vaid_verifier.preflight_or_raise()`
+  run unguarded from each service's startup hook and are no-ops when the
+  plugin is disabled. Enabled, the agents side builds the real issuer and
+  reads the revocation list; the actions side reads the kernel public key
+  and the revocation list. Every misconfiguration they catch was already
+  fail-closed at request time — an unreadable revocation list is refused,
+  never read as "nothing is revoked" — so what changes is when a deployment
+  finds out.
+
+  One failure mode had to be measured rather than reasoned about, because
+  it is the likeliest of all and the first draft of the check could not see
+  it: `vaid-mint` is an optional extra and `poetry export --only main` —
+  what both Dockerfiles install from — resolves 130 and 37 packages with
+  none of it, so the stock image carries the flag and not the library. The
+  agents-side preflight catches that because building the issuer reaches
+  the library. The actions-side one read an environment variable and a JSON
+  file, so a fully and correctly configured deployment booted clean and
+  answered the first badge-bearing dispatch with `VAID badge check failed
+  unexpectedly (ModuleNotFoundError); refusing fail-closed` — a refused
+  containment action, blamed on nothing an operator can act on, at exactly
+  the hour the check exists to avoid. It now imports what the verification
+  path imports, and a test reads the module and fails if that path grows a
+  `vaid_mint` import the preflight does not cover, so the two cannot drift.
+
+  Still deliberately unwired, and recorded in `install_into`'s own
+  docstring rather than left for a reader to discover: the module is
+  reachable, which is not the same claim as verified. Nothing in
+  `services/agents` calls `install_into`, so `ToolRegistry.identity_verifier`
+  is `None` on every production registry and a minted badge is carried but
+  not checked in-process; and `app/playbook/action_bridge.py` builds its
+  dispatch payload with no `vaid_badge` member, so `services/actions` is
+  presented no badge by any in-tree caller. Wiring either is a decision
+  about whether VAID is this project's agent identity format, which has not
+  been taken — so no claim-to-gate matrix row was added, because the
+  capability is not reachable end to end and a row would say it is.
+
+- **Upgrading is now a required check, and one leg crosses a major version.**
+  People upgrade, and until now a pull request could break the upgrade path
+  with both upgrade tests red or never run: neither `upgrade-test.yml` nor
+  `integration.yml`'s upgrade leg appeared in `.github/required-checks.json`.
+  `Previous minor to this tree, with data present` is now required.
+
+  Promoting it as it stood would have been worse than leaving it alone.
+  `upgrade-test.yml` was path-filtered on both triggers, and a workflow that
+  does not trigger creates no check run at all — so a required check that
+  never reports blocks the pull request forever, which is the quiet failure
+  rather than a red one. Measured over the 18 most recently merged pull
+  requests, reading every page of `commits/{sha}/check-runs` (113–143 checks
+  each, so the familiar one-page cap was not the cause): the context was
+  absent from **18 of 18**, and none of those 18 had touched a filtered path.
+
+  The filter is gone rather than moved into the jobs. `integration.yml` needs
+  the job-level form because a disaster-recovery rehearsal costs 15 minutes;
+  this workflow runs in 1–3 minutes, so it now carries no path filter and no
+  job-level or step-level `if:` anywhere — 14 unconditional steps, 0
+  change-gated, as `scripts/check_required_check_substance.py --static`
+  reports it. It cannot rehearse nothing the way `Backup → destroy → restore`
+  did on 74 of 100 runs, and that is now a property a reader can confirm by
+  looking rather than a behaviour someone has to go and measure.
+
+- **Two upgrade legs that cross a major version boundary, with real data.**
+  Nothing had ever crossed one. The previous-minor job resolves its starting
+  point with `--previous-minor`, which is same-major by construction, and
+  `integration.yml` pins `v7.3.1`/`v7.5.0` — also same-major, and seeding a
+  throwaway `upgrade_probe` table, so what it proves is that a migration did
+  not drop an unrelated table. Meanwhile `apps/docs/docs/operations/upgrades.md`
+  told operators that crossing more than one major "is supported but untested
+  as a single step", which was true.
+
+  `v21.0.0` is the most recent boundary and the one a supported operator
+  crosses today; it is also the only boundary a *new* migration can still
+  break, since everything below it is frozen history. `v17.0.0` is five majors
+  in one step — the case the documentation admits is untested — and is the
+  oldest release this fixture can seed unmodified, because migration `083`
+  (`cases` → `aisoc_cases`) landed in v16.0.0.
+
+  Both legs are better than either existing one in the two ways that matter.
+  They seed the **real tables** from `scripts/upgrade_fixture.sql` — a tenant,
+  a user, one alert at each of the five severities, a case — and they apply
+  this tree's chain with **this tree's runner**, where the previous-minor job
+  deliberately uses the released image's runner and therefore cannot see a
+  migration that needs a newer runner than the previous release shipped.
+  Both legs pass: row counts identical, the alert and the case readable by id,
+  all five severities intact, every migration recorded as applied, the DML-only
+  runtime role still able to read, and a re-run applying nothing.
+
+- **`GET /api/v1/system/version` — the route the upgrade runbook already told
+  operators to check.** ([#1732](https://github.com/beenuar/AiSOC/pull/1732))
+  `apps/docs/docs/operations/upgrades.md` has said "check
+  `/api/v1/system/version` and see the same number" since it was written, and
+  the route did not exist, so the documented way to confirm an upgrade landed
+  returned 404. It reports the running version, the stamped commit, the
+  applied-migration high-water mark and the schema-skew verdict below, behind
+  `settings:read`.
+
+- **Schema skew is detected and reported, in three states.**
+  ([#1732](https://github.com/beenuar/AiSOC/pull/1732))
+  Nothing compared `aisoc_schema_migrations` against the migrations on disk.
+  The table was read in exactly one place — `run_migrations.py`, the runner
+  that writes it — so a deployment whose migration step failed, was skipped or
+  was rolled back ran new code against an old schema while `/health` answered
+  200 and `/readyz` answered ready, and the first symptom was an
+  `UndefinedColumnError` on whichever request happened to touch the missing
+  column.
+
+  `current` means every migration on disk is applied; `skewed` means the two
+  disagree, with `pending` and `applied_not_on_disk` naming which direction;
+  `unknown` means the comparison could not be performed at all — no database,
+  no tracking table, a failed query. **`unknown` is never `current`**, which
+  is the whole point: a check whose unknown bucket is a pass is
+  indistinguishable from one that works. The comparison is on filenames,
+  because `run_migrations.py` tracks and orders by filename and duplicate
+  numeric prefixes are a real occurrence here.
+
+  Surfaced on `/readyz` as a **non-required** dependency, so a schema that is
+  behind is reported loudly without pulling an operator's console out of the
+  load balancer during the incident they need it for: readiness answers
+  `ready_degraded` with the detail and keeps serving.
+
+### Changed
+
+- **`Cross-store isolation (Neo4j + Redis + ClickHouse + Kafka)` is now a required status check on `main`**, bringing the protected set to 30. Measured before promoting it: over 82 push runs to `main` since 2026-07-12 it failed three times — one real regression, the workflow's own first run, and one where the runner never attached (`steps: []` over 66 minutes against a 20-minute budget). Across its last 100 runs of all events, 80 success, 4 failure (all four that same regression), 16 cancelled by the concurrency group and zero container flakes. `.github/required-checks.json` moved in the same change and branch protection after it merged, because CI's `GITHUB_TOKEN` cannot read protection — a manifest briefly ahead of protection reds nothing, while the reverse persists.
+
+- **The job had to stop being path-filtered first, and the filter is gone rather than pushed into the job.** A workflow filtered by `paths:` creates no check run at all on a pull request that misses the filter, and a required context that never reports blocks the pull request forever; the same filter is also how the regression above merged ungraded, with its head graded by the *offline* isolation job instead. The obvious alternative is worse than it looks: a job-level `if:` yields a check run whose conclusion is `skipped`, and GitHub counts a skipped check as passing, so the pull request would merge having never run the assertion — the same ungraded merge in a different costume. That trade is only worth making for an expensive job, which is why `integration.yml` carries one for a 15-minute disaster-recovery rehearsal. This job is not expensive: over its 40 most recent successful job executions, min 46s, median 52s, p90 70s, max 137s, none within an order of magnitude of its budget. (Run wall-clock has a median of 758s, but that is the shared runner pool's queue, which no filter changes and which a skipped job pays too.) It now carries no filter anywhere and no `if:` on any assertive step, which `scripts/check_required_check_substance.py --static` reports as 12 unconditional and 0 change-gated.
+
+  The enumeration it replaces is worth recording, because it is why one could not be maintained. Measured by recording every module the import system resolves across all three steps against live stores, the suites load **13 files under `services/api/app`** plus `services/fusion/app/services/lake_writer.py` — and six of those arrive through lazy call-time imports inside `fetch_lake_events` that no static reading of the test files reveals, because they do not resolve at all until a warehouse answers.
+
+- **The Nov-9 Dependabot wave lands folded, one PR per lockfile family, and fastapi moves to 0.162.x repo-wide** ([#1791](https://github.com/beenuar/AiSOC/pull/1791), [#1792](https://github.com/beenuar/AiSOC/pull/1792), [#1795](https://github.com/beenuar/AiSOC/pull/1795), [#1796](https://github.com/beenuar/AiSOC/pull/1796)). fastapi is a pin-agreement critical package — every range written anywhere must be the same range — so the three queued per-service bumps could never merge alone; the range moves to `>=0.117,<0.163` in all 13 service manifests, the 7 pip-install lines across 5 workflows, and the `reproducible-builds.yml` shipped-matrix entry (0.162.2, what the locks resolve). With it: aiokafka 0.15 (agents), python-dateutil 4.0 (actions — declared but never imported, verified before taking the major), pydantic 2.14.3, sqlalchemy 2.1.8, sqlglot 30.30.0, strawberry-graphql 0.340.1, python-multipart 0.0.33, boto3 1.43.127, openai 3.48.0, langchain-core 1.7.7, markdown 3.11.3; next + eslint-config-next 16.4.5, storybook 10.6.6, framer-motion 14.9.1, tailwindcss 4.3.4; realtime's OpenTelemetry constellation coherently at 0.301.1/3.1.1 with eslint 10.14 and express-rate-limit 8.7.4; pgx/v5 5.12.0 (ingest); cosign-installer 4.1.3, docker/login-action 4.8.0, helm/kind-action 1.15.2 and the codeql-action group across workflows. Every lock delta was audited to contain only the intended packages and their required transitives.
+
+### Fixed
+
+- **The GitLab connector polled a vulnerability route GitLab does not serve, and filed the 404 as the customer's plan.** `fetch_alerts` requested `GET /groups/{id}/security/vulnerability_findings`. There is no such endpoint. Probed against gitlab.com it answers `404 {"error":"404 Not Found"}` — Grape's route-not-found body, byte-identical to a path invented for the control — while the sibling `/groups/{id}/audit_events` answers `403 {"message":…}` and the one documented findings route, `/projects/{id}/vulnerability_findings`, answers `401 {"message":…}`. An existing route refuses you by `message`; a route never served says `error`. So that stream had never returned a row on any deployment, and because its 404 shared a branch with 403 the only symptom was `gitlab.vulnerability_findings_unavailable` at `info` — our wrong URL, reported as a tier limitation nobody debugs ([#1754](https://github.com/beenuar/AiSOC/issues/1754)).
+
+  **It now reads `Group.vulnerabilities` over GraphQL, and that choice was made against the alternative rather than instead of it.** The documented REST route is project-scoped. Reaching it from a group-scoped connector means enumerating the group's projects and polling each: `gitlab-org` reports `x-total: 3810` with subgroups, so one poll becomes thousands of requests every five minutes, and a bound on that number silently stops scanning the rest of the group — the unread-window defect the paging work exists to prevent, rebuilt. That endpoint also takes no time filter, returns no `created_at` to window on client-side, defaults `scope` to `dismissed`, and GitLab says of it: "This API is in the process of being deprecated and considered unstable… Use the GraphQL API instead." `Group.vulnerabilities` has none of those problems — group-scoped so there is nothing to enumerate and no bound to get wrong, `sort: detected_desc` with `detectedAt` on every node so a clock-derived window is readable, and a real Relay cursor. The exact query was sent to `gitlab.com/api/graphql` and answered 200 with a live `endCursor`, which is more contract than the REST route ever had. `cloudflare_zt` made the same move for the same reason in [#1686](https://github.com/beenuar/AiSOC/issues/1686).
+
+  **404 and 403 are no longer one branch, here or anywhere else in the connector tree.** A 403 on audit events is the token not owning the group or the plan not including them, and stays an `info` line; a 404 is now a warning naming the group and the instance URL, because the route exists and so a 404 is about the group, not the tier. GraphQL answers 200 for everything, so the same distinction is drawn on the body: an `errors` array is **our** defect and warns, a null `group` is a path nobody can see and warns, and only a null `vulnerabilities` — the tier genuinely not exposing the field — is the `info` line. `scripts/check_connector_404_conflation.py` makes it durable: no connector may accept a 404 in the same branch as a 401 or 403 unless the pairing is declared with the vendor's own response list for that endpoint. One pairing is declared (GitHub publishes `404 - Resource not found` for `/orgs/{org}/code-scanning/alerts`), nothing else in the tree conflates them, and the ceiling is zero. Run against the pre-fix tree the gate exits 1 naming all three GitLab sites.
+
+  The pre-fix control is the sharpest part of the record: the 14 new tests drive the real `fetch_alerts` through a transport and **all 14 fail on `main`**, the first of them printing the dead URL the connector still asked for. The old test suite mocked that route and answered it `200`, which is how a path GitLab has never served looked healthy for the connector's whole life — the test double being more capable than the real thing, again. Two behaviours were measured against the live endpoint rather than assumed: an authorization-filtered page comes back `nodes: []` beside `hasNextPage: true`, so an empty page must not end the read; and a partial read is kept when a later page is rejected, proven by reverting it. No live GitLab Ultimate tenant was available, so no real vulnerability has been observed through this path — the contract is the published schema plus a query executed against GitLab's own endpoint.
+
+- **Two of that job's three steps could report success having connected to no datastore, which is the `Backup → destroy → restore` defect that rehearsed nothing on 74 of 100 runs.** Measured with the job's own dependency set installed and no containers running, every step was green: `test_live_stores.py` 4 skipped of 4, `test_retro_hunt_live.py` 17 skipped of 19, `test_backtest_lake_live.py` 12 skipped of 15 — a green tick naming four stores, having opened a connection to none of them. `LIVE_STORES_REQUIRED` and `RETRO_HUNT_LAKE_LIVE_REQUIRED` now join the existing `BACKTEST_LAKE_LIVE_REQUIRED`, each routed through one `_unavailable()` helper per file so the skip reason and the required-mode failure cannot drift apart, and `pytest.importorskip` is replaced throughout because it cannot express "required here, optional there". Each file keeps its clean local skip when the flag is unset.
+
+  Stated precisely, because only part of the surface was open: an *unreachable* store already failed in `test_live_stores.py`, since nothing catches the connection error. The two ways left to pass vacuously were an unset address and an uninstalled client library. Verified both directions against four real containers — with the stores up all three steps pass, 38 assertions in total, which is the positive control that a fail-closed check is not merely stuck closed; with them down all three fail. Re-adding a change-gate to the three assertive steps makes the static gate exit 1 naming all three, and removing it returns it to 0.
+
+- **"Every service exposes the same `GET /healthz` shape" was wrong in both
+  directions, and the sweep it recommended reported failure on a healthy
+  stack.** `apps/docs/docs/deployment/docker.md` told operators to curl
+  `/healthz` on the API and then to loop it across eleven ports. Probed
+  against a running `ghcr.io/beenuar/aisoc-core-api:latest`: `/health` 200,
+  `/healthz` **404**, `/livez` 200, `/readyz` 200 — and the documented
+  `curl -fsS` exits **22**, because `-f` turns the 404 into a failure. The
+  quoted body was invented too: it showed `{"status": "ok", "version": …}`
+  where the live response carries five keys (`status`, `service`, `version`,
+  `airgap`, `demo_bootstrap`) and a `status` of `healthy`. No example body
+  replaces it — three of the five are deployment-specific, and printing a
+  plausible one is how the section came to document an object no route has
+  ever returned.
+
+  `/healthz` is real, just not on the API: `realtime`, `mcp` and
+  `osquery-tls` serve it, as does Qdrant. The path every service does agree
+  on is `/readyz`, so that is what the sweep uses, with the two genuine
+  exceptions named rather than folded in (`enrichment` is Go and serves only
+  `/health`; `mcp` serves only `/healthz`). The page now carries a
+  path-to-service table derived from the route registrations, including the
+  one service whose `/health` is not at the root: `connectors` mounts that
+  router at `/api/v1`, while its `/livez` and `/readyz` are installed on the
+  application directly and stay at the root. Every port in the sweep was
+  re-checked against `docker-compose.yml`.
+
+- **Two further instances of the same claim, found by sweeping for it.**
+  `troubleshooting.md` headed a section `/healthz returns 503` under "API
+  service" and printed a `subsystems` object — a key that appears nowhere in
+  `services/`, one of whose four entries was `opensearch`, which the API
+  holds no client for and `env-vars.md` already said so. It now describes the
+  real `/readyz`, which reports `subscriptions` and `dependencies` under
+  separate keys and has four `status` values. `kubernetes.md` named two of
+  the three `/healthz` servers and missed `osquery-tls`.
+
+  The one third-party health claim in the runbooks was checked and left
+  alone: `qdrant/qdrant:v1.7.0` genuinely answers `/healthz`, `/livez` and
+  `/readyz` with 200 and 404s on `/health`.
+
+- **The upgrade guide can now document `GET /api/v1/system/version` instead
+  of promising it.** The page told operators to check that route while no
+  such route existed, so the documented way to confirm an upgrade answered
+  404; a previous revision of this page correctly declined to guess the
+  response shape. The route is real, and the shape is now documented from a
+  running instance rather than from reading the handler: version, build
+  revision, environment, and a `schema_migrations` object carrying the
+  applied-migration high-water mark and a three-state verdict. All three
+  states were exercised — `current` against a fully migrated Postgres,
+  `unknown` against a dead port (still a 200, with `migrations_applied` as
+  `null` rather than `0`, because a database that answered and applied
+  nothing is different from one that could not be asked), and `skewed` with
+  a row planted outside the build. Authorization was exercised too, not just
+  read: `settings:read`, measured as 401 unauthenticated, 403 for `viewer`,
+  200 for `tenant_admin`. The page also records why `migrations_on_disk`
+  (157) and the high-water mark (`160_…`) legitimately differ — migrations
+  are compared by filename, never by a parsed number, because duplicate
+  numeric prefixes are real here.
+
+- **`env-vars.md` documented `APP_VERSION` and `AISOC_VERSION` as defaulting
+  to `0.1.0`, which is now wrong in the most misleading direction.** Neither
+  has a literal default any more: both resolve from the `AISOC_VERSION`
+  build arg, then the repo-root `VERSION` file, then the literal string
+  `"unknown"`. Documenting that as a version number reinstates in prose
+  exactly the defect the resolver was built to remove — `0.1.0` is not a
+  neutral placeholder, it parses as a version and sorts below every tag that
+  has shipped, so an operator cannot distinguish "very old" from "nobody
+  told me". The page now explains the resolution order and says plainly why
+  the sentinel is a word rather than a number. The `AISOC_VERSION` row also
+  carried the wrong history: its stale literal was `4.0.0`, not `0.1.0`, so
+  one process reported two different versions of itself depending on whether
+  you asked a trace or `/health`.
+
+  A row added for `VERSION` in an earlier revision of this change was removed
+  before it shipped. It described `APP_VERSION` and `VERSION` as independent
+  fields sharing a default, which was true when written and is not now:
+  `Settings.VERSION` is a read-only property aliasing `APP_VERSION`, so a
+  bare `VERSION` variable in the environment is deliberately not bound at
+  all. Shipping the row as drafted would have added a new false claim to the
+  page it was correcting.
+
+- **The credential-key row described the development branch as though it
+  were the only one.** `env-vars.md` said an empty `AISOC_CREDENTIAL_KEY`
+  means "the API generates an **ephemeral** key per process". That happens
+  only in a dev-class environment (`development`, `dev`, `local`, `demo`,
+  `test`); anywhere else the vault **raises** and refuses to start, which is
+  the opposite operational outcome and the one an operator needs to plan
+  for. The row now states the conditional and marks the variable required
+  outside development.
+
+- **A live tenant-isolation suite stopped running, and the mechanism that
+  stopped it would have stopped the next one too.**
+  Twelve of the fifteen tests in `tests/isolation/test_backtest_lake_live.py`
+  errored at fixture setup with `No module named 'app.core.version';
+  'app.core' is not a package` from the moment the version module landed. The
+  cause is not the cross-service `app` name collision; it is the machinery
+  built to avoid it. The fixture registered `app`, `app.core`, `app.db` and
+  `app.services` as bare `types.ModuleType` objects, and a module has no
+  `__path__`, so the import system cannot resolve *any* submodule through it
+  however plainly the file is on disk — a hand-written list of file paths was
+  the only way a module became reachable. `tests/isolation/service_packages.py`
+  now borrows a service's `app` tree as a real package whose `__path__` is the
+  real directory, so submodules resolve from disk the way they do in
+  production and there is no list to keep current. Nothing is added to
+  `sys.path`, and the whole `app` namespace is restored on exit by snapshot
+  rather than by a list of names the caller recorded — which it has to be, now
+  that the import system registers submodules nobody enumerated.
+  `test_retro_hunt_live.py` had the same construction and uses the same
+  helper, keeping one deliberate exception for a package whose `__init__.py`
+  reaches an ORM this job does not install. `tests/isolation/test_service_packages.py`
+  pins all of it, and reverting the `__path__` reproduces the original error.
+
+- **The job that would have caught it was never triggered.**
+  `isolation-live.yml` filtered on three `services/api` files; the backtest
+  suite loads eleven, and `app/core/config.py` is one of the eight the filter
+  did not name, so the change merged ungraded. The filter now names the three
+  directories containing the whole measured closure, and the pull-request list
+  is a YAML anchor of the push list so the two cannot drift.
+
+- **One migration comparison instead of two, with the one deliberate
+  divergence pinned.**
+  `scripts/pending_migrations.py` and `services/api/app/services/schema_skew.py`
+  compared the same two sets with two copies of the arithmetic, and the copies
+  had already drifted — the service skipped a directory named `*.sql` and the
+  script counted it. The script now loads the service's `migrations_on_disk`
+  and `evaluate_skew` by path; `_read_applied` defers its SQLAlchemy import so
+  the shared half stays standard-library-only and loadable from a script with
+  no dependency set. What stays different is the verdict on a rollback — a
+  migration applied in the database and absent from the tree. The service
+  calls it skewed, because it is asked whether the schema matches the build;
+  the detector exits 0, because it is asked whether to run `make upgrade`, and
+  upgrading applies migrations forward and cannot fix a rollback. That is one
+  named branch, and `tests/test_upgrade_path.py` drives both callers over seven
+  verdicts and fails if a second case disagrees, if the script grows its own
+  copy again, or if the shared module gains a module-scope third-party import.
+
+- **Okta, GitHub and GitLab read one page of each poll window and lost the
+  rest.** All three answer a capped request with a `Link: <url>; rel="next"`
+  header, and none of the three connectors looked at it. A poll window opens
+  where the last one closed, so an unread row is never requested again: Okta
+  kept the first 50 rows per event type, oldest-first, so a password-spraying
+  run lost everything after its first 50 sign-ins in that window. The GitHub
+  audit log and code-scanning streams and the GitLab audit-event and
+  vulnerability streams stopped at 100. They now read to the end through a new
+  `read_link_header_pages` in `app/connectors/_paging.py`, with
+  `MAX_UNCLASSIFIED` lowered from 58 to 55.
+
+  Okta also moves from a 50-row to a 1,000-row page, its documented maximum, to
+  spend fewer requests from the System Log rate limit, and GitLab audit events
+  move to keyset pagination because offset pagination on that endpoint is
+  deprecated. The two streams with no server-side time filter stop requesting
+  at the first page that passes the start of the window, rather than walking
+  back to the oldest open finding.
+
+  Two rules in the helper are worth knowing. An empty page ends the read even
+  when it carries a next link, because Okta documents that a request with no
+  `until` always has one. And a next link may not leave the origin of the opening
+  request: the egress guard validates the URLs a tenant configures, not the ones
+  a server answers with, so without this a server at a permitted `gitlab_url`
+  could point the loop at a metadata address with the vendor credential attached.
+
+- **Slack audit logs read 200 entries per poll and lost the rest.**
+  `SlackAuditConnector.fetch_alerts` sent `limit=200` and ignored
+  `response_metadata.next_cursor`, which Slack documents as the way to reach more
+  results. Entries come back most-recent-first and a poll window opens where the
+  last one closed, so a busy window lost its oldest entries for good, and those
+  are the start of whatever caused the burst. It now reads through
+  `read_token_pages`, whose `token_field` accepts a dotted path for a vendor that
+  nests its token.
+  This is one of the connectors the paging gate's changelog entry recorded as
+  unconfirmed against a vendor document; the cursor contract is
+  [documented](https://docs.slack.dev/apis/web-api/pagination), and
+  `MAX_UNCLASSIFIED` falls from 55 to 54.
+
+- **The reproducible-builds gate failed `services/escalations` for being
+  correct, and would have passed an `api` image missing most of itself.**
+  Each build leg carried a fixed floor — more than fifty packages for `api`,
+  more than twenty for every other image, more than ten for a lock-only
+  install — standing in for "this install is real", because two empty files
+  diff clean just as well as two full ones. `escalations` imports exactly one
+  third-party module and declares exactly one, so its complete Linux runtime
+  install is three packages and the floor of twenty rejected it. Lowering the
+  number would have been the worse repair: `api` installs ninety-nine, and a
+  floor of three passes an `api` image missing ninety-six of them. A service
+  that silently loses half its dependencies clears a floor written for its
+  full size, which is the failure the floor was added to catch.
+
+  The expectation now comes from the lock. Every service image is built
+  `poetry export --only main` then `pip install --require-hashes`, so the
+  property is exact rather than approximate: **the install contains every
+  `main`-group package in the lock whose environment marker holds in the
+  environment the install actually ran in.** Three is a pass for
+  `escalations` and a catastrophic failure for `api`, and neither verdict
+  needs a number written down anywhere.
+
+  Separating runtime from dev is where this goes wrong, and the permissive
+  direction is the dangerous one: an expectation that collapses toward empty
+  is satisfied by an install that is also empty. Three shapes in these locks
+  each had to be read exactly. `escalations` declares its test dependencies
+  as a PEP 621 extra rather than a Poetry group, so **all twelve** of its
+  locked packages say `groups = ["main"]`, `pytest` included — reading
+  `groups` alone would demand eight test packages in a runtime image that
+  deliberately has none. Under lock-version 2.1 `markers` is sometimes a
+  table keyed by group, where `typing-extensions` carries a `dev` marker and
+  no `main` one, so flattening it drops a package the image installs. And
+  markers decide membership, not just version: `tzdata` is a non-optional
+  runtime dependency gated `sys_platform == "win32"` and is never installed
+  on Linux.
+
+  Marker truth depends on the environment, so the environment is read out of
+  the image — `scripts/marker_environment.py` piped into the image's own
+  interpreter — rather than off the runner, which is a different platform
+  running a different Python. The tree-wide audit has no image to ask and
+  refuses to guess: it evaluates each marker across every environment the
+  tree permits, both published architectures and the whole patch range of the
+  base image's Python minor, and reports a marker that answers differently
+  across them as `undetermined` rather than picking a half. That is not
+  hypothetical — `async-timeout` in `services/actions` is
+  `python_full_version < "3.11.3"`, so whether it is a runtime package at all
+  depends on the patch level of `python:3.11-slim` on the day the image was
+  built. It is also why marker comparison uses the reference implementation
+  rather than a hand-rolled evaluator: that expression is false on 3.11.10
+  and lexicographically true.
+
+  `scripts/check_install_completeness.py` is the gate, with a `--self-test`
+  that proves both directions — a truncated install is caught, and a split
+  broadened to count dev packages as runtime is watched rejecting a correct
+  install — and `tests/test_install_completeness_gate.py` points the same
+  derivation at this repository's real locks rather than at fixtures that
+  agree with the parser by construction. Verified against a built
+  `escalations` image: the real install passes and the same image with two
+  packages uninstalled fails naming both, where the old floor failed both
+  identically and could not tell them apart.
+
+- **`docker compose pull && up -d` booted new code against the old schema and
+  said nothing. There is now a real upgrade path, and `make up` refuses rather
+  than starting quietly.** `main.py` applies the SQL migration chain only when
+  `AISOC_DEMO_MODE` is set or `ENVIRONMENT` is dev-class; `ENVIRONMENT`
+  defaults to `production` in both `docker-compose.yml` and `.env.example`,
+  the Postgres initdb hook fires only on an *empty* data directory, and the
+  `api` service has no `command:` override — so an in-place upgrade ran the
+  new release against the previous release's tables, passed every healthcheck,
+  and surfaced days later as a request failing on a column that does not
+  exist. The comment excluding production cited "a managed migration
+  pipeline", which existed in neither compose nor the Helm chart.
+
+  AiSOC still never updates itself: the line is drawn between consent and
+  silence rather than between environments. `make upgrade` runs the preflight,
+  takes a pre-upgrade dump, applies the chain and then starts; `make up` reads
+  the database first and **refuses to start** when its schema is behind,
+  naming `make upgrade` and listing the pending migrations. It cannot fire on
+  a first run (empty data directory), on a restart with no code change, or on
+  `make up-dev`, where the API applies the chain at boot.
+
+  `scripts/pending_migrations.py` is the detector. It reports `fresh`,
+  `up to date`, `behind` or `unknown` as four distinct answers — an
+  unreadable database is never folded into "fine" — and it connects over TCP
+  *inside* the container rather than over the unix socket, because the
+  official image runs its initdb hooks against a temporary server with
+  `listen_addresses=''`; a socket connection would read a half-written
+  migration table mid-initialisation and report a first run as behind.
+
+- **`AISOC_MIGRATIONS_STRICT` is now set on every path that applies
+  migrations.** It defaults off, so a failed migration is logged and `main()`
+  returns normally — exit 0 over a partially-applied schema, which is worse
+  than a clean failure because the upgrade then reports success. `make upgrade`
+  and the new Helm Job set it, and `aisoc db upgrade` passes it with `-e`:
+  `docker compose exec` gives the new process the *container's* environment,
+  so exporting it in the operator's shell did nothing and the warning in the
+  upgrade documentation was unreachable through the command it documents.
+  There is deliberately no `--no-strict`.
+
+- **`helm upgrade --set runMigrations=true` was documented and existed nowhere
+  else in the repository.** No value, no Job template — and `--set` on a value
+  nothing reads is accepted silently, so an operator following the
+  documentation got an upgrade that reported success having applied nothing.
+  The Job is now built (`templates/migrations-job.yaml`, a `pre-install,
+  pre-upgrade` hook running in strict mode, off by default), so the documented
+  flag does what it says; `ha-deployment.md`'s "The chart does not run them"
+  no longer describes the chart.
+
+- **A restored backup could not decrypt a single connector credential.**
+  `backup.sh` covered six stores with AES-256-GCM and a SHA-256 manifest and
+  never captured `AISOC_CREDENTIAL_KEY`, so a complete, verified Postgres
+  restore brought every `vault:v1:` token back as undecryptable ciphertext and
+  the only recovery was re-entering every vendor credential by hand. A seventh
+  component captures the key, and `restore_credential_key` reconciles it with
+  `.env` — written when absent, no-op when identical, **refused** when a
+  different key is already there, because overwriting orphans whatever the
+  running deployment has encrypted since.
+
+  Capturing a key is not a neutral act, so it is the one component that
+  refuses `BACKUP_ENCRYPTION=off`: the key and the ciphertext it opens now
+  share a bucket, which makes the envelope the only control between a bucket
+  reader and every credential in the deployment. It is uploaded under its own
+  `credential-key/` prefix so a bucket policy can separate the two halves, the
+  plaintext window on local disk is `umask 077` inside the directory the EXIT
+  trap removes, and the value is never logged. `check_backup_restore_parity.py`
+  gained a `MUST_BE_ENCRYPTED` arm, because name-pairing alone would pass a
+  component that shipped the key in the clear.
+
+- **`scripts/preflight_upgrade.py` refuses an upgrade a restore could not
+  undo**: no `.env`, no `AISOC_CREDENTIAL_KEY`, a key that is not a readable
+  Fernet key, or no recent non-empty backup. The first condition is the sharp
+  one — `ensure_env.py` never overwrites an existing secret, but on a host
+  with **no** `.env` it copies the example and generates a brand-new Fernet
+  key, orphaning every stored credential as a side effect of a helpful
+  command. `make upgrade` therefore does not depend on the `env` target.
+
+- **Three pre-existing defects in the backup and restore scripts, each found
+  by running them rather than reading them.** `"${args[@]}"` over an empty
+  array is an unbound variable under `set -u` on bash below 4.4 — macOS's
+  `/bin/bash` — so **every** upload in `backup.sh` failed there, through one
+  shared `s3_upload`. `restore.sh` read `$DRY_RUN` in three functions and set
+  it nowhere and parsed no `--dry-run`, so the neo4j, qdrant and redis
+  restores died with `DRY_RUN: unbound variable` at the line that decides
+  whether the run is a rehearsal — the three wave 15 added precisely because a
+  backup nobody can restore is a backup nobody has proven they can use, and
+  the crash only fires once the artifact is present, so it arrived during a
+  real recovery. Both are fixed, and `--dry-run` is now a real rehearsal.
+
+- **State an image pull destroyed, now on named volumes.** Installed plugins
+  (`/opt/aisoc/plugins`) and trusted plugin-signing keys
+  (`/opt/aisoc/plugin-keys`) lived in the API container's writable layer;
+  `/opt/aisoc` appeared in no compose file and no Helm template. Grafana's
+  `/var/lib/grafana` was unmounted, so every dashboard, user, annotation and
+  UI-created alert rule was destroyed on recreate — silently, with the
+  provisioned dashboards coming back and nothing saying the rest had ever
+  existed — while Prometheus lost all metrics history and Alertmanager every
+  silence. All five directories now have named volumes; the chart gains an
+  opt-in plugin PVC, which also makes plugin installation possible on
+  Kubernetes at all, since the pod runs with `readOnlyRootFilesystem: true`.
+
+
+- The environment-variable reference listed `HONEYTOKEN_ALERT_WEBHOOK_SECRET`
+  as defaulting to `changeme`. It has defaulted to empty since the literal was
+  removed — precisely so that no deployment signs its alerts with a public
+  value — and the page was telling operators the opposite of what the service
+  does.
+
+- **The API reported version `0.1.0` on every deployment it has ever shipped.**
+  ([#1732](https://github.com/beenuar/AiSOC/pull/1732))
+  `Settings.APP_VERSION` was a literal and nothing populated it, so `/health`,
+  the OpenAPI document and the startup log agreed on a version no release has
+  ever carried. `core/telemetry.py` in both `api` and `agents` carried a
+  second stale literal, `4.0.0`, so a trace and a health check named different
+  releases of the same process.
+
+  The version now resolves from the `AISOC_VERSION` build arg (stamped by
+  `publish-images.yml`, since a service build context cannot reach the
+  repo-root `VERSION` file), then from that file on a source checkout, then
+  the string `"unknown"` — deliberately not `0.0.0`. A version-shaped
+  placeholder parses as a release and sorts below every tag that ever shipped,
+  so an operator comparing a deployment against a tag cannot tell "very old"
+  from "nobody told me". `VERSION` is now a read-only alias of `APP_VERSION`,
+  so the two cannot disagree and a stray `VERSION` environment variable cannot
+  move either.
+
+- **The console had two version surfaces reading two different build-time
+  values.** ([#1732](https://github.com/beenuar/AiSOC/pull/1732))
+  The sidebar footer rendered `packageJson.version` and Settings → About
+  rendered `process.env.NEXT_PUBLIC_APP_VERSION || '0.0.0'`, both frozen when
+  the bundle was compiled, by separate mechanisms, so one image could show two
+  numbers. Both now read `consoleVersion` from `/api/runtime-config`.
+  `next.config.js` substituted `'0.0.0'` when the `VERSION` file could not be
+  read, which also made that route's own `'unknown'` branch unreachable; it
+  now substitutes an empty string and the route guards with a trim, so a build
+  that carries no version says so.
+
+- **Dependabot's pnpm/action-setup bump clobbered the two deliberate v4 holds, and the first CI run caught it exactly as documented** ([#1791](https://github.com/beenuar/AiSOC/pull/1791)). `e2e.yml` and `visual-regression.yml` run inside the Playwright container, where action-setup@v6 self-switches pnpm down to the `packageManager` pin and leaves `@tailwindcss/oxide`'s native binding unlinked in the restored store — `check_toolchain_pins.py` exempts both files by name with that reason written beside them, and 'Buyer journey' and 'Storybook visual diff' failed with precisely that signature when the bump reached them. Both stay on v4; the other 19 call sites unify at v6.1.1 and the gate's declared fleet version moves with them. The gate's own self-test fixture hardcoded the old fleet version — moving the declaration stranded the clean fixture in both directions ("uses X while the repository declares Y" and "declared version is stale") — so the fixture now references `PNPM_ACTION_VERSION` and a declaration move can never strand it again.
+
+- **Settings → Integrations' two "Add connector" links pointed at `/connectors/new`, a route that has never existed, and the onboarding checklist's "Connect a data source" step linked back to `/onboarding` itself** ([#1797](https://github.com/beenuar/AiSOC/pull/1797), carried in [#1799](https://github.com/beenuar/AiSOC/pull/1799) with authorship preserved after the original failed its lint check and fork branches cannot be pushed to from this repository). Both now reach `/connectors`, which hosts the real add-connector modal; a component test pins each link's target and a source assertion keeps the checklist step from navigating to itself. Reported and fixed by [@knowlet](https://github.com/knowlet).
+
+- **`.github/CREDITS.md` carried two overlapping rows for the same security researcher**, each citing GHSA-hrc5-w9r3-2g8r and disagreeing about the fix reference (PR #1750 versus commit `2d034fc`, which is that PR's squash commit — the same change). Two parallel maintenance lanes had each added the credit. One consolidated row now covers both of [@pavancharak](https://github.com/pavancharak)'s advisories with the single fix reference ([#1793](https://github.com/beenuar/AiSOC/pull/1793), carrying [#1755](https://github.com/beenuar/AiSOC/pull/1755) with authorship preserved).
+
+### Removed
+
+- **66 Python wheels (62 MB) tracked at the repository root** ([#1794](https://github.com/beenuar/AiSOC/pull/1794)). Several were macOS-arm64 platform wheels — a local download cache committed by accident — and nothing referenced any of them outside PyPI lock metadata, which names same-named files on PyPI rather than these. `*.whl` is ignored now, and no legitimate tracked wheel exists anywhere the ignore could hide. Contributed by [@knowlet](https://github.com/knowlet).
+
+### Security
+
+- **Re-roling a principal was bounded in one direction only, and a tenant
+  could be left with nobody able to administer it.**
+  ([GHSA-hrc5-w9r3-2g8r](https://github.com/beenuar/AiSOC/security/advisories/GHSA-hrc5-w9r3-2g8r),
+  reported by [pavancharak](https://github.com/pavancharak).)
+  `PATCH /api/v1/tenants/me/users/{id}` ran `authorize_role_change`, which
+  checked that the caller may confer the *new* role and never that it holds
+  what the target currently holds. Conferring authority was bounded by what
+  the granter has; removing it was bounded by nothing. `authorize_role_change`
+  now applies the same subset test to the role being taken away, so a
+  database-backed role carrying `users:write` and little else can no longer
+  strip a `tenant_admin`.
+
+  **The symmetric check is not what bites on the reported scenario, and
+  saying so matters.** Two `tenant_admin` principals hold identical
+  permissions, so no subset test separates them — administrators managing
+  administrators is what the role is for. What must be unreachable is the end
+  state. The last-administrator guard beside this handler counted only the
+  *wildcard* roles, and `never_grantable` refuses those to every API caller,
+  so on a tenant created through the product the guard protected nothing: one
+  `tenant_admin` could demote every peer and then itself. Reproduced against
+  real Postgres and the real application — both demotions answered **200**,
+  leaving a tenant with no principal holding `users:write` and no route to
+  recovery short of database credentials. The guard now counts
+  `role_grants.administrative_roles()`, derived from `ROLE_PERMISSIONS` so a
+  role that gains `users:write` later is covered without anyone remembering,
+  and the second demotion answers **409** with the row unwritten.
+
+  **That guard had also never once worked.** Its count bound `:t` and `:keep`
+  as bare parameters against `uuid` columns, which asyncpg answers with
+  `operator does not exist: uuid = character varying` — so on every
+  deployment it raised a **500** the moment it fired rather than the 409 it
+  exists to return. Measured on the unmodified tree by deactivating the last
+  wildcard administrator; the statement now casts every bind, the same
+  `CAST(:name AS type)` spelling `check_text_bind_casts.py` enforces
+  elsewhere. Nobody had noticed because the only branch reaching it needed a
+  wildcard role, which no API caller can hold.
+
+  Two more corrections in the same handler. The role change now invalidates
+  the tenant's cached permissions (`bump_version`); without it a principal
+  resolved before the change kept its old set on every replica until the
+  fallback TTL lapsed, which for a revocation is the wrong direction.
+  And the audit row records `from` correctly: the `UPDATE` synchronises the
+  loaded object, so reading `user.role` afterwards returned the *new* value
+  and the trail read `{"from": "viewer", "to": "viewer"}`, telling an auditor
+  nothing about what was removed. It also now carries
+  `effective_permissions_follow_role`, because a tenant running
+  database-backed RBAC resolves permissions from `user_roles` — `users.role`
+  is not what any check reads, the demotion withdraws nothing, and the log
+  was asserting a withdrawal that never happened.
+
+  Sessions are deliberately **not** revoked. An access token carries no
+  permissions: `resolve_jwt_principal` re-reads the user row and re-resolves
+  the set on every request, which a test pins by demoting a principal and
+  replaying a token minted beforehand. The stale channel was the cache, and
+  that is what this invalidates. Letting every `tenant_admin` terminate a
+  peer's sessions would be a new capability, not a fix.
+
+- **Two declarations of one service principal's authority, and the more
+  permissive one governed 27 routes.**
+  ([GHSA-ghpm-vc6j-hp5r](https://github.com/beenuar/AiSOC/security/advisories/GHSA-ghpm-vc6j-hp5r),
+  reported by [pavancharak](https://github.com/pavancharak).)
+  `SERVICE_PRINCIPAL_PERMISSIONS` in `deps.py` was the read-only list a
+  service token resolves to; `ROLE_PERMISSIONS["api_service"]` in
+  `core/security.py` described the same principal and granted `alerts:write`
+  and `cases:write` besides, while withholding four reads the other allowed.
+  `has_permission_db` consulted neither the resolved set nor the scopes — it
+  ran its own `user_roles` join and fell back to the static map — so on the
+  27 in-body `require_permission_db` call sites the second declaration won.
+  The two are now one object: `SERVICE_PRINCIPAL_PERMISSIONS` is derived from
+  the role row, and the rationale lives with the row.
+
+  **The same blindness reopened a defect the resolver had already closed, and
+  that half is reachable today.** `resolve_permissions` distinguishes "this
+  tenant has no RBAC" from "this tenant has RBAC and gave this user none",
+  returning the empty set for the second so that removing every grant does
+  not restore a static role. `has_permission_db` saw the same zero rows and
+  could not tell the two apart. Reproduced against real Postgres: a
+  deprovisioned `tenant_admin` answered **403** at every `require_permission`
+  route and **200** at `GET /api/v1/mcp-servers`. `require_permission_db` now
+  delegates to the one check, so elevation and the tenant's attribute
+  conditions bind there too — both previously applied on one path and not the
+  other, making the same principal allowed or refused depending only on which
+  factory a route happened to use.
+
+  `check_one_permission_model.py` gains the arm that would have caught this:
+  it asserted everything about the dependency factory and nothing about the
+  in-body method, so the second model this gate exists to prevent sat one
+  method over with every check printing OK. Run against the pre-fix tree the
+  new arm exits 1 naming all three defects.
+
+  **Found while unifying the two lists, and left open deliberately:** the
+  shared service token holds `lake:query`, and `lake:query` is what gates the
+  hunt *write* routes, so a real service token reaches `POST /api/v1/hunts`
+  and `POST /api/v1/saved-hunts` — measured at **422**, past authorization,
+  on the unmodified tree. A test asserted the opposite and passed only
+  because it built a principal with no resolved set and so read the narrower
+  of the two lists. Closing it means splitting authoring from running into a
+  write permission, which changes what four human roles hold and needs its
+  own change; the exposure is recorded as a strict `xfail` so whoever does
+  that is told to remove the marker.
+
+- **The ingest graph-update WebSocket ran no authentication and took its
+  tenant from the query string.**
+  ([GHSA-cvfr-9r25-gqpf](https://github.com/beenuar/AiSOC/security/advisories/GHSA-cvfr-9r25-gqpf),
+  high, CVSS 8.6) `internal/graph_ws/server.go` read `?tenant_id=<id>` and
+  subscribed the caller to that tenant's live graph-update stream, so any
+  caller who could reach the port could read any tenant's stream with no
+  credential at all. The handler now runs the same `internal/ingestauth`
+  authenticator the ingest routes run and derives the tenant from the
+  resulting principal, by the same intersection-only rule `/v1/ingest` uses.
+  The query parameter is removed rather than validated.
+
+  The reason this survived is the part worth recording. Two comments — one in
+  the handler, one on the route — stated that authentication was enforced by
+  the Python API proxy and that the server "is expected to listen on the
+  internal service network only". The proxy's authentication is real: it
+  resolves a JWT or API key, enforces `graph:read`, and rebinds the tenant
+  from the resolved user. But nothing made the proxy the only way in, and the
+  proxy presented no credential upstream, so the Go side could not tell a
+  relayed browser from anyone else. A protection asserted in a comment and
+  enforced by an assumption about somebody else's deployment is not a
+  protection, and the identical reasoning was already written down one
+  package away in `internal/ingestauth` as the reason `/v1/ingest` needed a
+  credential. Both comments were corrected in place rather than deleted, and
+  the proxy now presents a service token and the resolved tenant as a header
+  — defence in depth in front of ingest's own check instead of a substitute
+  for it. Nothing in `docker-compose.yml` changes: the api and ingest-worker
+  containers already share `AISOC_SERVICE_TOKEN`, which is what ingest
+  resolves after `AISOC_INGEST_SERVICE_TOKEN`, and `make env` generates it.
+  Roll ingest last or roll both together, since a new ingest refuses an old
+  API while a new API against an old ingest is harmless.
+
+  The reported impact said graph events could be **written**. They cannot:
+  the handler only subscribes and pumps envelopes toward the client, and its
+  reader goroutine discards inbound frames. This is a cross-tenant read, and
+  the published vector says so (`I:N`).
+
+- **`/metrics` on ingest was open while its own compose file promised a
+  token.** `docker-compose.prod.yml` declares `METRICS_TOKEN` required for
+  this service with the message "guards /metrics outside development" and
+  `scripts/ensure_env.py` generates it, but nothing in `services/ingest` read
+  the variable, so the guard the compose file promised existed only in
+  `services/api` and `services/agents`. Ingest now applies the same two
+  rules: a constant-time bearer comparison when `METRICS_TOKEN` is set, and a
+  refusal outside a development-class environment when it is not. `/health`,
+  `/livez` and `/readyz` stay unauthenticated, deliberately — an
+  orchestrator's probe carries no credential, and pulling the pipeline's
+  front door out of a load balancer to protect a scrape endpoint would be a
+  worse trade than the one it buys.
+
+- **A blank HMAC secret skipped signature verification on both ingest push
+  paths.** `ingestauth.VerifySignature` and `inbox.verifyHMACOrFail` both
+  began `if secret == "" { accept }`, so a token that declared a signature
+  requirement accepted unsigned bodies. The cause was one layer down: the
+  resolve query applied `COALESCE(hmac_secret, '')`, which collapsed a NULL
+  column and a blank one into the same empty string. Those are different
+  facts. Migration `033` documents NULL as "no signature verification (still
+  secured by the token in the URL)" — the opt-out every webhook vendor that
+  cannot sign depends on — while a non-NULL blank cannot be created through
+  the mint API at all, which enforces `min_length=16`.
+
+  `inbox.Token` now carries `HMACConfigured` alongside the secret, so the two
+  states are distinguishable, and a blank configured secret is **refused**
+  with an operator-actionable message rather than waived. Verifying against
+  it was considered and rejected: an HMAC keyed on the empty string is a
+  value any caller can compute, so that branch would have accepted forged
+  bodies instead of unsigned ones. A test demonstrates the forgery directly
+  rather than asserting it. Tokens with no secret still push unsigned, which
+  is the behaviour the schema documents and a positive control covers.
+
+  `RequiresSignature()` is the single accessor both call sites ask through,
+  and it reads `configured OR non-empty` so a producer that sets a secret
+  without the flag still gets verification. Only the store builds a `Token`
+  in production and it always sets both, but the one combination that must
+  never mean "skip" is a secret that is present in some form.
+
+  Reported by Jake Davis (`@aptera-motors-it`). Every finding was supplied
+  with a working proof of concept, each of which is now a Go test that was
+  watched failing on the pre-fix tree and watched failing again with the fix
+  reverted.
+
+- **A graph_ws subscriber disconnecting mid-dispatch could panic the ingest
+  consume goroutine.** Not part of the advisory — found by the race detector
+  on the new handler tests above, which are the first to unsubscribe while
+  the consume loop is actively dispatching. `Unsubscribe` closed the
+  subscriber channel *outside* the lock while `dispatch` sent to it *after*
+  releasing the read lock, so a client that disconnected at the wrong moment
+  could have its channel closed between the two. A send on a closed channel
+  panics even inside a `select` with a `default` arm, so the outcome is a
+  crashed consumer rather than a dropped envelope. The close now happens
+  under the same write lock as the delete, and `dispatch` holds the read lock
+  across its sends — which is safe only because that send is non-blocking, so
+  a slow client still costs a dropped envelope and never back-pressure.
+
+  Latent rather than observed: eight race-detector runs of the pre-change
+  tree are clean, because nothing previously exercised that interleaving.
+  Reverting either half alone leaves the race closed, so the negative control
+  reverts both and watches it return.
+
+- **A detection that fired again after its alert was closed produced nothing,
+  which made a closed alert into a place to hide.**
+  ([GHSA-qp9f-459j-w89c](https://github.com/beenuar/AiSOC/security/advisories/GHSA-qp9f-459j-w89c))
+  `alert_sink._INSERT_SQL` guarded its insert with `WHERE NOT EXISTS (… WHERE
+  tenant_id = $2 AND dedup_hash = $11)` and that predicate carried no status.
+  Once an analyst closed, resolved or false-positived an alert, the closed row
+  absorbed every later firing of the same detection: the insert was filtered,
+  the sink answered `DUPLICATE`, and no open alert was ever created. An
+  attacker who tripped a detection, waited for the alert to be closed and
+  repeated the activity was invisible to the queue — evasion of a detection
+  that was working correctly, rather than a cosmetic deduplication complaint.
+
+  The alert is now **reopened** on recurrence, counted and timestamped
+  (`reopen_count`, `reopened_at`, `reopen_reason`; migration 160), with the
+  reason naming the status it had been closed as. The alternative the reporter
+  offered — a new row under a time-bucketed fingerprint — is not available:
+  `uq_alerts_tenant_dedup` is UNIQUE per `(tenant_id, dedup_hash)`, so reaching
+  it would have meant changing `RawAlert.fingerprint()` itself, which moves the
+  dedup key for every consumer of it and splits two firings that straddle a
+  bucket boundary **while the alert is still open** into two rows. A wall-clock
+  bucket cannot distinguish "repeated while open" from "repeated after
+  closure", which is the only distinction that matters here. Reopening also
+  bounds the queue by construction: a recurrence returns one existing row, and
+  further recurrences while it is open change nothing.
+
+  Deduplication is unchanged and the control proving it is in the same suite,
+  passing before the fix as well as after: ten firings against one open alert
+  are still one row with its status untouched, and an alert an analyst has
+  moved to `triaging` is not dragged back to `new`. The reopen predicate is
+  `status = ANY(terminal)`, so it is simultaneously the fix and that control.
+  `resolved_at` returns to NULL because the MTTR average subtracts it without
+  consulting `status`; `disposition` is deliberately kept, so the row still
+  records that a human judged the previous occurrence.
+
+  Graded by `tests/isolation/test_alert_recurrence_after_closure_live.py`
+  against real Postgres as the DML-only `aisoc_app` role — the defect is in
+  SQL and in a unique index, neither of which a fake store can show.
+  Parametrised over all five terminal statuses, because a fix that knew only
+  `resolved` would have left `closed`, `false_positive`, `fp` and `dismissed`
+  as holes, and covering both dedup branches, because whether a recurrence
+  arrives as `NEW_ALERT` or as fusion's own `DUPLICATE` verdict depends only on
+  whether the fingerprint is still in Redis. Fusion's copy of the terminal
+  vocabulary is rendered from `app.services.alert_status` by
+  `scripts/sync_vendored_alert_status.py`, whose `--check` arm fails CI if the
+  console and fusion ever disagree about what "closed" means.
+
+
+- **A tripped honeytoken reached nobody, and said so at a level nothing
+  watches.**
+  ([GHSA-9q6p-m345-h3hj](https://github.com/beenuar/AiSOC/security/advisories/GHSA-9q6p-m345-h3hj))
+  `send_alert` posted to `HONEYTOKEN_ALERT_WEBHOOK_URL`, which has no default,
+  and returned `False` after an `info` log when it was unset. No receiver
+  route exists anywhere in the API, so the single highest-confidence
+  intrusion signal this platform can produce — a credential nobody has any
+  legitimate reason to touch — produced nothing on the shipped layout.
+
+  A trip is now pushed into the **ingest spine** by default, exactly the way
+  a connector pushes a vendor finding, so it becomes an alert through the
+  path every other signal already takes: dedup, fusion, correlation and
+  auto-triage, with no operator configuration at all. A deployment that has
+  configured a webhook keeps the webhook. The ingest profile ships in the
+  same change (`services/ingest/internal/normalizer`, class 2001 Security
+  Finding, category 2 so the promoter always promotes it) — without it the
+  push would fall to the lenient fallback, be filed as category 4 Network
+  Activity, and be archived to the lake and silently never promoted, which is
+  the same invisible outcome one layer down.
+
+- **A trip that happened while the receiver was down was never retried.**
+  (same advisory, F58) Delivery was attempted inline, once; a failure set
+  `alert_sent = False` on the trigger row and nothing ever looked at it
+  again, so a receiver restart meant the signal was simply gone.
+
+  Delivery is now journalled in `honeytoken_alert_outbox` **before the trip is
+  acknowledged** and drained by an awaited background path — the shape
+  migration 121 already uses for fusion's alert notifications. The ordering is
+  the point: a crash in the delivery window costs a duplicate rather than the
+  signal, and the receiver can deduplicate on `trigger_id`, which every
+  payload carries.
+
+  Permanent and transient are genuinely distinguished rather than retried
+  blindly. A timeout, a connection error, 408, 429 or any 5xx is retried with
+  a capped exponential backoff; any other 4xx is terminal, because a 401
+  means the token is wrong and a 404 means the URL is wrong and retrying
+  either for a day produces load and no alert. A row that exhausts its
+  attempts, or that can never be delivered, becomes `dead` **with the reason
+  recorded on the row**, so "honeytoken alerts are not arriving" is a query
+  rather than an archaeology exercise over container logs.
+
+  Graded against real Postgres as the DML-only `aisoc_app` role by
+  `services/honeytokens/tests/test_outbox_live.py`, which executes the
+  reporter's proof of concept directly — receiver down, trip, receiver back
+  up, alert delivered — and by `tests/test_delivery.py`, which asserts on the
+  **request** rather than the response, because the two defects worth
+  catching live there: a push carrying no `Authorization` is answered 401 by
+  our own ingest service and reads as the receiver rejecting us, and a push
+  whose `connector_type` has no normalizer profile is never promoted at all.
+
+
+  Reported by Jake Davis.
+
+### Documentation
+
+- **The compose comment justifying the `honeytokens` profile was void, and
+  contradicted itself three lines later.** It read "image isn't published to
+  GHCR yet", then explained that the image *is* in the publish matrix now.
+  Checked against the registry: `ghcr.io/beenuar/aisoc-honeytokens` serves
+  200 at `latest` and at the version tag, as a `linux/amd64` + `linux/arm64`
+  manifest. So the stated reason for the profile had not been true for some
+  time, and the real reason was written down nowhere.
+
+  The service **stays in `extras`**, and the comment now says why. This is
+  the open half of
+  [GHSA-9q6p-m345-h3hj](https://github.com/beenuar/AiSOC/security/advisories/GHSA-9q6p-m345-h3hj)
+  (F57), which named the profile alongside the alerting defect, so the
+  reasoning is recorded rather than left implied. The security content of
+  F57 was the alerting path and it is fixed: a trip now defaults into the
+  ingest spine and becomes an alert with no configuration at all, so an
+  operator who turns this on gets the signal. What remains is a placement
+  decision, taken on the grounds the ADR-0006 / ADR-0007 series already
+  uses. It is a leaf — nothing `depends_on` it and no other service calls
+  it, unlike `connectors` and `actions`, which ADR-0007 moved into CORE
+  because the agent's tool surface could not reach them there. Nothing seeds
+  a token, so on a fresh CORE install it would be a capability pointed at
+  nothing, which is the failure ADR-0007 set out to avoid, until an operator
+  plants one and is configuring deliberately anyway. It is not hidden:
+  `/honeytokens` renders the `CapabilityUnavailable` panel naming the
+  profile and the command, so an analyst reads an absent capability rather
+  than a clean zero. And `infra/helm` ships the same posture
+  (`honeytokens.enabled: false`), so both deployment paths agree.
+
+  Cost is deliberately **not** the argument and the comment says so: the
+  image is 86 MB on disk, which would no more move the 8 GB CORE figure than
+  the 124.8 MiB ADR-0007 measured did. The CORE service set is unchanged, so
+  no published count moves — measured, not assumed: moving it in was tried
+  locally and reverted, and it changes **all three** keys (`core` 16 to 17,
+  `full` 22 to 23 and `prod:full` 21 to 22, because `extras` sits outside
+  `full` as well) and every figure registered in
+  `scripts/check_profile_service_counts.py`.
+
+- **Two live CORE service counts were watched by neither half of the count
+  gate, because both halves can only see one spelling each.** The validator
+  reads a figure written as a word, but only at a site `CLAIM_SITES` names;
+  `unregistered_mentions`, which exists to find the sites nobody registered,
+  matches digits only — and it opens `.md`, `.mdx`, `.ts` and `.tsx`, so a
+  shell script is outside it whatever the pattern. A sentence spelling the
+  number out in one of those files is therefore invisible to both at once.
+  That is the same blind spot that left `installation.md` reading "fourteen"
+  while every digit site was correct, reappearing in the next place nobody
+  looked: `scripts/doctor.sh` ("CORE runs sixteen services") and
+  `apps/web/src/components/ui/CapabilityUnavailable.tsx` ("CORE is sixteen
+  services"). Both are correct today and would have gone stale silently.
+
+  Registered individually rather than by teaching the sweep word forms,
+  which was measured before being rejected: it finds ten word-form mentions
+  in this tree and only these two are profile figures. The other eight count
+  Python services with a lock, services defaulting a dev-mode flag, and
+  services exposing `/metrics` — all correct sentences, and a gate that
+  flags correct content is one somebody switches off. The release notes and
+  the screenshots README are left alone for the reason `COUNT_MENTION_EXEMPT`
+  already gives: they describe a point in time, and forcing them to track the
+  current count would make them false about what they describe. 31 published
+  figures become 33, and both new sites were watched failing by moving the
+  compose entry and reverting it.
+
+- **The upgrade guide stopped describing the product five majors ago, and the
+  gap was in the one table whose job is to say what an operator must do.**
+  `apps/docs/docs/operations/upgrades.md` carried rows for v10 through v17
+  while v18, v19, v20, v21 and v22 had all shipped, so anyone crossing the
+  last five majors got nothing; the procedure beside it told them to
+  `git checkout v7.3.1` and called that the latest release. Five rows added,
+  each written from that release's own `### BREAKING` section rather than
+  summarised: three previously-inert IAM tables that now deny and confer
+  (v18), a `PATCH /alerts/{id}` that answered 200 for a write it dropped and
+  now answers 422 naming the route that does apply the field (v19),
+  `is_system` removed from case comments (v20), correlation grouping narrowing
+  on missing identifiers with reduction moving 42.6% → 24.5% (v21), and the
+  eight `GET /posture/summary` counts becoming nullable so "nothing has
+  collected" stops rendering as "clean" (v22).
+
+- **Three documented verification steps could not pass.** The page ended on
+  `curl -fsS http://localhost:8000/healthz`, and the API has never served
+  `/healthz` — it serves `/health`, `/livez` and `/readyz`, and `-f` turns the
+  404 into a non-zero exit, so the final check of every upgrade reported
+  failure on a healthy deployment. (`/healthz` is real on `services/realtime`
+  and `services/mcp`, which is where it came from; `kubernetes.md` had the
+  same path as an ingress rule pointed at the API.) It also told readers to
+  run `aisoc-cli benchmark` / `pnpm aisoc:benchmark`, neither of which exists
+  — the CLI has `keygen`, `serve`, `submit` and `replay` plus the `plugin`,
+  `detection`, `db` and `mcp` groups — and to check `/api/v1/system/version`,
+  a route that exists nowhere in the tree. The version check is recorded as
+  **not yet available**, naming the pull request that builds it, with no
+  response shape quoted because none has been read off a route.
+
+- **`ha-deployment.md` and `upgrades.md` contradicted each other about Helm,
+  and now agree.** "The chart does not run them" was true when written and is
+  not: the chart ships `templates/migrations-job.yaml`, a
+  `pre-install,pre-upgrade` hook, off by default and strict, so
+  `helm upgrade --set runMigrations=true` finally does what `upgrades.md` has
+  always claimed. `apps/docs/docs/deployment/kubernetes.md` gains the
+  migrations section `release-policy.md` has been pointing readers at while it
+  contained zero mentions of either word.
+
+- **The LTS section promised a support window the security policy does not
+  offer.** It said security fixes are backported to the previous major for 90
+  days; `SECURITY.md` gives 90 days to the *latest tagged release* and
+  best-effort to older tags, so the previous major had no guarantee at all.
+  Two published documents disagreeing about the support window is the tell;
+  the security policy is now cited as the policy of record.
+
+- **A recovery note for Grafana dashboards already lost to an image pull,
+  which says plainly that they cannot be recovered.** `/var/lib/grafana` had
+  no volume behind it, so UI-built dashboards, users, annotations and
+  browser-created alert rules lived in the container's writable layer and a
+  recreate discarded them — silently, because the provisioned dashboards come
+  back looking fine. The remedy is to rebuild once, export each to JSON and
+  commit it under `infra/docker/grafana/dashboards/` so provisioning owns it
+  and the next recreate is a non-event, with the caveat that
+  `allowUiUpdates: false` means editing a provisioned dashboard in the browser
+  is silently reverted.
+
+- **`backup-and-restore.md` and `upgrades.md` now refer to each other.**
+  Neither mentioned the other, despite the pre-upgrade backup being the only
+  thing between an operator and an unrecoverable schema — the API chain is
+  forward-only and has no downgrade. `backup-and-restore.md` also documents
+  the seventh component it gained, the credential key: why it is the one
+  artefact that refuses `BACKUP_ENCRYPTION=off`, what `restore.sh` does when a
+  *different* key is already present, and that `--component` takes
+  `credential_key`, which its own command line had omitted. The rollback
+  section is unchanged in substance and gains an explicit warning that the new
+  pre-upgrade dump is a restore path and **not** a downgrade.
+
+- **Upgrade-test coverage is stated precisely rather than generously.**
+  `Previous minor to this tree, with data present` is a required check; the
+  two cross-major legs (`v21.0.0` and `v17.0.0`) run unfiltered on every pull
+  request and are deliberately not required, because a matrix context name
+  carries the matrix value and requiring it would orphan a context on the next
+  version bump. The page says which two boundaries are exercised and that the
+  other four are not.
+
 ## [22.2.0] - 2026-11-05
 
 ### Added
@@ -621,9 +2062,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `fetch_alerts` through a transport that emulates Duo's availability cutoff
   and asserts that two back-to-back polls between them read every
   authentication — a path test rather than a source-inspection one.
-
-  Independently diagnosed and fixed by
-  [@rudycelekli](https://github.com/rudycelekli).
 
 - **`cloudflare_zt` WAF mode polled a route that does not exist, so it could
   never have returned an event on any deployment.**

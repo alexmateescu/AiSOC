@@ -1782,7 +1782,7 @@
     "category": "vcs",
     "connector_id": "gitlab",
     "connector_name": "GitLab",
-    "description": "GitLab group audit events and security vulnerability findings. Requires a Personal Access Token with the 'api' scope; the authenticating user must own the group. Self-managed GitLab works too \u2014 set gitlab_url to your instance base URL.",
+    "description": "GitLab group audit events and security vulnerabilities. Requires a Personal Access Token with the 'api' scope; the authenticating user must own the group. Vulnerabilities are read from the group security dashboard and need Ultimate \u2014 without it you get audit events only. Self-managed GitLab works too \u2014 set gitlab_url to your instance base URL.",
     "docs_url": "/docs/connectors/gitlab",
     "fields": [
       {
@@ -1801,7 +1801,7 @@
         "type": "string"
       },
       {
-        "help_text": "PAT with the 'api' scope. The authenticating user must be a group Owner to read audit events. Security findings require Ultimate.",
+        "help_text": "PAT with the 'api' scope. The authenticating user must be a group Owner to read audit events. Vulnerabilities additionally require Ultimate; on any lower plan the connector still polls audit events and says so in its logs.",
         "label": "Personal Access Token (scope: api)",
         "name": "token",
         "required": true,
@@ -3148,6 +3148,39 @@
         "help_text": "Override for Snyk Enterprise on-prem or EU tenants.",
         "label": "Base URL",
         "name": "base_url",
+        "required": false,
+        "type": "string"
+      }
+    ]
+  },
+  {
+    "capabilities": [
+      "pull_alerts"
+    ],
+    "category": "edr",
+    "connector_id": "sophos_central",
+    "connector_name": "Sophos Central",
+    "description": "Sophos Central alerts \u2014 endpoint and server threats, exploit and ransomware protection, intrusion prevention \u2014 via the SIEM Integration API, with the data region discovered from the credential. Read-only.",
+    "docs_url": "/docs/connectors/sophos-central",
+    "fields": [
+      {
+        "label": "Client ID",
+        "name": "client_id",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "help_text": "Created in Sophos Central under Global Settings \u2192 API Credentials Management.",
+        "label": "Client secret",
+        "name": "client_secret",
+        "required": true,
+        "type": "secret"
+      },
+      {
+        "help_text": "Leave blank for a credential created inside the tenant. Required for a partner or organization credential, which can see many tenants: the ID of the tenant whose alerts this connector reads.",
+        "label": "Tenant ID",
+        "name": "tenant_id",
+        "placeholder": "57ca9a6b-885f-4e36-95ec-290548c26059",
         "required": false,
         "type": "string"
       }

@@ -55,6 +55,7 @@ from __future__ import annotations
 import time
 import uuid
 from dataclasses import dataclass, field
+from typing import Protocol
 
 #: Default credential lifetime. Long enough for a deep investigation,
 #: short enough that a stalled run re-issues rather than continuing on a
@@ -89,6 +90,10 @@ DEFAULT_TTL_SECONDS = 1800
 #: scope full of plausible names reads as careful.
 KNOWN_TOOLS: frozenset[str] = frozenset(
     {
+        # Interactive console: only caller-authorized reads.
+        "copilot_alerts",
+        "copilot_record",
+        "copilot_entity_risk",
         # default_registry
         "lookup_file_hash",
         "extract_iocs",
@@ -143,6 +148,7 @@ KNOWN_TOOLS: frozenset[str] = frozenset(
 #: A tool in `KNOWN_TOOLS` and in no scope here is reachable by nobody,
 #: which is the correct default for a tool nobody has thought about.
 AGENT_TOOL_SCOPES: dict[str, frozenset[str]] = {
+    "copilot": frozenset({"copilot_alerts", "copilot_record", "copilot_entity_risk"}),
     # Reads alert context, extracts indicators, looks up techniques. Holds
     # no pivot that reaches customer telemetry, because this is the agent
     # an injected alert talks to first.
@@ -210,6 +216,51 @@ class ScopeDenied(RuntimeError):
     the structured ``{"error": ...}`` its loop contract requires, which is a
     conversion at one place rather than every caller parsing a string.
     """
+
+
+class IdentityLike(Protocol):
+    """The structural interface :class:`AgentIdentity` offers, and that
+    ``app.security.vaid_plugin.VaidBackedIdentity`` (beenuar/AiSOC#1739)
+    delegates to it rather than replacing.
+
+    A caller that only needs this interface — :func:`ToolRegistry.execute`,
+    ``run_with_tools`` — should type its ``identity`` parameter against this
+    rather than against :class:`AgentIdentity` directly, so that passing a
+    badge-wrapped identity (when the VAID plugin is enabled) type-checks
+    without either side depending on the other: this module has no business
+    importing the optional plugin that builds on it.
+    """
+
+    @property
+    def agent(self) -> str:
+        """The agent name this identity was issued for."""
+
+    @property
+    def run_id(self) -> str:
+        """The run this identity is scoped to."""
+
+    @property
+    def scopes(self) -> frozenset[str]:
+        """The tool names this identity may call."""
+
+    @property
+    def credential_id(self) -> str:
+        """Distinguishes two concurrent runs of the same agent in the audit log."""
+
+    def expired(self, *, now: float | None = None) -> bool:
+        """True once this identity's expiry has passed."""
+
+    def may(self, tool: str) -> bool:
+        """True if this identity may call ``tool`` right now."""
+
+    def require(self, tool: str, *, now: float | None = None) -> None:
+        """Raise unless this identity may call ``tool`` right now."""
+
+    def audit_row(self, tool: str, *, allowed: bool, reason: str | None = None) -> dict[str, object]:
+        """One row for the audit log. Never the tool's arguments."""
+
+    def with_granted_tools(self, tools: frozenset[str] | set[str] | list[str]) -> IdentityLike:
+        """A copy of this identity extended with newly-granted tools."""
 
 
 @dataclass(frozen=True)
