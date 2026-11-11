@@ -45,3 +45,14 @@ Workers untouched upstream. High-value pulls: connector cursor paging suite,
 METRICS_TOKEN fix (#1823 = our /metrics 401 noise), session renewal (#1818).
 Recipe ready: backup tag -> merge -> resolve 2 -> tests -> rebuild api/web/
 connectors -> verify queue/search/SSO.
+
+## Upstream sync complete (11-Nov ~18:50 UTC)
+Merged origin/main through 1da3b2233 (v23.0.0+v23.1.0, ~70 commits).
+Backup tag backup/pre-upstream-sync-20261111-1842. Conflicts resolved:
+alerts.py (import union), AlertsView.tsx (kept operator queue default +
+adopted useLocale). Applied migration 160_alert_reopen_on_recurrence.sql
+(GHSA-qp9f-459j-w89c: closed alerts now reopen on recurrence — matters for
+operator-review mode: closed FP that refires will reappear in queue).
+readyz fully green incl. schema_migrations_current; web 200; queue:
+37 triaged + 1 new. Pushed fork main f30311187. METRICS_TOKEN now in
+agents env (upstream #1823) -> /metrics 401 noise should stop.
