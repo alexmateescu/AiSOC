@@ -56,3 +56,12 @@ operator-review mode: closed FP that refires will reappear in queue).
 readyz fully green incl. schema_migrations_current; web 200; queue:
 37 triaged + 1 new. Pushed fork main f30311187. METRICS_TOKEN now in
 agents env (upstream #1823) -> /metrics 401 noise should stop.
+
+## Forensic truncation gate (12-Nov 09:30 UTC)
+Live incident: truncated forensic reply (finish_reason=length at 8192 test)
+fabricated a kernel-rootkit narrative about fra-hq-soc-01. Host verified
+clean (kernel/modules/ld.so.preload/SSH/persistence all checked; zero rule-
+521 hits in Wazuh index). Root cause: truncated JSON parsed verbatim into
+report. Fix 31e37f28d: finish_reason=length -> suppress narrative, mark
+INCONCLUSIVE conf 0.1; JSON extraction anchored to EOS + strict parse.
+Unit-tested clean/truncated/ramble/chatty. Deployed, agents healthy.
