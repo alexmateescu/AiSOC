@@ -791,6 +791,7 @@ services:
       # auto-resolved from outcome memory — every fused alert stays open in the
       # operator queue until a human dispositiones it.
       AISOC_AGENT_MEMORY_SUPPRESSION: "0"
+      AISOC_INVESTIGATOR_MAX_COMPLETION_TOKENS: ${AISOC_INVESTIGATOR_MAX_COMPLETION_TOKENS:-4096}
       QDRANT_URL: http://qdrant:6333
       NEO4J_URI: bolt://neo4j:7687
       NEO4J_USER: neo4j
