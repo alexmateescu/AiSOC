@@ -1883,6 +1883,11 @@ services:
     container_name: aisoc-prometheus
     ports:
       - "${AISOC_BIND_ADDR:-127.0.0.1}:9091:9090"
+    environment:
+      # The agents /metrics endpoint is bearer-gated by METRICS_TOKEN
+      # (upstream #1823); without this on the scraper every agents scrape
+      # 401s (172.18.0.22 GET /metrics 401, seen live 14-Nov).
+      - METRICS_TOKEN=${METRICS_TOKEN:-}
     volumes:
       - ./infra/docker/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       # Phase 2.4 — alert rules mounted as a directory so adding a
