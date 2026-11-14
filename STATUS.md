@@ -91,3 +91,13 @@ connector_type=inventory, ALL stamped the same microsecond (2026-11-12
 cvss, patch_due_date), zero non-inventory in scope. Resolved as
 benign_true_positive with tags bulk-backfill-cleanup + per-row rationale in
 ai_recommendations. Queue: new=0, triaged=12 for operator review.
+
+## Inventory flood — steady-state verified (14-Nov 06:05 UTC)
+Root cause of the 5516-flood: first-ever successful vuln_promotion sweep
+against backfilled asset_vulnerabilities (statement previously dead from the
+::jsonb bind bug upstream documented). Steady-state confirmed safe:
+40427 rows promoted (upsert refresh only, status untouched), 5417 tracked
+rows with ZERO meeting the bar (0 overdue/0 >9/0 exploited), all qualifying
+CVEs already have alert rows -> next sweeps insert nothing. Queue stays at
+operator triage only. Watch: connectors sweep log silent since restart —
+confirm _vuln_promotion_loop alive at next 6h window.
