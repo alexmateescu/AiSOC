@@ -112,3 +112,14 @@ extra_body enable_thinking=false on every gateway call. Post-fix probe:
 150-finding JSON, finish=stop, reasoning_tokens=0, parses clean. This is
 also the root cause of the earlier 8192 'rambling' - it was thinking, not
 answer ramble. Rebuilt+redeployed aisoc-agents; pushed to fork.
+
+## FP recurrence bug — root cause + fix (14-Nov ~08:30 UTC)
+User: M365 MailItemsAccessed keeps returning after FP-marking. Root cause:
+upstream migration 160 (GHSA-qp9f-459j-w89c) reopens ANY closed alert when
+the same fingerprint refires — reopen predicate checks status only, never
+disposition. Recurring benign mail access => reopened forever. Fix 8c1c18830:
+_REOPEN_CLOSED_ALERT_SQL excludes disposition='false_positive' (durable
+suppression; GHSA control intact for all other closes). Also swept 16 FP
+rows stuck in_progress/investigating -> resolved. Verified live: zero reopens
+of FP rows post-deploy. Thinking-mode now env-controlled AISOC_LLM_THINKING
+(default 0=off; probes: reasoning_tokens 4093/4096 pre-fix, 0 post).
