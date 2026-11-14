@@ -65,3 +65,14 @@ clean (kernel/modules/ld.so.preload/SSH/persistence all checked; zero rule-
 report. Fix 31e37f28d: finish_reason=length -> suppress narrative, mark
 INCONCLUSIVE conf 0.1; JSON extraction anchored to EOS + strict parse.
 Unit-tested clean/truncated/ramble/chatty. Deployed, agents healthy.
+
+## Upstream sync #2 (14-Nov 05:10 UTC)
+Merged v23.2.0-v23.4.0 (35 commits, clean, zero conflicts). Tag
+backup/pre-upstream-sync-20261114-0507. Security: GHSA-xh3r (passwords),
+GHSA-qf6m (/enrich auth), GHSA-qfvv (fusion tenant scoping) + CVE relocks.
+Ops: wazuh durable-cursor backfill, hunt-scheduler UUID fix, tracing self-
+target fix, OTX/MISP poll bounding. 12 services rebuilt+recreated; readyz
+green, web 200, truncation gate + token passthrough verified intact.
+NOTE: Wazuh durable-cursor backfill dumped ~5.5k historical alerts into
+'new' queue as expected — operator triage backlog now needs a bulk-triage
+decision (awaiting Alexandru).
