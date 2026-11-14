@@ -123,3 +123,14 @@ suppression; GHSA control intact for all other closes). Also swept 16 FP
 rows stuck in_progress/investigating -> resolved. Verified live: zero reopens
 of FP rows post-deploy. Thinking-mode now env-controlled AISOC_LLM_THINKING
 (default 0=off; probes: reasoning_tokens 4093/4096 pre-fix, 0 post).
+
+## Upstream PRs opened (14-Nov ~08:12 UTC)
+Five independent PRs vs beenuar/AiSOC main, each with completed template:
+- #1873 fix(agents): truncation gate -> INCONCLUSIVE (forensic_agent.py)
+- #1874 fix(agents): AISOC_LLM_THINKING env var (factory.py + compose)
+- #1875 fix(fusion): FP disposition suppresses recurrence reopen (alert_sink.py)
+- #1876 fix(infra): prometheus bearer auth / ingest port / dead job
+- #1877 fix(api): alerts search param wired to ILIKE
+AlertsView operator-queue default intentionally NOT PR'd (standing local pref).
+Eval harness: full substrate suite blocked on host (no pydantic); ran
+--telemetry-only baseline (200 cases, all_passed=true) cited in PR bodies.
