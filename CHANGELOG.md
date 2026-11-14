@@ -9,6 +9,309 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Vectra AI Platform connector.** `vectra_ai` reads Vectra AI Platform
+  network, identity and cloud detections through the v3.4 detection events
+  API, `GET /api/v3.4/events/detections`, with OAuth2 client credentials
+  exchanged at the tenant's own portal (#1858, part of #356). The portal URL
+  must be HTTPS and the secret key is vaulted; the bearer token is cached
+  until shortly before it expires and exchanged once more if Vectra refuses
+  a cached one early. The read opens at the window's start through
+  `event_timestamp_gte` and follows `next_checkpoint` while
+  `remaining_count` says there is more, building every request from the
+  configured portal; a refused or unreachable opening request fails the poll,
+  a later page failing keeps the pages already read, and the 25-page bound is
+  logged when it binds. The stream emits a detection again on every update,
+  so `external_id` is the `detection_id` and a poll raises the newest event
+  of each detection once; an event stamped after the read began is left for
+  the next window, and a detection a Vectra triage rule has marked is not
+  raised. A host detection fills the host column and an account detection
+  the user column, never both. Vectra does not score individual detections,
+  so no severity tier is invented from `threat`, `certainty` or the
+  undocumented `severity`: all three stay in `raw_event`, and
+  `ocsf_classes.go` files `vectra_ai` at 2001 Security Finding, which
+  promotes whatever the severity. Setup and troubleshooting are on the new
+  [Vectra AI Platform](apps/docs/docs/connectors/vectra-ai.md) page.
+
+### Security
+
+- **`hono` and `@hono/node-server` override floors raised** to `>=4.13.16`
+  and `>=2.1.6` (Dependabot #236–#242; both ride in transitively through
+  `@modelcontextprotocol/sdk`). Within-major moves of existing floors in the
+  root `pnpm.overrides`, re-resolved to 4.13.18 / 2.1.8 — the scoped-range
+  discipline from the minimatch incident, not a blanket pin.
+
+
+- **`opentelemetry-api` re-locked to 1.45.2 across all thirteen Python
+  services** (CVE-2026-126360, high). The CVE published against 1.45.1 the
+  same day it started failing every pull request's security audit — the
+  recorded fleet-level signature. The whole OpenTelemetry family moves
+  together (sdk 1.45.2, instrumentation 0.66b2) because the sdk pins the api
+  exactly, and `fastapi` re-resolves to 0.162.7 inside its gate-pinned range
+  (`>=0.117,<0.163`), identical in every lock per the pin-agreement gate.
+  Lock-only; no manifest ranges moved.
+
+
+- **The privacy redactor now catches modern provider keys, every GitHub
+  token kind, and whole PEM private-key bodies** (#1869). Three gaps in
+  `Pseudonymizer.redact()`: the `sk-`/`rk-` pattern had no `-`/`_` in its
+  class, so `sk-proj-…`, `sk-ant-api03-…` and `sk-svcacct-…` keys passed
+  through to hosted models on the LLM egress path; only `ghp_` GitHub
+  tokens were matched, leaving `gho_`/`ghu_`/`ghs_`/`ghr_`/`github_pat_`
+  in clear; and the PEM pattern matched only the `BEGIN` header line, so
+  the base64 key body and `END` line stayed in the text — on the public
+  replay path, which has no contract gate, every PEM body leaked. The new
+  patterns require a 20-character dash-free run (kebab-case names like
+  `rk-worker-7d9f8b6c4-xk2lp` and `sk-learn` stay), match all GitHub token
+  kinds, and consume the whole PEM block header-to-matching-END for any key
+  type including ENCRYPTED/DSA/PGP, tolerating JSON-escaped newlines;
+  certificates and public keys are deliberately not secrets. Verified
+  linear-time on 100 KB adversarial inputs; the vendored copy in
+  `services/api/_vendor` is regenerated and the sync gate pins it.
+  Reported and fixed by @goranai with runnable repros; three of the five
+  new tests fail on the old redactor.
+
+- **`dnspython` re-locked to 2.9.2 in the api service** (CVE-2026-128089,
+  high; rides in transitively through `email-validator`). The second CVE to
+  publish against the locked tree inside one day — lock-only, no manifest
+  range moves, three lines of churn.
+
+### Fixed
+
+- **A Wazuh source-side outage no longer deletes its window from the lake**
+  (#1860). The connector's poll window was `[now - since, now]`: when the
+  indexer ran behind the manager — a flood-stage watermark blocking filebeat
+  for eight hours in the reporting deployment — every poll succeeded on an
+  empty window, the outage-backfill worker never fired (it keys on the
+  connector's *own* failures), and the backlog that drained later carried
+  original timestamps inside windows already polled, so nothing ever
+  requested it again. Canary events proved the loss end to end. The wazuh
+  alert stream now carries a durable event-time cursor (the platform's
+  existing checkpoint machinery, persisted only after ingest accepts) and —
+  new in the base contract — `checkpointed_since_seconds()` *opens the
+  request window at the cursor*: successful-but-empty polls hold the left
+  edge in place and the window grows over the gap instead of sliding past
+  it, bounded by a 7-day lookback cap that logs when it binds. Rows the
+  overlap re-reads are dropped by the cursor before resubmission, and the
+  paging fix from #1820 composes into incremental backfill: a backlog
+  larger than the page cap advances the cursor as far as it read and the
+  next poll resumes there. Manual backfill is the same knob: patch
+  `connector_config.checkpoint.time` back and the next poll re-reads from
+  there. The vulnerability stream deliberately stays on the clock window —
+  one instance persists one cursor, and splitting it across two streams
+  would let whichever read last drag the other's left edge forward.
+  Reported by @pitimon with production canary evidence and the fix
+  direction this follows.
+
+- **An OTX mega-pulse no longer stalls the threat-intel poll** (#1861). A
+  subscribed pulse can be an aggregate feed carrying over a million
+  indicators (observed live: 1,263,473 in one pulse); `handle_otx_feed`
+  materialised every pulse's IOCs into one list and handed it to
+  `ingest_iocs` in a single call — per-item Redis dedup plus Qdrant
+  embedding on a million items meant the poll neither finished nor errored,
+  and every store stayed empty (`otx=0`). The client now yields IOCs through
+  a generator and the handler flushes in bounded batches of 1,000, keeping
+  memory and each ingest call bounded regardless of pulse size, with the
+  pulse-level context (tags, malware families, ATT&CK ids, TLP) still riding
+  on every indicator. OTX fetch and handler failures log `repr(exc)` —
+  several httpx transport exceptions stringify to an empty string, and
+  `error=""` told an operator nothing. Contributed by @43n51c; pinned by a
+  batch-bound test that fails on the old handler.
+
+- **A threat-intel store that was down at first write is backfilled instead
+  of skipped forever** (#1856). `ingest_iocs` deduplicated on a single global
+  Bloom key (`type:value`) recorded *before* the best-effort writes to
+  OpenSearch, Qdrant and Neo4j, so a sink unreachable at first write never
+  received the batch — every later poll read it as duplicate. On a CORE
+  install (no OpenSearch), a feed landed in Qdrant and marked the key; moving
+  to `full` never backfilled OpenSearch, leaving the `/iocs` search API and
+  enrichment feed-lookup blind to all but a handful of entries (observed
+  live: Qdrant 1,779 KEV rows, OpenSearch 10). Dedup is now keyed per sink
+  (`{sink}:{type}:{value}`) and recorded only after that sink accepts the
+  write; steady-state dedup for present stores is unchanged, pinned by tests
+  that fail on the old pipeline. Kafka `NEW_IOC` events now fire only for
+  indicators at least one sink actually stored (they previously fired even
+  when every sink failed), and the retro-hunt consumer dedups re-emissions
+  against its existing exposure rows. Contributed by @43n51c — the backfill
+  half of #1278, whose reporting half fixed the misleading `indexed: 0`.
+- **Federated-search docs corrected: the feature is on by default, not
+  opt-in** (#1865). The console page's "Enabling it" section said
+  `/api/v1/federated/*` answers `404` while the flag is *unset* and told
+  operators to set `AISOC_FEATURE_FED_SEARCH=true` to turn it on. The setting
+  defaults to `true`, so it is an opt-*out*: a stock install already serves
+  federated search, and `404` is returned only when the flag is explicitly
+  `false`. The page now documents it as on-by-default. Contributed by @43n51c.
+
+- **A large MISP or OpenCTI poll is ingested in bounded batches instead of one
+  unbounded call** (#1864). `handle_misp_feed` and `handle_opencti_feed` accumulated
+  every event's (or indicator node's) IOCs into a single list and handed the
+  whole thing to `ingest_iocs` in one call. `ingest_iocs` does per-item work —
+  a Redis dedup round-trip and a Qdrant embedding — for every indicator, so a
+  busy instance's 24-hour window (tens of thousands of attributes) held the
+  entire feed in memory and stalled the poll. Both handlers now stream their
+  IOCs and flush every 1,000, bounding each `ingest_iocs` call regardless of
+  how large the feed is. Contributed by @43n51c.
+
+- **Scheduled hunts no longer crash reading the lake on a slug tenant ref**
+  (`hunt.telemetry.lake.failed: Cannot parse uuid default`). The hunt
+  scheduler's process-wide `tenant_ref` defaults to `default`, and the lake
+  reader bound it straight into a ClickHouse query whose `tenant_id` is a UUID
+  column — a parse error on every tick, not a miss, so a `full`-profile
+  deployment logged the failure every 30 minutes and scheduled hunts read no
+  telemetry. The scheduler now resolves the ref to a tenant UUID (the Postgres
+  store path already did) before the lake read; an unresolvable ref hands the
+  loader `None`, which its existing no-tenant guard skips cleanly, and the
+  synthetic provider is unaffected.
+
+## [23.4.0] - 2026-11-13
+
+### Added
+
+- **Huntress connector.** `huntress` reads Huntress Managed EDR incident
+  reports — the footholds, ransomware canaries, process, antivirus, identity
+  and SIEM detections a Huntress SOC analyst has confirmed and delivered —
+  through `GET /v1/incident_reports` with HTTP Basic auth (#1845, part of
+  #356). The API host is fixed, so the credential is only ever sent to
+  Huntress, and both halves of it are vaulted. The list has no time filter,
+  so it is read by `updated_at`, newest first, at the documented 500-report
+  maximum through `read_token_pages`, following `pagination.next_page_token`
+  (never `next_page_url`) until a page passes the start of the window. The
+  window is then applied to `sent_at`, closed at the moment the read began:
+  a report is raised once, when Huntress delivers it, and not again each
+  time it is closed, commented on or remediated; a report never delivered is
+  not raised. A report names its host only by agent id, so each distinct
+  agent is looked up once through `GET /v1/agents/{id}` for its hostname,
+  addresses and OS — at most 20 a poll and stopping on a 429, because the
+  account allows 60 requests a minute — and a failed lookup costs the host,
+  never the report. Severity keeps Huntress's `low`, `high` and `critical`,
+  and `critical` stays `critical`. Setup and troubleshooting are on the new
+  [Huntress](apps/docs/docs/connectors/huntress.md) page.
+
+### Security
+
+- **An empty password can neither be set nor used** (GHSA-xh3r-vqgc-cv78).
+  `POST /api/v1/tenants/me/users` declared its password as a bare string, so
+  an explicit `""` passed validation, was bcrypt-hashed like any password,
+  and `POST /api/v1/auth/login` accepted the empty string for that account
+  from then on — `verify_password("", bcrypt(""))` is simply true. Creation
+  now enforces NIST SP 800-63B's eight-character floor (and refuses past
+  bcrypt's 72-byte truncation boundary rather than silently cutting), and
+  login refuses the empty string at the boundary, so an account row created
+  with an empty password *before* the floor landed is locked out rather
+  than quietly serviceable forever — an admin recovers it by setting a real
+  password. SCIM and invite-pending accounts are unaffected (their sentinel
+  markers are non-empty and already fail verification). Reported by
+  abdochtouki with a live PoC.
+
+### Fixed
+
+- **UEBA, honeytokens and purple-team tracing no longer points at the
+  service's own container** (#1848). All three built an OTLP span exporter
+  inline in `main.py` against `settings.otel_endpoint`, whose default of
+  `http://localhost:4317` is — inside a container — the service itself, so
+  tracing could never reach the collector (`otel-collector:4317`, behind the
+  compose `monitoring` profile) and UEBA's batch processor retried a refused
+  connection every few seconds, hundreds of export-failure log lines on a
+  stand without the profile. The three now share a guarded
+  `app/core/telemetry.py` (held byte-identical by
+  `scripts/sync_vendored_telemetry.py --check` in CI): quiet by default
+  (`OTEL_EXPORTER=none` — deliberately diverging from api/agents' `otlp`
+  default, because these services emit spans continuously and a missing
+  collector must cost one log line, not a retry loop), with
+  `OTEL_EXPORTER=otlp` targeting `OTEL_EXPORTER_OTLP_ENDPOINT`
+  (default `http://otel-collector:4317`, never localhost). Compose passes
+  both knobs through. The dead `otel_endpoint` config field is removed —
+  a deployment that set `OTEL_ENDPOINT`/`UEBA_OTEL_ENDPOINT` should set
+  `OTEL_EXPORTER=otlp` and `OTEL_EXPORTER_OTLP_ENDPOINT` instead. Reported
+  by @43n51c with the repro and the fix sketch this follows.
+
+## [23.3.0] - 2026-11-12
+
+### Security
+
+- **The enrichment service authenticates its callers, and the console's
+  unauthenticated enrichment proxy is gone** (GHSA-qf6m-hgwv-65f9). `POST
+  /enrich` and `/enrich/bulk` ran behind no authentication, and two Next
+  rewrites (`/api/v1/enrichment/lookup`, `/api/v1/enrichment/bulk`) made them
+  same-origin reachable from any browser that could reach the console — an
+  unauthenticated client could run enrichment lookups and spend the
+  deployment's threat-intel provider quota (VirusTotal, AbuseIPDB, GreyNoise,
+  …), and because the rate limiter was keyed on the request body's
+  `tenant_id`, rotating that string minted a fresh bucket per request. The Go
+  service now carries `internal/tenantauth`, a behaviour-identical port of
+  the Python services' vendored `tenant_scope` contract: console HS256
+  session tokens (alg-pinned, `type=access`, expiry, tenant claim) or the
+  service token with a declared `X-AiSOC-Tenant-ID`, failing closed when
+  neither is configured, with the same three-condition dev bypass. The rate
+  limiter and cache are keyed on the authenticated tenant; a body naming any
+  other tenant — or an arbitrary bucket-minting string — is refused. The two
+  dead console rewrites were removed (nothing in the console calls them), and
+  the real callers — fusion's fuse-time `AlertEnricher`, the investigator's
+  `enrich_ioc`, the playbook `enrich` step, and the context bundle's
+  threat-intel fetch — authenticate with the service token and the run's own
+  tenant. Compose wires `SECRET_KEY` and the dev-bypass trio into the
+  enrichment service like its Python siblings. Reported by naroSEC.
+
+- **Fusion `POST /process` no longer trusts the body's `tenant_id`**
+  (GHSA-qfvv-rf5p-6h69). The synchronous fusion entrypoint authenticated its
+  caller but never intersected the submitted alert's `tenant_id` with the
+  credential's scope, and required no role — so any logged-in user of any
+  tenant, including `viewer`, could inject alerts into another tenant's live
+  dedup/correlation/RBA state and register dedup fingerprints under the
+  victim tenant, suppressing their real alerts. The route now resolves the
+  tenant through `scoped_tenant_or_403` (console claim, or the service
+  token's declared `X-AiSOC-Tenant-ID`) and requires a role holding
+  `alerts:write`, mirrored from the API's `ROLE_PERMISSIONS` and pinned by a
+  drift test. The same contract now covers the sibling write routes:
+  `/ml/feedback` (body tenant scoped + role-gated — cross-tenant feedback
+  poisoned the ranker), `/confidence/score` (body tenant scoped),
+  `/ml/retrain` (role-gated), and `/dlq/replay` refuses console sessions
+  outright — its audited operator door is `POST
+  /api/v1/health/dead-letters/replay` on the API, and the fusion-side route
+  accepted any tenant's session with any role while bypassing the permission
+  check and audit row. Reported by 1ceS1amese.
+
+### Added
+
+- **Cisco Secure Endpoint connector.** `cisco_secure_endpoint` reads Cisco
+  Secure Endpoint (formerly AMP for Endpoints) detections — threats,
+  quarantines, exploit prevention, behavioural protection, indicators of
+  compromise and threat hunting incidents — through `GET /v1/events` with
+  HTTP Basic auth (#356). The region is a select over Cisco's three clouds
+  (North America, Europe, Asia Pacific/Japan/China) rather than a URL, so the
+  API key is only ever sent to a Cisco host. The window is read to the end
+  through `read_offset_pages` at the documented 500-event maximum, with each
+  following page built from the configured region rather than taken from
+  `metadata.links.next`; the list is newest first, so a row pushed across a
+  page boundary by an event recorded mid-read is dropped by its `id`. Only
+  events Cisco rates with a severity are returned: policy updates, scans and
+  installs carry none, and since these events are filed as OCSF 2001 Security
+  Findings, which fusion promotes unconditionally, they would otherwise reach
+  the queue as alerts; how many were skipped is logged as
+  `cisco_secure_endpoint.unrated_events_skipped`. Severity keeps Cisco's Low,
+  Medium, High and Critical, and `Critical` stays `critical`. Setup, regions
+  and troubleshooting are on the new
+  [Cisco Secure Endpoint](apps/docs/docs/connectors/cisco-secure-endpoint.md)
+  page.
+
+## [23.2.0] - 2026-11-11
+
+### Added
+
+- **Per-IOC threat-intel feed lookup, wired into scoring and investigation.**
+  The confidence scorer has always recognised feed-sourced TI hits — `misp`,
+  `otx`, `taxii`, `kev` — but nothing populated those slots: the feeds landed
+  in the threat-intel stores while the scorer read `fused.enrichments`, which
+  only the enrichment service writes. A new `ThreatIntelClient` in
+  `services/enrichment` asks `services/threatintel`'s existing per-IOC search
+  on every IP, domain, URL and hash, and a match surfaces under the matching
+  feed's own source name, so a feed hit now moves the alert's confidence and
+  appears in investigations. Two tenant-propagation gaps are closed with it:
+  fusion's `AlertEnricher` carries the alert's tenant on each bulk item, and
+  the investigator's `enrich_ioc` forwards the run's tenant bound by the
+  registry closure — never an LLM-visible argument. The lookup URL is built
+  positionally (`url.URL` + `url.Values`), confining the attacker-influenced
+  IOC value to the encoded query string.
+
 - **Sophos Central connector.** `sophos_central` reads Sophos Central alerts
   — endpoint and server threats, exploit and ransomware protection, intrusion
   prevention — through `GET /siem/v1/alerts`, the feed Sophos's own SIEM
@@ -47,6 +350,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   line appended to the released `[22.1.0]` section. That section is restored
   to its tag's bytes and the credit lives in `.github/CREDITS.md`, the
   surface built to stay current.
+
+- **A saved connector can be edited from the console.** **Configure** on a
+  connector card was disabled ("planned for v1.1") and its handler answered
+  "Delete + re-add", while the GitHub, GitLab, Falco, Tines, Torq and Entra
+  pages already told operators to rotate credentials through the AiSOC
+  connector edit screen. Re-adding a connector costs its id, its checkpoint
+  (the first poll re-reads the whole lookback), its event counters and, for
+  push connectors, the ingest token the sender is configured with. The new
+  `EditConnectorModal` builds its form from the catalog schema, prefills the
+  stored settings, starts every credential blank and sends only what changed:
+  a typed credential replaces its own key, a blank one is kept, a cleared
+  optional setting is removed. To make that safe,
+  `PATCH /api/v1/connectors/{id}` now merges `auth_config` and
+  `connector_config` into the stored row one top-level key at a time — a
+  supplied key replaces, `null` removes, an omitted key survives — under a
+  row lock, so the scheduler's checkpoint write cannot be overwritten by a
+  concurrent edit. Before this, both blobs were replaced wholesale: re-typing
+  one secret erased the others, a change to one setting erased the
+  `checkpoint` and `filter_rules` beside it, and `{"auth_config": {}}` erased
+  every credential. An API client that relied on the replacement to drop a
+  key now sends that key as `null`. A blank `name` is refused with 422
+  instead of being stored.
+
+- **Shodan, URLScan and IPInfo enrichment is real.** The enrichment service
+  read `SHODAN_API_KEY`, `URLSCAN_API_KEY` and `IPINFO_API_KEY` from its
+  config and did nothing with any of them — an operator setting a key got a
+  silent no-op while `PortInfo` sat documented as "detected by Shodan" with
+  nothing filling it. Three clients now fill that gap: Shodan host lookups
+  (open ports, tags, hostnames), URLScan verdicts and IPInfo geolocation/ASN,
+  each wired into the enricher chain with transport-level tests, compose and
+  env documentation. One correction to the contributed code: Go's
+  `*url.Error` stringifies the full URL it failed on, so a key in the query
+  string reached the logs through any wrapped transport error — IPInfo's
+  token moves to the vendor-supported `Authorization: Bearer` header, and
+  Shodan (whose contract requires `?key=` in the URL) redacts the query
+  before wrapping, both pinned by tests. Contributed by @43n51c
+  ([#1831](https://github.com/beenuar/AiSOC/pull/1831), carried in
+  [#1835](https://github.com/beenuar/AiSOC/pull/1835)).
 
 ### Fixed
 
@@ -139,6 +480,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stale expiry cache overrule a renewed JWT. The Explain stream also receives
   its missing proxy rule to the agents service. Token lifetimes and server-side
   revocation checks are unchanged.
+
+- **Copilot chat is grounded in caller-scoped security data instead of
+  answering from prose alone.** The chat transports bind three read-only
+  tools — alerts, one record by UUID, Fusion entity risk — that forward the
+  caller's own authorization and tenant to the core API, which remains the
+  authority: no LLM argument or page context can choose a URL, credential or
+  tenant; `kind` is enum-bound, `record_id` round-trips `uuid.UUID` with a
+  response-echo check, entity paths are percent-encoded, redirects are
+  disabled and reads bounded. The text cache is disabled when tools are
+  bound (a cached prose answer must not impersonate a live read), a
+  truncated tool loop no longer publishes its last raw lookup as a
+  conclusion, and the Fusion risk endpoints answer 503 instead of
+  fabricating an empty queue. Contributed by @knowlet
+  ([#1819](https://github.com/beenuar/AiSOC/pull/1819), carried in
+  [#1828](https://github.com/beenuar/AiSOC/pull/1828)).
+
+- **The frozen-changelog gate no longer reds the release PR it exists to
+  protect.** Promoting `[Unreleased]` to `[X.Y.Z]` creates a released
+  section whose tag can only exist after the release PR merges, which the
+  two-day-old gate reported as UNVERIFIABLE and fatal — every future
+  release would have failed its own required check. The newest released
+  section, when its version equals the working tree's `VERSION` file and
+  its tag does not resolve, is now reported as an explicit PENDING state
+  instead of a failure; the exception is bounded on every side (an untagged
+  section anywhere else stays fatal, a pending version whose tag already
+  exists is compared like any other, a newest section not matching
+  `VERSION` stays fatal) and each bound is pinned by its own test.
+
+- **The Agentmetry inbox template preserves the context an investigation
+  needs.** Selected account provenance, supporting-event references,
+  recorder coverage and MCP schema observations now survive normalisation
+  under `finding.evidence.agentmetry`, with reported account claims kept
+  separate from `actor.user` and full account emails and opaque account/user
+  IDs excluded. Field paths, the activity/finding split, the severity ladder
+  and the OCSF 1.1.0 declaration are unchanged
+  ([#1826](https://github.com/beenuar/AiSOC/pull/1826), from discussion
+  [#1577](https://github.com/beenuar/AiSOC/discussions/1577)).
+
+### Security
+
+- **The mobile app's `node-forge` floor rises to 1.4.3.** All four advisories
+  against 1.4.2 (Ed25519 small-order acceptance, two TLS-client crash paths,
+  ReDoS in header trimming) name 1.4.3 as the first patched version; the
+  existing override floor moved from `>=1.4.1` and exactly one package moved
+  in the re-resolved lock, at both import sites. Closes Dependabot alerts
+  #232–#235 ([#1829](https://github.com/beenuar/AiSOC/pull/1829)).
+
+- **The session live check validates its fixture token's shape.** The script
+  that exercises session refresh against a live stack now refuses a fixture
+  credential that is not structurally a JWT before sending it anywhere,
+  closing CodeQL alert #1129
+  ([#1830](https://github.com/beenuar/AiSOC/pull/1830)).
 
 ## [23.1.0] - 2026-11-10
 

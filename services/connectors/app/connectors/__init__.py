@@ -34,6 +34,7 @@ from app.connectors.base import BaseConnector, ConnectorSchema, Field, OAuthHint
 from app.connectors.box import BoxConnector
 from app.connectors.carbon_black import CarbonBlackConnector
 from app.connectors.chronicle import ChronicleConnector
+from app.connectors.cisco_secure_endpoint import CiscoSecureEndpointConnector
 from app.connectors.cisco_umbrella import CiscoUmbrellaConnector
 from app.connectors.cloudflare import CloudflareConnector
 from app.connectors.cloudflare_zt import CloudflareZTConnector
@@ -60,6 +61,7 @@ from app.connectors.github import GitHubConnector
 from app.connectors.gitlab import GitLabConnector
 from app.connectors.google_workspace import GoogleWorkspaceConnector
 from app.connectors.greynoise import GreyNoiseConnector
+from app.connectors.huntress import HuntressConnector
 from app.connectors.imperva import ImpervaConnector
 from app.connectors.jira_connector import JiraConnector
 from app.connectors.jumpcloud import JumpCloudConnector
@@ -104,6 +106,7 @@ from app.connectors.torq import TorqConnector
 from app.connectors.trellix_helix import TrellixHelixConnector
 from app.connectors.trend_vision_one import TrendVisionOneConnector
 from app.connectors.vault import VaultConnector
+from app.connectors.vectra_ai import VectraAIConnector
 from app.connectors.wazuh import WazuhConnector
 from app.connectors.windows_event import WindowsEventConnector
 from app.connectors.wiz import WizConnector
@@ -136,6 +139,7 @@ _CONNECTOR_CLASSES: tuple[type[BaseConnector], ...] = (
     BoxConnector,
     CarbonBlackConnector,
     ChronicleConnector,
+    CiscoSecureEndpointConnector,
     CiscoUmbrellaConnector,
     CloudflareConnector,
     CloudflareZTConnector,
@@ -161,6 +165,7 @@ _CONNECTOR_CLASSES: tuple[type[BaseConnector], ...] = (
     GitLabConnector,
     GoogleWorkspaceConnector,
     GreyNoiseConnector,
+    HuntressConnector,
     ImpervaConnector,
     JiraConnector,
     JumpCloudConnector,
@@ -204,6 +209,7 @@ _CONNECTOR_CLASSES: tuple[type[BaseConnector], ...] = (
     TrellixHelixConnector,
     TrendVisionOneConnector,
     VaultConnector,
+    VectraAIConnector,
     WazuhConnector,
     WindowsEventConnector,
     WizConnector,
@@ -268,6 +274,7 @@ __all__ = [
     "CONNECTOR_REGISTRY",
     "CarbonBlackConnector",
     "ChronicleConnector",
+    "CiscoSecureEndpointConnector",
     "CiscoUmbrellaConnector",
     "CloudflareConnector",
     "CloudflareZTConnector",
@@ -289,6 +296,7 @@ __all__ = [
     "GCPSCCConnector",
     "GitHubConnector",
     "GoogleWorkspaceConnector",
+    "HuntressConnector",
     "JiraConnector",
     "KubernetesAuditConnector",
     "LaceworkConnector",
@@ -324,6 +332,7 @@ __all__ = [
     "TrellixHelixConnector",
     "TrendVisionOneConnector",
     "VaultConnector",
+    "VectraAIConnector",
     "WazuhConnector",
     "WizConnector",
     "ZscalerConnector",

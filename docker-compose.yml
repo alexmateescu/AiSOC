@@ -698,6 +698,20 @@ services:
       ABUSEIPDB_API_KEY: ${ABUSEIPDB_API_KEY:-}
       GREYNOISE_API_KEY: ${GREYNOISE_API_KEY:-}
       SHODAN_API_KEY: ${SHODAN_API_KEY:-}
+      URLSCAN_API_KEY: ${URLSCAN_API_KEY:-}
+      IPINFO_API_KEY: ${IPINFO_API_KEY:-}
+      THREATINTEL_SERVICE_URL: ${THREATINTEL_SERVICE_URL:-http://threatintel:8005}
+      AISOC_SERVICE_TOKEN: ${AISOC_SERVICE_TOKEN:-}
+      # /enrich and /enrich/bulk authenticate their callers
+      # (GHSA-qf6m-hgwv-65f9): SECRET_KEY verifies console sessions, the
+      # service token above authenticates fusion/agents, and the dev-bypass
+      # trio matches what fusion, connectors and threatintel already carry.
+      SECRET_KEY: ${SECRET_KEY:-}
+      AISOC_DEV_MODE: ${AISOC_DEV_MODE:-0}
+      # What this deployment published, so the service can refuse the
+      # anonymous auth shim on an address someone else can reach. It binds
+      # 0.0.0.0 inside the container and cannot tell otherwise.
+      AISOC_PUBLISHED_BIND_ADDRS: ${AISOC_BIND_ADDR:-127.0.0.1}
     networks:
       - aisoc
     restart: unless-stopped
@@ -1426,6 +1440,12 @@ services:
     ports:
       - "${AISOC_BIND_ADDR:-127.0.0.1}:8007:8004"
     environment:
+      # Tracing is quiet by default (issue #1848): the exporter used to point
+      # at localhost:4317 — this container itself — so the batch processor
+      # retried a refused connection every few seconds. Set
+      # OTEL_EXPORTER=otlp alongside `--profile monitoring` to trace.
+      OTEL_EXPORTER: ${OTEL_EXPORTER:-none}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
       # Two roles, the same split the api service uses. This service manages
       # its own schema through alembic, so it needs the owner to apply DDL and
       # must not serve requests as it. The marker on the second line below is
@@ -1513,6 +1533,12 @@ services:
     ports:
       - "${AISOC_BIND_ADDR:-127.0.0.1}:8008:8005"
     environment:
+      # Tracing is quiet by default (issue #1848): the exporter used to point
+      # at localhost:4317 — this container itself — so the batch processor
+      # retried a refused connection every few seconds. Set
+      # OTEL_EXPORTER=otlp alongside `--profile monitoring` to trace.
+      OTEL_EXPORTER: ${OTEL_EXPORTER:-none}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
       # Two roles, the same split the api service uses. This service manages
       # its own schema through alembic, so it needs the owner to apply DDL and
       # must not serve requests as it. The marker on the second line below is
@@ -1570,6 +1596,12 @@ services:
     ports:
       - "${AISOC_BIND_ADDR:-127.0.0.1}:8006:8006"
     environment:
+      # Tracing is quiet by default (issue #1848): the exporter used to point
+      # at localhost:4317 — this container itself — so the batch processor
+      # retried a refused connection every few seconds. Set
+      # OTEL_EXPORTER=otlp alongside `--profile monitoring` to trace.
+      OTEL_EXPORTER: ${OTEL_EXPORTER:-none}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
       # Two roles, the same split the api service uses. This service manages
       # its own schema through alembic, so it needs the owner to apply DDL and
       # must not serve requests as it. The marker on the second line below is

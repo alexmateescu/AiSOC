@@ -764,6 +764,52 @@
   },
   {
     "capabilities": [
+      "pull_alerts"
+    ],
+    "category": "edr",
+    "connector_id": "cisco_secure_endpoint",
+    "connector_name": "Cisco Secure Endpoint",
+    "description": "Cisco Secure Endpoint (formerly AMP for Endpoints) detections \u2014 threats, quarantines, exploit prevention, behavioural protection, indicators of compromise and threat hunting incidents \u2014 via the v1 events API. Read-only.",
+    "docs_url": "/docs/connectors/cisco-secure-endpoint",
+    "fields": [
+      {
+        "help_text": "The Secure Endpoint cloud the console and the API credential live in.",
+        "label": "Region",
+        "name": "region",
+        "options": [
+          {
+            "label": "North America (api.amp.cisco.com)",
+            "value": "nam"
+          },
+          {
+            "label": "Europe (api.eu.amp.cisco.com)",
+            "value": "eu"
+          },
+          {
+            "label": "Asia Pacific, Japan and China (api.apjc.amp.cisco.com)",
+            "value": "apjc"
+          }
+        ],
+        "required": true,
+        "type": "select"
+      },
+      {
+        "label": "API client ID",
+        "name": "client_id",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "help_text": "Created in the Secure Endpoint console under Accounts \u2192 API Credentials. Read-only scope is enough.",
+        "label": "API key",
+        "name": "api_key",
+        "required": true,
+        "type": "secret"
+      }
+    ]
+  },
+  {
+    "capabilities": [
       "pull_alerts",
       "query_logs",
       "pivot_domain",
@@ -1876,6 +1922,32 @@
         "name": "query",
         "required": false,
         "type": "string"
+      }
+    ]
+  },
+  {
+    "capabilities": [
+      "pull_alerts"
+    ],
+    "category": "edr",
+    "connector_id": "huntress",
+    "connector_name": "Huntress",
+    "description": "Huntress Managed EDR incident reports \u2014 footholds, ransomware canaries, process, antivirus, identity and SIEM detections a Huntress SOC analyst has confirmed and delivered \u2014 via the v1 REST API, with the affected host resolved from its agent. Read-only.",
+    "docs_url": "/docs/connectors/huntress",
+    "fields": [
+      {
+        "help_text": "The public half of a Huntress API credential. It is half of the credential, so the vault encrypts it too.",
+        "label": "API key",
+        "name": "api_key",
+        "required": true,
+        "type": "secret"
+      },
+      {
+        "help_text": "Generated with the API key at <your subdomain>.huntress.io under API Credentials.",
+        "label": "API secret key",
+        "name": "api_secret",
+        "required": true,
+        "type": "secret"
       }
     ]
   },
@@ -3718,6 +3790,40 @@
         "name": "buffer_size",
         "required": false,
         "type": "string"
+      }
+    ]
+  },
+  {
+    "capabilities": [
+      "pull_alerts"
+    ],
+    "category": "ndr",
+    "connector_id": "vectra_ai",
+    "connector_name": "Vectra AI Platform",
+    "description": "Network, identity and cloud detections from the Vectra AI Platform via the v3.4 detection events API, one alert per detection with its host or account. Read-only: nothing here closes, tags or triages a detection.",
+    "docs_url": "/docs/connectors/vectra-ai",
+    "fields": [
+      {
+        "help_text": "The address of your Vectra AI Platform console. HTTPS only.",
+        "label": "Portal URL",
+        "name": "base_url",
+        "placeholder": "https://123456789012.uw2.portal.vectra.ai",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "help_text": "Created under Configuration > Access > API Clients, with a role that can read detections.",
+        "label": "API client ID",
+        "name": "client_id",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "help_text": "Shown once, when the API client is created.",
+        "label": "API client secret key",
+        "name": "client_secret",
+        "required": true,
+        "type": "secret"
       }
     ]
   },

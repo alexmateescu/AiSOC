@@ -6,7 +6,7 @@
 > async coroutines, valid capabilities, secret fields marked `secret`).
 > Live-vendor sandbox smoke is a separate wave; this gates the contract.
 
-**92 / 92 connectors conform** to the runtime contract.
+**95 / 95 connectors conform** to the runtime contract.
 
 | connector | category | fields | vaulted | caps | test_connection | fetch_alerts | normalize |
 |-----------|----------|-------:|--------:|-----:|:---------------:|:------------:|:---------:|
@@ -27,6 +27,7 @@
 | box | saas | 1 | 1 | 3 | ✅ | ✅ | ✅ |
 | carbon_black | edr | 4 | 1 | 6 | ✅ | ✅ | ✅ |
 | chronicle | siem | 4 | 1 | 5 | ✅ | ✅ | ✅ |
+| cisco_secure_endpoint | edr | 3 | 1 | 1 | ✅ | ✅ | ✅ |
 | cisco_umbrella | network | 3 | 2 | 5 | ✅ | ✅ | ✅ |
 | cloudflare | saas | 2 | 1 | 1 | ✅ | ✅ | ✅ |
 | cloudflare_zt | network | 4 | 1 | 3 | ✅ | ✅ | ✅ |
@@ -53,6 +54,7 @@
 | gitlab | vcs | 3 | 1 | 2 | ✅ | ✅ | ✅ |
 | google_workspace | saas | 2 | 1 | 1 | ✅ | ✅ | ✅ |
 | greynoise | saas | 2 | 1 | 2 | ✅ | ✅ | ✅ |
+| huntress | edr | 2 | 2 | 1 | ✅ | ✅ | ✅ |
 | imperva | network | 3 | 1 | 3 | ✅ | ✅ | ✅ |
 | jira | saas | 3 | 1 | 3 | ✅ | ✅ | ✅ |
 | jumpcloud | iam | 1 | 1 | 2 | ✅ | ✅ | ✅ |
@@ -97,6 +99,7 @@
 | trellix_helix | siem | 3 | 1 | 4 | ✅ | ✅ | ✅ |
 | trend_vision_one | edr | 2 | 1 | 5 | ✅ | ✅ | ✅ |
 | vault | iam | 4 | 1 | 2 | ✅ | ✅ | ✅ |
+| vectra_ai | ndr | 3 | 1 | 1 | ✅ | ✅ | ✅ |
 | wazuh | siem | 7 | 1 | 5 | ✅ | ✅ | ✅ |
 | windows_event | edr | 3 | 1 | 3 | ✅ | ✅ | ✅ |
 | wiz | cloud | 7 | 1 | 2 | ✅ | ✅ | ✅ |
