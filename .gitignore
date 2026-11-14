@@ -187,3 +187,6 @@ plugins/*/go/*-test
 # only exists on a host that has actually been upgraded, which is never a
 # contributor's checkout.
 /backups/
+
+# local scrape secret (not committed)
+infra/docker/secrets/

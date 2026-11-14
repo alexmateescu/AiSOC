@@ -1894,6 +1894,8 @@ services:
       # new rule file under `infra/docker/alerts/` is picked up on
       # next `docker compose restart prometheus` (or a SIGHUP).
       - ./infra/docker/alerts:/etc/prometheus/alerts:ro
+      # Bearer token file for the agents /metrics scrape (METRICS_TOKEN).
+      - ./infra/docker/secrets:/etc/prometheus/secrets:ro
       # All metrics history. Without this a recreate starts an empty TSDB,
       # so every before-and-after an operator was keeping is gone.
       - prometheus_data:/prometheus

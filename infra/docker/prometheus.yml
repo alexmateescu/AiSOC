@@ -124,5 +124,8 @@ scrape_configs:
   # llm stays flat means the LLM path is failing open to the fallback, which
   # looks fine from outside because alerts still get verdicts.
   - job_name: aisoc-agents
+    # agents /metrics is bearer-gated by METRICS_TOKEN (upstream #1823).
+    authorization:
+      credentials_file: /etc/prometheus/secrets/metrics_token
     static_configs:
       - targets: ["agents:8084"]
