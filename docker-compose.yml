@@ -633,6 +633,7 @@ services:
       AISOC_PUBLISHED_BIND_ADDRS: ${AISOC_CONSOLE_BIND_ADDR:-${AISOC_BIND_ADDR:-127.0.0.1}},${AISOC_BIND_ADDR:-127.0.0.1}
       HTTP_PORT: 8080
       METRICS_PORT: 9090
+      METRICS_TOKEN: ${METRICS_TOKEN:-}
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       REDIS_URL: redis://:${REDIS_PASSWORD:-redis_dev_secret}@redis:6379/1
       # The inbox webhook routes (/v1/inbox/*) mount only when this is set,
