@@ -203,7 +203,8 @@ def make_chat_model(
     # reasoning budget so the whole ceiling buys answer tokens. The gateway runs
     # drop_params: true, so providers without the knob ignore it; a caller can
     # still opt back in via extra_body for deep-analysis roles.
-    params["extra_body"] = {"enable_thinking": False, **(kwargs.pop("extra_body", None) or {})}
+    thinking_off = os.environ.get("AISOC_LLM_THINKING", "").strip().lower() not in ("1", "true", "on")
+    params["extra_body"] = {"enable_thinking": not thinking_off, **(kwargs.pop("extra_body", None) or {})}
     if json_output:
         # Via ``model_kwargs`` rather than as a top-level argument. ChatOpenAI
         # does not declare ``response_format`` as a field, so passing it
