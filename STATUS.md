@@ -83,3 +83,11 @@ agents/api scrape 401'd. Fixed 55f1c978f: bearer credentials_file (untracked
 infra/docker/secrets/, mode 644) on api+agents+ingest jobs; ingest target
 corrected 9090->8080 (no listener on 9090); dead fusion job removed (no
 /metrics route). All scrape targets now up, zero /metrics 401s.
+
+## Bulk cleanup of inventory backfill (14-Nov 05:55 UTC)
+Alexandru chose option 2. Scope verified first: exactly 5516 alerts, all
+connector_type=inventory, ALL stamped the same microsecond (2026-11-12
+00:54:46.989997) = one snapshot dump; distinct CVE-posture items (cve,
+cvss, patch_due_date), zero non-inventory in scope. Resolved as
+benign_true_positive with tags bulk-backfill-cleanup + per-row rationale in
+ai_recommendations. Queue: new=0, triaged=12 for operator review.
