@@ -76,3 +76,10 @@ green, web 200, truncation gate + token passthrough verified intact.
 NOTE: Wazuh durable-cursor backfill dumped ~5.5k historical alerts into
 'new' queue as expected — operator triage backlog now needs a bulk-triage
 decision (awaiting Alexandru).
+
+## Prometheus scrape reconciliation (14-Nov 05:40 UTC)
+Upstream #1823 gave agents a METRICS_TOKEN but never the scraper -> every
+agents/api scrape 401'd. Fixed 55f1c978f: bearer credentials_file (untracked
+infra/docker/secrets/, mode 644) on api+agents+ingest jobs; ingest target
+corrected 9090->8080 (no listener on 9090); dead fusion job removed (no
+/metrics route). All scrape targets now up, zero /metrics 401s.
