@@ -101,3 +101,14 @@ rows with ZERO meeting the bar (0 overdue/0 >9/0 exploited), all qualifying
 CVEs already have alert rows -> next sweeps insert nothing. Queue stays at
 operator triage only. Watch: connectors sweep log silent since restart —
 confirm _vuln_promotion_loop alive at next 6h window.
+
+## Thinking-token starvation fix (14-Nov ~07:50 UTC)
+User hypothesis confirmed: the model emits thinking tokens that count
+against max_tokens. Probe evidence: default call -> reasoning_content
+15112 chars, content="" , finish=length, reasoning_tokens=4093/4096.
+thinking:{disabled} and thinking_budget:0 are IGNORED by this gateway;
+enable_thinking:false works. Fix in factory.py make_chat_model:
+extra_body enable_thinking=false on every gateway call. Post-fix probe:
+150-finding JSON, finish=stop, reasoning_tokens=0, parses clean. This is
+also the root cause of the earlier 8192 'rambling' - it was thinking, not
+answer ramble. Rebuilt+redeployed aisoc-agents; pushed to fork.
